@@ -1,3 +1,8 @@
+'''
+本模块的实现逻辑参考了 MaaFramework( https://github.com/MaaXYZ/MaaFramework )
+因此本文件遵循LGPL-3.0协议
+如果你不需要在 MuMu 模拟器12 上使用本程序，你可以删除这一文件。
+'''
 import ctypes
 from ctypes import wintypes
 from pathlib import Path

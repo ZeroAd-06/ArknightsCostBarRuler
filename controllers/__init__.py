@@ -1,8 +1,6 @@
 from typing import Dict, Any
 
 from .base import BaseCaptureController
-from .minicap import MinicapController
-from .mumu import MuMuPlayerController
 
 
 def create_capture_controller(config: Dict[str, Any]) -> BaseCaptureController:
@@ -27,12 +25,14 @@ def create_capture_controller(config: Dict[str, Any]) -> BaseCaptureController:
     print(f"--- 正在根据配置创建 '{controller_type}' 控制器 ---")
 
     if controller_type == "mumu":
+        from .mumu import MuMuPlayerController
         install_path = config.get("install_path")
         if not install_path:
             raise ValueError("类型为 'mumu' 的配置必须包含 'install_path'。")
         return MuMuPlayerController(mumu_install_path=install_path)
 
     elif controller_type == "minicap":
+        from .minicap import MinicapController
         device_id = config.get("device_id")
         return MinicapController(device_id=device_id)
 

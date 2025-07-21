@@ -33,6 +33,14 @@
     - 等待校准自动完成。
 5.  **开始使用**: 校准完成后，悬浮窗将实时显示逻辑帧数。
 
+## 从源码运行
+
+1.  克隆本仓库: `git clone https://github.com/ZeroAd-06/ArknightsCostBarRuler.git`
+2.  下载Minicap二进制文件: `https://github.com/openatx/stf-binaries/tree/master/node_modules/minicap-prebuilt/prebuilt` 并添加到目录 `controllers/minicap` 中。
+3.  安装Python 3.8+。
+4.  安装依赖: `pip install Pillow`
+5.  运行主程序: `python main.py`
+
 ## 注意
 
 *  该程序在以下环境下不可用: 
@@ -43,13 +51,6 @@
     - 关闭程序并重新打开。
     - 删除 `config.json` 。
     - 在 [Issue 页面](https://github.com/ZeroAd-06/ArknightsCostBarRuler/issues) 报告问题。
-
-## 从源码运行
-
-1.  克隆本仓库: `git clone https://github.com/ZeroAd-06/ArknightsCostBarRuler.git`
-2.  安装Python 3.8+。
-3.  安装依赖: `pip install Pillow`
-4.  运行主程序: `python main.py`
 
 ## 许可 & 致谢
 

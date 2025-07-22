@@ -50,6 +50,7 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         # 将结果发送给UI
                         ui_queue.put({"type": "update", "frame": logical_frame})
 
+
                 else:
                     # --- 状态: 等待校准 ---
                     ui_queue.put({"type": "state_change", "state": "pre_calibration"})
@@ -94,7 +95,7 @@ def main_loop():
     # 2. 初始化UI和通信队列
     # ui_queue: 工作线程 -> UI线程 (数据和状态更新)
     # command_queue: UI线程 -> 工作线程 (用户命令)
-    ui_queue = queue.Queue()
+    ui_queue = queue.Queue(maxsize=1)
     command_queue = queue.Queue()
     overlay = OverlayWindow(
         master_callback=lambda cmd: command_queue.put(cmd),

@@ -111,7 +111,6 @@ def calibrate(controller: BaseCaptureController, num_cycles: int = 5,
 
             if current_cost_state_raw is None:
                 previous_cost_state_raw = None
-                time.sleep(0.1)  # 避免在无效状态下空转过快
                 continue
 
             if previous_cost_state_raw is not None and total_bar_width > 0:

@@ -1,9 +1,23 @@
-import math
+import os
+import sys
 from typing import Optional, Tuple, Dict
+
 from PIL import Image
 
 
-# _generate_progress_bar 函数不再需要，可以删除
+def resource_path(relative_path: str) -> str:
+    """
+    获取资源的绝对路径，无论是从源码运行还是从打包后的exe运行。
+    """
+    try:
+        # PyInstaller 创建一个临时文件夹，并把路径存储在 _MEIPASS 中
+        base_path = sys._MEIPASS
+    except Exception:
+        # 如果没有 _MEIPASS 属性，说明是直接从源码运行的
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
 
 def find_cost_bar_roi(screen_width: int, screen_height: int) -> tuple[int, int, int]:
     """

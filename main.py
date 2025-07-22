@@ -1,4 +1,6 @@
+import ctypes
 import queue
+import sys
 import threading
 import time
 
@@ -83,6 +85,17 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
 
 def main_loop():
     """主应用循环"""
+    if sys.platform == "win32":
+        try:
+            # SHCORE.dll存在于Windows 8.1+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            # USER32.dll兼容旧版Windows
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except (AttributeError, OSError):
+                pass # 在非常旧或非Windows系统上，优雅地失败
+
     # 1. 加载或创建配置 (在主线程中安全执行)
     config = load_config()
     if not config:

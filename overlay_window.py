@@ -5,7 +5,7 @@ from typing import Optional
 
 from PIL import Image, ImageTk
 
-from utils import find_cost_bar_roi
+from utils import find_cost_bar_roi, resource_path
 
 
 class OverlayWindow:
@@ -26,11 +26,11 @@ class OverlayWindow:
         try:
             icon_names = ["start", "wait", "deco"]
             for name in icon_names:
-                path = os.path.join("icons", f"{name}.png")
+                path = resource_path(os.path.join("icons", f"{name}.png"))
                 img = Image.open(path).convert("RGBA")
                 self.icons[name] = ImageTk.PhotoImage(image=img)
         except FileNotFoundError as e:
-            print(f"错误: 缺少图标文件 {e.filename}。请先运行 setup_assets.py 生成图标。")
+            print(f"错误: 缺少图标文件 {e.filename}。")
             img = Image.new("RGBA", (64, 64), (255, 0, 0, 128))
             self.icons["error"] = ImageTk.PhotoImage(image=img)
 
@@ -91,7 +91,7 @@ class OverlayWindow:
         size = int(height * 0.8)
         try:
             for name in ["start", "wait", "deco"]:
-                path = os.path.join("icons", f"{name}.png")
+                path = resource_path(os.path.join("icons", f"{name}.png"))
                 img = Image.open(path).resize((size, size), Image.Resampling.LANCZOS)
                 self.icons[name] = ImageTk.PhotoImage(image=img)
         except Exception as e:
@@ -199,6 +199,6 @@ class OverlayWindow:
         self._create_widgets()
 
         # 启动UI队列轮询
-        self._process_ui_queue()
+        self.root.after(100, self._process_ui_queue)
 
         self.root.mainloop()

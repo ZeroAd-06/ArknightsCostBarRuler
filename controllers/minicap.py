@@ -9,6 +9,7 @@ from typing import Optional
 from PIL import Image
 
 from .base import BaseCaptureController
+from utils import resource_path
 
 
 class MinicapController(BaseCaptureController):
@@ -27,7 +28,7 @@ class MinicapController(BaseCaptureController):
             local_port (int): 用于 ADB 端口转发的本地 TCP 端口。
         """
         self.device_id = device_id
-        self.minicap_base_path = Path(minicap_path)
+        self.minicap_base_path = Path(resource_path(minicap_path))
         self.local_port = local_port
         self.remote_path = "/data/local/tmp"
 

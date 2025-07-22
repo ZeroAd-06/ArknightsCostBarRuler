@@ -49,7 +49,6 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
 
                         # 将结果发送给UI
                         ui_queue.put({"type": "update", "frame": logical_frame})
-                        time.sleep(0.05) # 避免CPU占用过高
 
                 else:
                     # --- 状态: 等待校准 ---

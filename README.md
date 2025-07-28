@@ -53,6 +53,10 @@
     - 关闭程序并重新打开。
     - 删除 `config.json` 。
     - 在 [Issue 页面](https://github.com/ZeroAd-06/ArknightsCostBarRuler/issues) 报告问题。
+*  如果出现错误"!!! 工作线程出错: 在指定的MuMu安装目录中未找到 'external_renderer_ipc.dll'。 "
+    - 确保路径不以"shell"或"nx_main"结尾，如果是，**删去路径末尾的"shell"或"nx_main"**
+    - **正确示范**: "D:\Game\Android\YXArkNights-12.0"
+    - 错误示范: "D:\Game\Android\YXArkNights-12.0\shell"
 *  我是一个6周年入坑的小登，游戏理解只能算中杯，因此: 
     - 我没有打过合约，也不确定这是否符合极限玩家的需要。
     - 如果你觉得该项目显示的帧数与你所想的不一致，很有可能是我的问题。

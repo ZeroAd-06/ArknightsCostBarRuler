@@ -141,6 +141,7 @@ class MuMuPlayerController(BaseCaptureController):
         buffer_size = self.width * self.height * 4
         self.buffer = (ctypes.c_ubyte * buffer_size)()
         print(f"    图像缓冲区已创建 (大小: {buffer_size} 字节)。")
+        return self
 
     def capture_frame(self) -> Image.Image:
         """
@@ -185,7 +186,7 @@ class MuMuPlayerController(BaseCaptureController):
 
 
 if __name__ == '__main__':
-    MUMU_PATH = r""
+    MUMU_PATH = r"D:\Game\Android\YXArkNights-12.0\shell"
 
     try:
         with MuMuPlayerController(mumu_install_path=MUMU_PATH) as mumu_cap:

@@ -134,6 +134,8 @@ class MinicapController(BaseCaptureController):
 
             self._read_global_header()
 
+            return self
+
         except (subprocess.CalledProcessError, ConnectionError, FileNotFoundError, RuntimeError) as e:
             print(f"!!! 连接失败: {e}")
             self.disconnect()

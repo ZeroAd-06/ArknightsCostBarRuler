@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import os
+import ttkbootstrap as ttk
 
 from calibration_manager import (load_calibration_by_filename, calibrate, save_calibration_data,
                                  remove_calibration_file, get_calibration_basename,
@@ -43,16 +44,17 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
 
         # --- 阶段 3: 主事件循环 ---
         while True:
-            # 阻塞等待一个指令，这是事件驱动的起点
             command = command_queue.get()
 
-            # --- 指令处理 ---
+            if command["type"] == "prepare_calibration":
+                current_profile_filename = None
+                calibration_data = None
+                ui_queue.put({"type": "state_change", "state": "pre_calibration"})
+                continue
 
-            # --- 指令: 删除校准配置 ---
-            if command["type"] == "delete_profile":
+            elif command["type"] == "delete_profile":
                 filename_to_delete = command["filename"]
                 if remove_calibration_file(filename_to_delete):
-                    print(f"已删除配置: {filename_to_delete}")
                     if filename_to_delete == current_profile_filename:
                         current_profile_filename = None
                         calibration_data = None
@@ -60,9 +62,8 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         save_config(config)
                         ui_queue.put({"type": "state_change", "state": "idle"})
                     ui_queue.put({"type": "profiles_changed"})
-                continue  # 处理完指令后，等待下一个
+                continue
 
-            # --- 指令: 重命名校准配置 ---
             elif command["type"] == "rename_profile":
                 old_filename = command["old"]
                 new_basename = command["new_base"]
@@ -74,15 +75,13 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                             loaded_data['screen_width'], loaded_data['screen_height'], basename=new_basename
                         )
                         remove_calibration_file(old_filename)
-                        print(f"'{old_filename}' 已重命名为 '{new_filename}'")
                         if old_filename == current_profile_filename:
                             command_queue.put({"type": "use_profile", "filename": new_filename})
                         ui_queue.put({"type": "profiles_changed"})
                 except Exception as e:
                     print(f"重命名失败: {e}")
-                continue  # 处理完指令后，等待下一个
+                continue
 
-            # --- 指令: 开始校准 ---
             elif command["type"] == "start_calibration":
                 ui_queue.put({"type": "state_change", "state": "calibrating"})
                 try:
@@ -92,7 +91,7 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     new_cal_data = calibrate(cap, progress_callback=progress_callback_for_ui)
 
                     should_replace_old = False
-                    if calibration_data:
+                    if calibration_data and current_profile_filename:
                         time_diff = time.time() - calibration_data.get('calibration_time', 0)
                         if time_diff < 60:
                             should_replace_old = True
@@ -106,7 +105,6 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         new_filename = save_calibration_data(new_cal_data, width, height, basename=new_basename)
 
                     ui_queue.put({"type": "profiles_changed"})
-                    # 校准后自动选用
                     command_queue.put({"type": "use_profile", "filename": new_filename})
 
                 except RuntimeError as e:
@@ -115,9 +113,8 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         command_queue.put({"type": "use_profile", "filename": current_profile_filename})
                     else:
                         ui_queue.put({"type": "state_change", "state": "idle"})
-                continue  # 处理完指令后，等待下一个
+                continue
 
-            # --- 指令: 使用校准配置 (这将启动持续分析) ---
             elif command["type"] == "use_profile":
                 filename = command["filename"]
                 new_data = load_calibration_by_filename(filename)
@@ -134,26 +131,21 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     })
                     print(f"已切换到配置: {filename}, 开始持续分析...")
 
-                    # --- 持续分析的内部循环 ---
                     while True:
-                        # 检查是否有新的指令来中断分析
                         try:
                             interrupt_command = command_queue.get_nowait()
-                            command_queue.put(interrupt_command)  # 把指令放回去，让外层循环处理
+                            command_queue.put(interrupt_command)
                             print("分析被中断，处理新指令...")
-                            break  # 跳出内部循环
+                            break
                         except queue.Empty:
-                            pass  # 没有新指令，继续分析
+                            pass
 
-                        # 执行分析
                         frame = cap.capture_frame()
                         roi = find_cost_bar_roi(width, height)
                         logical_frame = get_logical_frame_from_calibration(frame, roi, calibration_data)
                         ui_queue.put({"type": "update", "frame": logical_frame})
-
-                        time.sleep(0.02)  # 控制刷新率，避免CPU占用过高
+                        time.sleep(0.02)
                 else:
-                    # 加载失败
                     print(f"错误: 无法加载配置 {filename}")
                     current_profile_filename = None
                     calibration_data = None
@@ -162,14 +154,13 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     ui_queue.put({"type": "state_change", "state": "idle"})
                     ui_queue.put({"type": "profiles_changed"})
 
-
     except (ValueError, FileNotFoundError, ConnectionError, RuntimeError) as e:
         print(f"\n!!! 工作线程出错: {e}")
         ui_queue.put({"type": "error", "message": str(e)})
     except KeyboardInterrupt:
         pass
     finally:
-        if controller:  # 使用controller来断开，因为它肯定存在
+        if controller:
             controller.disconnect()
 
 
@@ -184,20 +175,33 @@ def main_loop():
             except (AttributeError, OSError):
                 pass
 
+    # --- [核心修复] ---
+    # 1. 在所有UI操作前，创建唯一的、隐藏的根窗口
+    # 这个 root 将贯穿整个应用的生命周期
+    root = ttk.Window(themename="litera")
+    root.withdraw()
+
+    # 2. 加载配置
     config = load_config()
     if not config:
         print("未找到配置文件，启动首次设置向导...")
-        config = create_config_with_gui()
+        # 3. 将根窗口作为父窗口传入配置向导
+        config = create_config_with_gui(root)
         if not config:
             print("配置未完成，程序退出。")
+            root.destroy()  # 如果用户退出向导，销毁根窗口并退出
             return
 
+    # 4. 只有在配置完成后，才继续创建其他组件
     ui_queue = queue.Queue(maxsize=1)
     command_queue = queue.Queue()
+    # 5. 将同一个根窗口作为父窗口传入悬浮窗
     overlay = OverlayWindow(
         master_callback=command_queue.put,
-        ui_queue=ui_queue
+        ui_queue=ui_queue,
+        parent_root=root
     )
+    # --- [修复结束] ---
 
     worker = threading.Thread(
         target=analysis_worker,
@@ -208,6 +212,7 @@ def main_loop():
     print("分析工作线程已启动...")
 
     try:
+        # 现在 overlay.run() 会启动那个唯一的 root 的 mainloop
         overlay.run()
     except KeyboardInterrupt:
         print("\n\n程序已退出。")

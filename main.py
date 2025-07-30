@@ -48,6 +48,9 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
     timer_offset_frames = 0
     last_known_total_frames = 0
 
+    lap_timer_active = False
+    lap_start_frame = 0
+
     try:
         controller = create_capture_controller(config)
         cap = controller.connect()
@@ -65,19 +68,20 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
         while True:
             command = command_queue.get()
 
-            # --- [核心修复] 移除了此处的状态重置逻辑 ---
-
             if command["type"] in ["prepare_calibration", "start_calibration"]:
                 timer_offset_frames = 0
                 cycle_counter = 0
                 previous_logical_frame = -1
                 last_known_total_frames = 0
+                lap_timer_active = False  # 重置单圈计时
 
             if command["type"] == "prepare_calibration":
+                # ... 代码不变 ...
                 current_profile_filename = None
                 calibration_data = None
                 ui_queue.put({"type": "state_change", "state": "pre_calibration"})
                 continue
+
             elif command["type"] == "delete_profile":
                 filename_to_delete = command["filename"]
                 if remove_calibration_file(filename_to_delete):
@@ -87,10 +91,13 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         config["active_calibration_profile"] = None
                         save_config(config)
                         timer_offset_frames = 0
+                        lap_timer_active = False
                         ui_queue.put({"type": "state_change", "state": "idle"})
                     ui_queue.put({"type": "profiles_changed"})
                 continue
+
             elif command["type"] == "rename_profile":
+                # ... 代码不变 ...
                 old_filename = command["old"]
                 new_basename = command["new_base"]
                 try:
@@ -107,6 +114,7 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                 except Exception as e:
                     print(f"重命名失败: {e}")
                 continue
+
             elif command["type"] == "start_calibration":
                 ui_queue.put({"type": "state_change", "state": "calibrating"})
                 try:
@@ -114,7 +122,6 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         ui_queue.put({"type": "calibration_progress", "progress": progress})
 
                     new_cal_data = calibrate(cap, progress_callback=progress_callback_for_ui)
-
                     should_replace_old = False
                     if calibration_data and current_profile_filename:
                         time_diff = time.time() - calibration_data.get('calibration_time', 0)
@@ -159,19 +166,27 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     })
                     print(f"已切换到配置: {filename}, 开始持续分析...")
 
-                    # --- [核心修复] 将状态重置移到此处 ---
                     cycle_counter = 0
                     previous_logical_frame = -1
                     last_detection_time = time.time()
                     last_known_total_frames = timer_offset_frames
-                    # --- [结束修复] ---
+                    lap_timer_active = False  # 切换配置时重置单圈计时
 
                     while True:
                         try:
-                            interrupt_command = command_queue.get_nowait()
-                            command_queue.put(interrupt_command)
-                            print("分析被中断，处理新指令...")
-                            break
+                            cmd = command_queue.get_nowait()
+                            if cmd.get("type") == "toggle_lap_timer":
+                                if not lap_timer_active:
+                                    lap_timer_active = True
+                                    lap_start_frame = last_known_total_frames
+                                    print(f"单圈计时器启动，起始帧: {lap_start_frame}")
+                                else:
+                                    lap_timer_active = False
+                                    print("单圈计时器停止。")
+                            else:
+                                command_queue.put(cmd)  # 如果是其他指令，放回队列并中断
+                                print("分析被中断，处理新指令...")
+                                break
                         except queue.Empty:
                             pass
 
@@ -203,10 +218,21 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                                     cycle_counter = 0
                                     last_known_total_frames = 0
                                     timer_offset_frames = 0
+                                    lap_timer_active = False  # 完全重置时也关闭单圈计时
 
                         time_str = format_time_from_frames(last_known_total_frames)
 
-                        ui_queue.put({"type": "update", "frame": logical_frame, "time_str": time_str})
+                        lap_frames_to_display = None
+                        if lap_timer_active:
+                            lap_frames_to_display = last_known_total_frames - lap_start_frame
+
+                        # 向UI发送包含所有需要更新的数据
+                        ui_queue.put({
+                            "type": "update",
+                            "frame": logical_frame,
+                            "time_str": time_str,
+                            "lap_frames": lap_frames_to_display
+                        })
 
                         time.sleep(0.02)
                 else:
@@ -244,7 +270,7 @@ def main():
 
     config = load_config()
     if not config:
-        print("未找到配置文件，启动首次设置向đạo...")
+        print("未找到配置文件，启动首次设置向导...")
         config = create_config_with_gui(root)
         if not config:
             print("配置未完成，程序退出。")

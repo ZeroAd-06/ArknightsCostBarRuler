@@ -1,8 +1,10 @@
 import os
 import queue
+import sys
 import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.dialogs import Querybox, Messagebox
+from tkinter import font as tkFont
 import webbrowser
 import threading
 from pystray import MenuItem as item, Menu, Icon
@@ -25,17 +27,12 @@ class OverlayWindow:
         self.tray_icon: Optional[Icon] = None
         self.active_profile_filename: Optional[str] = None
 
-        # --- [新增] 为计时器标签初始化 ---
-        self.timer_label: Optional[ttk.Label] = None
-
     def run(self):
         self.root = ttk.Toplevel(self.parent_root)
-
         self.root.overrideredirect(True)
         self.root.wm_attributes("-topmost", True)
         self.root.wm_attributes("-alpha", 0.75)
-        # 将窗口背景设置为一个几乎不可能被用作透明色的颜色
-        self.root.wm_attributes("-transparentcolor", "cyan")
+        self.root.config(bg='white')
         self.root.withdraw()
 
         self._load_icons()
@@ -46,11 +43,6 @@ class OverlayWindow:
         self.parent_root.mainloop()
 
     def _create_widgets(self):
-        # 使用一个容器Frame来容纳所有内容，并设置其背景色为透明色
-        container = ttk.Frame(self.root, style='TFrame')
-        container.pack(expand=True, fill='both')
-        self.root.config(bg='white')
-
         overlay_bg = '#3a3a3a'
         style = ttk.Style()
         style.configure('Overlay.TFrame', background=overlay_bg)
@@ -60,54 +52,63 @@ class OverlayWindow:
         style.configure('Overlay.TButton', background=overlay_bg, borderwidth=0, highlightthickness=0, padding=0)
         style.map('Overlay.TButton', background=[('active', 'gray40')])
 
+        container = ttk.Frame(self.root, style='Overlay.TFrame')
+        container.pack(expand=True, fill='both')
+
         self.left_frame = ttk.Frame(container, style='Overlay.TFrame')
         self.left_frame.place(relx=0, rely=0, relwidth=0.33, relheight=1.0)
-
         self.icon_button = ttk.Button(self.left_frame, style='Overlay.TButton')
         self.icon_button.pack(expand=True, fill="both")
 
         self.right_frame = ttk.Frame(container, style='Overlay.TFrame')
         self.right_frame.place(relx=0.33, rely=0, relwidth=0.67, relheight=1.0)
-
         self.right_frame.bind("<ButtonPress-1>", self._on_drag_start)
         self.right_frame.bind("<ButtonRelease-1>", self._on_drag_stop)
         self.right_frame.bind("<B1-Motion>", self._on_drag_motion)
 
-        self.pre_cal_label = ttk.Label(self.right_frame, text="", style='Overlay.TLabel', font=("Segoe UI", 11),
-                                       justify='center')
+        self.pre_cal_label = ttk.Label(self.right_frame, text="", style='Overlay.TLabel', font=("Segoe UI", 11), justify='center')
         self.cal_progress_label = ttk.Label(self.right_frame, text="0%", style='Overlay.TLabel', font=("Segoe UI", 34))
         self.running_frame_label = ttk.Label(self.right_frame, text="--", style='Overlay.TLabel', font=("Segoe UI", 34))
-
-        # --- [核心修改] ---
-        # 总帧数标签的父控件改为 container，以便统一管理
         self.running_total_label = ttk.Label(container, text="/--", style='Overlay.Total.TLabel', font=("Segoe UI", 12))
 
-        # 创建新的计时器标签，字体稍小
-        self.timer_label = ttk.Label(container, text="00:00:00", style='Overlay.Timer.TLabel', font=("Segoe UI", 10))
-        # --- [结束修改] ---
+        self.timer_container = ttk.Frame(container, style='Overlay.TFrame')
+        self.timer_icon_label = ttk.Label(self.timer_container, style='Overlay.TLabel')
+
+        self.timer_icon_label.pack(side=tk.LEFT)
+
+        self.timer_label = ttk.Label(self.timer_container, text="00:00:00", style='Overlay.Timer.TLabel', font=("Segoe UI", 10), cursor="hand2")
+        self.timer_label.pack(side=tk.LEFT)
+        self.timer_label.bind("<Button-1>", self._on_timer_click)
+
+        self.lap_container = ttk.Frame(container, style='Overlay.TFrame')
+        self.lap_icon_label = ttk.Label(self.lap_container, style='Overlay.TLabel')
+        self.lap_icon_label.pack(side=tk.LEFT)
+
+        self.lap_frame_label = ttk.Label(self.lap_container, text="0", style='Overlay.Timer.TLabel', font=("Segoe UI", 10))
+        self.lap_frame_label.pack(side=tk.LEFT)
+        # --- [结束修改 1] ---
+
+    def _on_timer_click(self, event=None):
+        self.master_callback({"type": "toggle_lap_timer"})
 
     def _hide_all_dynamic_labels(self):
         self.pre_cal_label.place_forget()
         self.cal_progress_label.place_forget()
         self.running_frame_label.place_forget()
         self.running_total_label.place_forget()
-        if self.timer_label:
-            self.timer_label.place_forget()
+        self.timer_container.place_forget()
+        self.lap_container.place_forget()
 
     def set_state_running(self, total_frames: int, active_profile: str):
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('deco'), command=None)
 
-        self.running_frame_label.place(relx=1.0, rely=0.5, anchor='e', x=-40)
+        self.running_frame_label.place(relx=1.0, rely=0.4, anchor='e', x=-40)
 
-        # --- [核心修改] 调整标签布局 ---
-        # 总帧数显示在右下角
         self.running_total_label.config(text=f"/{total_frames - 1}")
         self.running_total_label.place(relx=1.0, rely=1.0, anchor='se', x=-5, y=-5)
 
-        # 计时器显示在整个悬浮窗的左下角
-        self.timer_label.place(relx=0.0, rely=1.0, anchor='sw', x=5, y=-5)
-        # --- [结束修改] ---
+        self.timer_container.place(relx=0.0, rely=1.0, anchor='sw', x=5, y=-5)
 
         self.active_profile_filename = active_profile
         self._update_tray_menu()
@@ -118,24 +119,27 @@ class OverlayWindow:
         else:
             self.running_frame_label.config(text="--")
 
-    # --- [新增] 更新计时器的方法 ---
     def update_timer(self, time_str: str):
-        if self.timer_label:
-            self.timer_label.config(text=time_str)
+        self.timer_label.config(text=time_str)
 
-    # --- [结束新增] ---
+    def update_lap_timer(self, lap_frames: Optional[int]):
+        if lap_frames is not None:
+            self.lap_frame_label.config(text=f"{lap_frames}")
+            self.lap_container.place(relx=0.0, rely=0.0, anchor='nw', x=5, y=5)
+        else:
+            self.lap_container.place_forget()
 
     def _process_ui_queue(self):
         try:
             message = self.ui_queue.get_nowait()
             msg_type = message.get("type")
 
-            # --- [核心修改] 处理新的UI更新信息 ---
             if msg_type == "update":
                 self.update_running_display(message["frame"])
                 if "time_str" in message:
                     self.update_timer(message["time_str"])
-            # --- [结束修改] ---
+                if "lap_frames" in message:
+                    self.update_lap_timer(message["lap_frames"])
 
             elif msg_type == "geometry":
                 self.setup_geometry(message["width"], message["height"])
@@ -164,9 +168,59 @@ class OverlayWindow:
             if self.root and self.root.winfo_exists():
                 self.root.after(50, self._process_ui_queue)
 
-    # ... 其余所有方法（如 _load_icons, setup_geometry, 托盘图标相关等）保持不变 ...
-    # 为了简洁，这里省略了未改动的代码，但你应该使用你自己的完整文件
-    # 以下是为保证代码完整性而补充的其余方法
+    def _load_icons(self):
+        try:
+            icon_names = ["start", "wait", "deco", "timer"]
+            for name in icon_names:
+                path = resource_path(os.path.join("icons", f"{name}.png"))
+                img = Image.open(path).convert("RGBA")
+                self.icons[name] = ImageTk.PhotoImage(image=img)
+        except FileNotFoundError as e:
+            print(f"错误: 缺少图标文件 {e.filename}。请先运行 setup_assets.py")
+            sys.exit(1)
+
+    def _resize_icons(self, size: int):
+        try:
+            timer_font = tkFont.Font(font=("Segoe UI", 10))
+            timer_height = timer_font.metrics('linespace')
+
+            for name in ["start", "deco"]:
+                path = resource_path(os.path.join("icons", f"{name}.png"))
+                img = Image.open(path).resize((size, size), Image.Resampling.LANCZOS)
+                self.icons[name] = ImageTk.PhotoImage(image=img)
+
+            wait_path = resource_path(os.path.join("icons", "wait.png"))
+            wait_img_large = Image.open(wait_path).resize((size, size), Image.Resampling.LANCZOS)
+            self.icons["wait"] = ImageTk.PhotoImage(image=wait_img_large)
+
+            timer_icon_path = resource_path(os.path.join("icons", "timer.png"))
+            timer_img = Image.open(timer_icon_path).resize((timer_height, timer_height), Image.Resampling.LANCZOS)
+            self.icons["timer_sized"] = ImageTk.PhotoImage(image=timer_img)
+            self.timer_icon_label.config(image=self.icons["timer_sized"])
+
+            lap_icon_path = resource_path(os.path.join("icons", "wait.png"))
+            lap_img = Image.open(lap_icon_path).resize((timer_height, timer_height), Image.Resampling.LANCZOS)
+            self.icons["lap_sized"] = ImageTk.PhotoImage(image=lap_img)
+            self.lap_icon_label.config(image=self.icons["lap_sized"])
+        except Exception as e:
+            print(f"调整图标大小时出错: {e}")
+
+    def setup_geometry(self, screen_width, screen_height):
+        roi_x1, roi_x2, _ = find_cost_bar_roi(screen_width, screen_height)
+        cost_bar_pixel_length = roi_x2 - roi_x1
+        win_width = int(cost_bar_pixel_length * 5 / 6)
+        win_height = int(win_width * 27 / 50)
+        actual_screen_width = self.root.winfo_screenwidth()
+        actual_screen_height = self.root.winfo_screenheight()
+        pos_x = actual_screen_width - win_width - 50
+        pos_y = actual_screen_height - win_height - 100
+        self.root.geometry(f"{win_width}x{win_height}+{pos_x}+{pos_y}")
+        button_width = int(win_width * 0.33)
+        button_height = win_height
+        icon_size = min(button_width, button_height)
+        self._resize_icons(icon_size)
+        self.root.deiconify()
+
     def _open_about_page(self, *args):
         webbrowser.open("https://github.com/ZeroAd-06/ArknightsCostBarRuler")
 
@@ -256,43 +310,6 @@ class OverlayWindow:
             print("托盘图标已启动。")
         except Exception as e:
             print(f"创建托盘图标失败: {e}")
-
-    def _load_icons(self):
-        try:
-            icon_names = ["start", "wait", "deco"]
-            for name in icon_names:
-                path = resource_path(os.path.join("icons", f"{name}.png"))
-                img = Image.open(path).convert("RGBA")
-                self.icons[name] = ImageTk.PhotoImage(image=img)
-        except FileNotFoundError as e:
-            print(f"错误: 缺少图标文件 {e.filename}。")
-            img = Image.new("RGBA", (64, 64), (255, 0, 0, 128))
-            self.icons["error"] = ImageTk.PhotoImage(image=img)
-
-    def setup_geometry(self, screen_width, screen_height):
-        roi_x1, roi_x2, _ = find_cost_bar_roi(screen_width, screen_height)
-        cost_bar_pixel_length = roi_x2 - roi_x1
-        win_width = int(cost_bar_pixel_length * 5 / 6)
-        win_height = int(win_width * 27 / 50)
-        actual_screen_width = self.root.winfo_screenwidth()
-        actual_screen_height = self.root.winfo_screenheight()
-        pos_x = actual_screen_width - win_width - 50
-        pos_y = actual_screen_height - win_height - 100
-        self.root.geometry(f"{win_width}x{win_height}+{pos_x}+{pos_y}")
-        button_width = int(win_width * 0.33)
-        button_height = win_height
-        icon_size = min(button_width, button_height)
-        self._resize_icons(icon_size)
-        self.root.deiconify()
-
-    def _resize_icons(self, size: int):
-        try:
-            for name in ["start", "wait", "deco"]:
-                path = resource_path(os.path.join("icons", f"{name}.png"))
-                img = Image.open(path).resize((size, size), Image.Resampling.LANCZOS)
-                self.icons[name] = ImageTk.PhotoImage(image=img)
-        except Exception as e:
-            print(f"调整图标大小时出错: {e}")
 
     def set_state_idle(self):
         self._hide_all_dynamic_labels()

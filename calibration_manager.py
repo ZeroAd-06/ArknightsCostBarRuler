@@ -137,7 +137,6 @@ def calibrate(controller: BaseCaptureController, num_cycles: int = 5,
 
             if progress_callback:
                 progress_callback(progress_percent)
-            # --- 结束进度部分 ---
 
             if current_cost_state_raw is None:
                 previous_cost_state_raw = None

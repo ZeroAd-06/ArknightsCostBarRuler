@@ -45,16 +45,11 @@ class ConfigWindow(ttk.Toplevel):
 
         self._create_widgets(main_frame)
         self._on_radio_change()
-
-        # --- [核心修复] ---
-        # 在窗口内容全部创建后，再进行居中
         self.update_idletasks()
         self.center_on_screen()
-        # --- [修复结束] ---
 
         self.resizable(False, False)
 
-    # --- [核心修复] ---
     # 添加一个屏幕居中的方法
     def center_on_screen(self):
         """将窗口置于屏幕中央。"""
@@ -66,7 +61,6 @@ class ConfigWindow(ttk.Toplevel):
         y = (screen_height // 2) - (height // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
 
-    # --- [修复结束] ---
 
     def _create_widgets(self, parent: ttk.Frame):
         parent.columnconfigure(0, weight=1)

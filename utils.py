@@ -46,35 +46,69 @@ def find_cost_bar_roi(screen_width: int, screen_height: int) -> tuple[int, int, 
 def _get_raw_filled_pixel_width(frame: Image.Image, roi: tuple[int, int, int]) -> Optional[int]:
     """
     从费用条ROI中提取填充部分的像素宽度。
+    此版本经过强化，会进行严格的颜色和透明度校验，以确保ROI确实是费用条。
     """
+    # 1. 定义严格的校验常量
+    # 白色阈值，250意味着R,G,B三个通道的值都必须大于250
+    WHITE_THRESHOLD = 250
+    # 灰度容差，允许R,G,B之间有微小的差异（例如由JPG压缩或渲染引起）
+    GRAY_TOLERANCE = 10
+    # Alpha通道必须为不透明
+    ALPHA_OPAQUE = 255
+
+    # 2. 内联辅助函数，用于检查灰度
+    def is_pixel_grayscale(r, g, b):
+        return abs(r - g) <= GRAY_TOLERANCE and abs(g - b) <= GRAY_TOLERANCE
+
+    # 3. ROI基础检查
     x1, x2, y = roi
     total_width = x2 - x1
-
     if total_width <= 0:
         return None
 
-    # 增加颜色判断的容差，使其更稳健
-    WHITE_THRESHOLD = 230
-    UNFILLED_GRAY_THRESHOLD = 90
+    # 4. 确保图像为RGBA模式，以便进行后续判断
+    if frame.mode != 'RGBA':
+        # 这一步很关键，确保我们总能获取到4个通道的数据
+        frame = frame.convert('RGBA')
 
+    # 5. 【核心校验】对费用条末端像素进行严格检查
     try:
-        last_pixel_color = frame.getpixel((x2 - 1, y))
+        r_end, g_end, b_end, a_end = frame.getpixel((x2 - 1, y))
     except IndexError:
-        # 如果ROI超出图像边界，则视为无效
+        return None  # ROI超出图像边界
+
+    # 5.1 Alpha通道必须不透明
+    if a_end != ALPHA_OPAQUE:
         return None
 
-    if all(c > UNFILLED_GRAY_THRESHOLD for c in last_pixel_color):
-        if all(c > WHITE_THRESHOLD for c in last_pixel_color):
-            return total_width
+    # 5.2 必须是灰度色（白色也是灰度色）
+    if not is_pixel_grayscale(r_end, g_end, b_end):
         return None
 
+    # 6. 【边界扫描】
+    # 检查末端像素是否为“严格的白色”，如果是，则费用条已满
+    is_end_pixel_white = all(c > WHITE_THRESHOLD for c in (r_end, g_end, b_end))
+    if is_end_pixel_white:
+        return total_width
+
+    # 从右向左扫描，寻找白色与灰色的边界
     filled_width = 0
-    for x in range(x2 - 2, x1 - 1, -1):
-        pixel = frame.getpixel((x, y))
-        if all(c > WHITE_THRESHOLD for c in pixel):
-            filled_width = x - x1 + 1
-            break
+    for x in range(x2 - 2, x1 - 1, -1):  # 从倒数第二个像素开始
+        r, g, b, a = frame.getpixel((x, y))
 
+        # 在循环内部，对每个像素都进行严格校验
+        if a != ALPHA_OPAQUE: return None  # 发现非不透明像素，说明不是费用条
+        if not is_pixel_grayscale(r, g, b): return None  # 发现彩色像素，说明不是费用条
+
+        # 判断当前像素是否为“严格的白色”
+        is_current_pixel_white = all(c > WHITE_THRESHOLD for c in (r, g, b))
+
+        if is_current_pixel_white:
+            # 找到了白色填充部分的右边界
+            filled_width = x - x1 + 1
+            break  # 找到后立刻跳出循环
+
+    # 如果循环正常结束（没有break），说明没有找到任何白色像素，filled_width 保持为 0
     return filled_width
 
 

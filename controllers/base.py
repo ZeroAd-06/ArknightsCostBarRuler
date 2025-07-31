@@ -9,7 +9,7 @@ class BaseCaptureController(ABC):
     @abstractmethod
     def connect(self):
         """建立与目标的连接并初始化。"""
-        pass
+        return self
 
     @abstractmethod
     def disconnect(self):

@@ -8,7 +8,7 @@ from ctypes import wintypes
 from pathlib import Path
 import sys
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from PIL import Image
 
@@ -50,26 +50,42 @@ class MuMuPlayerController(BaseCaptureController):
         self.height: int = 0
         self.buffer: Optional[ctypes.Array] = None
 
-    def _find_and_load_dll(self):
-        """在MuMu安装目录中查找并加载核心DLL。"""
-        # 可能的DLL路径
-        dll_path_options = [
-            self.install_path / "nx_main" / "sdk" / "external_renderer_ipc.dll",
-            self.install_path / "shell" / "sdk" / "external_renderer_ipc.dll",
+    def _find_and_load_dll(self) -> Tuple[Path, Path]:
+        """
+        在MuMu安装目录中智能查找并返回核心DLL的路径和正确的根目录。
+
+        Returns:
+            Tuple[Path, Path]: 一个元组，包含(找到的DLL的绝对路径, 修正后的MuMu根目录路径)。
+
+        Raises:
+            FileNotFoundError: 如果在所有可能的路径中都找不到DLL。
+        """
+        initial_path = self.install_path
+        # 创建一个搜索路径列表，包含用户提供的路径及其父目录
+        search_bases = [initial_path]
+        if initial_path.parent != initial_path: # 避免在根目录(如C:\)时重复添加
+            search_bases.append(initial_path.parent)
+
+        # 可能的DLL相对路径
+        relative_dll_paths = [
+            Path("nx_main") / "sdk" / "external_renderer_ipc.dll",
+            Path("shell") / "sdk" / "external_renderer_ipc.dll",
         ]
 
-        dll_path = None
-        for path in dll_path_options:
-            if path.exists():
-                dll_path = path
-                break
+        for base in search_bases:
+            for rel_path in relative_dll_paths:
+                dll_candidate_path = base / rel_path
+                if dll_candidate_path.exists():
+                    print(f">>> 在 '{base}' 找到了DLL: {dll_candidate_path}")
+                    # 找到了！返回DLL的完整路径和它所在的正确根目录
+                    return dll_candidate_path, base
 
-        if not dll_path:
-            raise FileNotFoundError("在指定的MuMu安装目录中未找到 'external_renderer_ipc.dll'。")
+        # 如果循环结束都没有找到
+        raise FileNotFoundError(
+            "在指定的MuMu安装目录中未找到 'external_renderer_ipc.dll'。\n"
+            "请确保路径正确，可以提供MuMu的根目录或其下的'shell'子目录。"
+        )
 
-        print(f">>> 正在加载DLL: {dll_path}")
-        self.dll = ctypes.WinDLL(str(dll_path))
-        print("    DLL加载成功。")
 
     def _setup_function_prototypes(self):
         """定义从DLL中调用的函数的参数类型和返回类型。"""
@@ -90,10 +106,21 @@ class MuMuPlayerController(BaseCaptureController):
 
     def connect(self):
         """加载DLL，连接到模拟器实例并初始化截图环境。"""
-        self._find_and_load_dll()
+        # 智能查找DLL，并获取正确的DLL路径和根目录
+        dll_path, correct_root_path = self._find_and_load_dll()
+
+        # 更新实例的安装路径为修正后的路径
+        self.install_path = correct_root_path
+        print(f"    修正后的MuMu根目录: {self.install_path}")
+
+        print(f">>> 正在加载DLL: {dll_path}")
+        self.dll = ctypes.WinDLL(str(dll_path))
+        print("    DLL加载成功。")
+
         self._setup_function_prototypes()
 
         print(">>> 正在连接到MuMu实例...")
+        # 使用修正后的根目录进行连接
         self.handle = self.dll.nemu_connect(str(self.install_path), self.instance_index)
         if self.handle == 0:
             raise ConnectionError(
@@ -101,10 +128,8 @@ class MuMuPlayerController(BaseCaptureController):
         print(f"    连接成功，获得句柄: {self.handle}")
 
         print(">>> 正在初始化截图...")
-        # 第一次调用以获取屏幕尺寸
         width_ptr = ctypes.pointer(ctypes.c_int())
         height_ptr = ctypes.pointer(ctypes.c_int())
-        # 成功时返回0
         ret = self.dll.nemu_capture_display(self.handle, 0, 0, width_ptr, height_ptr, None)
         if ret != 0:
             raise RuntimeError(f"获取屏幕尺寸失败，错误码: {ret}")
@@ -113,10 +138,10 @@ class MuMuPlayerController(BaseCaptureController):
         self.height = height_ptr.contents.value
         print(f"    获取到屏幕尺寸: {self.width}x{self.height}")
 
-        # 根据尺寸创建图像缓冲区
-        buffer_size = self.width * self.height * 4  # RGBA格式，4字节/像素
+        buffer_size = self.width * self.height * 4
         self.buffer = (ctypes.c_ubyte * buffer_size)()
         print(f"    图像缓冲区已创建 (大小: {buffer_size} 字节)。")
+        return self
 
     def capture_frame(self) -> Image.Image:
         """
@@ -127,7 +152,7 @@ class MuMuPlayerController(BaseCaptureController):
 
         ret = self.dll.nemu_capture_display(
             self.handle,
-            0,  # display_id, 默认为0
+            0,
             len(self.buffer),
             ctypes.pointer(ctypes.c_int(self.width)),
             ctypes.pointer(ctypes.c_int(self.height)),
@@ -139,14 +164,9 @@ class MuMuPlayerController(BaseCaptureController):
 
         return self.conv()
 
-
     def conv(self):
-
-        # 从原始RGBA缓冲区创建Pillow图像
         image_raw = Image.frombuffer('RGBA', (self.width, self.height), self.buffer, 'raw', 'RGBA', 0, 1)
         image_flipped = image_raw.transpose(Image.FLIP_TOP_BOTTOM)
-
-        # 转换为RGB格式，便于后续处理和保存
         return image_flipped.convert('RGB')
 
     def disconnect(self):
@@ -166,28 +186,21 @@ class MuMuPlayerController(BaseCaptureController):
 
 
 if __name__ == '__main__':
-    MUMU_PATH = "D:\Game\Android\YXArkNights-12.0"
+    MUMU_PATH = r"D:\Game\Android\YXArkNights-12.0\shell"
 
-    if not MUMU_PATH:
-        print("错误: 请在脚本中设置 'MUMU_PATH' 变量为您的MuMu模拟器安装路径。")
-    else:
-        try:
-            with MuMuPlayerController(mumu_install_path=MUMU_PATH) as mumu_cap:
-                for i in range(600):
-                    print("\n--- 开始捕获 ---")
-                    start_time = time.time()
+    try:
+        with MuMuPlayerController(mumu_install_path=MUMU_PATH) as mumu_cap:
+            print("\n--- 开始捕获 ---")
+            start_time = time.time()
+            frame = mumu_cap.capture_frame()
+            end_time = time.time()
 
-                    frame = mumu_cap.capture_frame()
+            print(f"成功捕获一帧! 分辨率: {frame.size}, 耗时: {end_time - start_time:.4f} 秒")
+            save_path = "mumu_capture.jpg"
+            frame.save(save_path)
+            print(f"图像已保存至: {save_path}")
 
-                    end_time = time.time()
-
-                    print(f"成功捕获一帧! 分辨率: {frame.size}, 耗时: {end_time - start_time:.4f} 秒")
-
-                    save_path = "mumu_capture.jpg"
-                    frame.save(save_path)
-                    print(f"图像已保存至: {save_path}")
-
-        except (NotImplementedError, FileNotFoundError, ConnectionError, RuntimeError) as e:
-            print(f"\n!!! 程序运行出错: {e}")
-        except KeyboardInterrupt:
-            print("\n用户手动中断程序。")
+    except (NotImplementedError, FileNotFoundError, ConnectionError, RuntimeError) as e:
+        print(f"\n!!! 程序运行出错: {e}")
+    except KeyboardInterrupt:
+        print("\n用户手动中断程序。")

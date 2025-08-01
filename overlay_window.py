@@ -257,7 +257,7 @@ class OverlayWindow:
                 item('重命名', lambda *args, f=p["filename"]: self._rename_profile(f)),
                 item('删除', lambda *args, f=p["filename"]: self._delete_profile(f)))
             calib_menu_items.append(item(display_name, profile_submenu))
-        return Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR, item('关于', self._open_about_page),
+        return Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR, item('v1.1.1 by Z_06', self._open_about_page),
                     item('退出', self._quit_application))
 
     def _update_tray_menu(self):

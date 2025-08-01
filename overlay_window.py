@@ -337,7 +337,7 @@ class OverlayWindow:
     def _show_delete_dialog(self, filename: str):
         basename = get_calibration_basename(filename)
         result = Messagebox.yesno(message=f"确实要删除校准配置 '{basename}' 吗？", title="确认删除", parent=self.root)
-        if result == "Yes":
+        if result == "Yes" or "确认":
             logger.info(f"用户确认删除 '{filename}'，发送指令。")
             self.master_callback({"type": "delete_profile", "filename": filename})
         else:

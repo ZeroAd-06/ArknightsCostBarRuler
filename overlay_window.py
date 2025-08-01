@@ -1,3 +1,4 @@
+import logging
 import os
 import queue
 import sys
@@ -14,9 +15,12 @@ from typing import Optional, Callable
 from utils import find_cost_bar_roi, resource_path
 from calibration_manager import get_calibration_profiles, get_calibration_basename
 
+logger = logging.getLogger(__name__)
+
 
 class OverlayWindow:
     def __init__(self, master_callback: Callable, ui_queue: queue.Queue, parent_root: ttk.Window):
+        logger.info("初始化悬浮窗 (OverlayWindow)...")
         self.parent_root = parent_root
         self.root: Optional[ttk.Toplevel] = None
         self.master_callback = master_callback
@@ -25,6 +29,7 @@ class OverlayWindow:
         # 保存主屏幕的物理分辨率
         self.screen_width = self.parent_root.winfo_screenwidth()
         self.screen_height = self.parent_root.winfo_screenheight()
+        logger.info(f"检测到主屏幕分辨率: {self.screen_width}x{self.screen_height}")
 
         # 用于存储动态计算出的字体和尺寸
         self.fonts = {}
@@ -36,21 +41,25 @@ class OverlayWindow:
         self.active_profile_filename: Optional[str] = None
 
     def run(self):
+        """创建并运行悬浮窗的主循环。"""
+        logger.info("OverlayWindow.run() - 开始创建和运行窗口。")
         self.root = ttk.Toplevel(self.parent_root)
         self.root.overrideredirect(True)
         self.root.wm_attributes("-topmost", True)
         self.root.wm_attributes("-alpha", 0.75)
         self.root.config(bg='white')
-        self.root.withdraw()
+        self.root.withdraw()  # 初始隐藏
 
         self._load_icons()
         self._create_widgets()
         self._setup_tray_icon()
-        self._process_ui_queue()
+        self._process_ui_queue()  # 启动UI队列轮询
 
+        logger.info("进入Tkinter主循环 (mainloop)...")
         self.parent_root.mainloop()
 
     def _create_widgets(self):
+        logger.debug("正在创建悬浮窗控件...")
         overlay_bg = '#3a3a3a'
         style = ttk.Style()
         style.configure('Overlay.TFrame', background=overlay_bg)
@@ -87,11 +96,14 @@ class OverlayWindow:
         self.lap_icon_label.pack(side=tk.LEFT)
         self.lap_frame_label = ttk.Label(self.lap_container, text="0", style='Overlay.Timer.TLabel')
         self.lap_frame_label.pack(side=tk.LEFT)
+        logger.debug("悬浮窗控件创建完成。")
 
     def _on_timer_click(self, event=None):
+        logger.info("计时器标签被点击，发送 toggle_lap_timer 指令。")
         self.master_callback({"type": "toggle_lap_timer"})
 
     def _hide_all_dynamic_labels(self):
+        logger.debug("隐藏所有动态标签以切换状态。")
         self.pre_cal_label.place_forget()
         self.cal_progress_label.place_forget()
         self.running_frame_label.place_forget()
@@ -101,11 +113,15 @@ class OverlayWindow:
 
     def setup_geometry(self, emulator_width: int, emulator_height: int):
         """根据屏幕物理分辨率计算窗口和所有内部元素的尺寸"""
+        logger.info(f"根据模拟器分辨率 {emulator_width}x{emulator_height} 设置悬浮窗几何尺寸。")
+        # 注意：这里的 ROI 计算应使用屏幕的物理分辨率来确定费用条的实际像素长度
         roi_x1, roi_x2, _ = find_cost_bar_roi(self.screen_width, self.screen_height)
         cost_bar_pixel_length = roi_x2 - roi_x1
+        logger.debug(f"计算出的屏幕费用条像素长度: {cost_bar_pixel_length}")
 
         win_width = int(cost_bar_pixel_length * 5 / 6)
         win_height = int(win_width * 27 / 50)
+        logger.debug(f"悬浮窗尺寸设置为: {win_width}x{win_height}")
 
         self.fonts['large_bold'] = tkFont.Font(family="Segoe UI", size=-int(win_height * 0.55), weight="bold")
         self.fonts['large_normal'] = tkFont.Font(family="Segoe UI", size=-int(win_height * 0.55))
@@ -125,14 +141,17 @@ class OverlayWindow:
         pos_x = self.screen_width - win_width - 50
         pos_y = self.screen_height - win_height - 100
         self.root.geometry(f"{win_width}x{win_height}+{pos_x}+{pos_y}")
+        logger.debug(f"悬浮窗初始位置: {pos_x}, {pos_y}")
 
         button_width = int(win_width * 0.33)
         icon_size = min(button_width, win_height)
         self._resize_icons(icon_size)
 
-        self.root.deiconify()
+        self.root.deiconify()  # 显示窗口
+        logger.info("悬浮窗几何尺寸设置完成并已显示。")
 
     def set_state_running(self, total_frames: int, active_profile: str):
+        logger.info(f"UI状态切换: running (profile='{active_profile}', total_frames={total_frames})")
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('deco'), command=None)
 
@@ -150,14 +169,21 @@ class OverlayWindow:
     def update_lap_timer(self, lap_frames: Optional[int]):
         padding = self.sizes.get('padding', 4)
         if lap_frames is not None:
+            if not self.lap_container.winfo_ismapped():
+                logger.debug("显示计圈器。")
             self.lap_frame_label.config(text=f"{lap_frames}")
             self.lap_container.place(relx=0.0, rely=0.0, anchor='nw', x=padding, y=padding)
         else:
+            if self.lap_container.winfo_ismapped():
+                logger.debug("隐藏计圈器。")
             self.lap_container.place_forget()
 
     def _resize_icons(self, size: int):
+        logger.debug(f"正在将所有图标调整为尺寸: {size}x{size}")
         try:
+            # 计算计时器图标的高度
             timer_height = self.fonts['small'].metrics('linespace')
+            logger.debug(f"计时器图标高度: {timer_height}")
 
             for name in ["start", "deco"]:
                 path = resource_path(os.path.join("icons", f"{name}.png"))
@@ -173,12 +199,12 @@ class OverlayWindow:
             self.icons["timer_sized"] = ImageTk.PhotoImage(image=timer_img)
             self.timer_icon_label.config(image=self.icons["timer_sized"])
 
-            lap_icon_path = resource_path(os.path.join("icons", "wait.png"))
+            lap_icon_path = resource_path(os.path.join("icons", "wait.png"))  # 复用图标
             lap_img = Image.open(lap_icon_path).resize((timer_height, timer_height), Image.Resampling.LANCZOS)
             self.icons["lap_sized"] = ImageTk.PhotoImage(image=lap_img)
             self.lap_icon_label.config(image=self.icons["lap_sized"])
         except Exception as e:
-            print(f"调整图标大小时出错: {e}")
+            logger.exception(f"调整图标大小时出错: {e}")
 
     def update_running_display(self, current_frame: Optional[int]):
         if current_frame is not None:
@@ -193,6 +219,9 @@ class OverlayWindow:
         try:
             message = self.ui_queue.get_nowait()
             msg_type = message.get("type")
+            if msg_type != "update":  # 避免update消息刷屏日志
+                logger.debug(f"从UI队列收到消息: {message}")
+
             if msg_type == "update":
                 self.update_running_display(message["frame"])
                 if "time_str" in message: self.update_timer(message["time_str"])
@@ -212,39 +241,54 @@ class OverlayWindow:
             elif msg_type == "calibration_progress":
                 self.update_calibration_progress(message["progress"])
             elif msg_type == "profiles_changed":
+                logger.info("收到配置文件变更通知，正在更新托盘菜单...")
                 self._update_tray_menu()
             elif msg_type == "error":
+                logger.error(f"UI收到错误消息: {message['message']}")
                 self._hide_all_dynamic_labels()
                 self.pre_cal_label.config(text=f"错误:\n{message['message'][:50]}...")
                 self.pre_cal_label.place(relx=0.5, rely=0.5, anchor="center")
         except queue.Empty:
             pass
+        except Exception as e:
+            logger.exception("处理UI队列消息时发生未预料的错误。")
         finally:
+            # 持续轮询
             if self.root and self.root.winfo_exists(): self.root.after(50, self._process_ui_queue)
 
     def _load_icons(self):
+        logger.debug("正在加载所有图标资源...")
         try:
             icon_names = ["start", "wait", "deco", "timer"]
             for name in icon_names:
                 path = resource_path(os.path.join("icons", f"{name}.png"))
                 img = Image.open(path).convert("RGBA")
                 self.icons[name] = ImageTk.PhotoImage(image=img)
+            logger.debug("图标资源加载完成。")
         except FileNotFoundError as e:
-            print(f"错误: 缺少图标文件 {e.filename}。请先运行 setup_assets.py")
+            logger.critical(f"错误: 缺少图标文件 {e.filename}。请确保资源文件完整。")
             sys.exit(1)
 
     def _open_about_page(self, *args):
+        logger.info("用户点击 '关于'，打开项目主页。")
         webbrowser.open("https://github.com/ZeroAd-06/ArknightsCostBarRuler")
 
     def _quit_application(self, *args):
-        if self.tray_icon: self.tray_icon.stop()
+        logger.info("用户点击 '退出'，开始关闭程序...")
+        if self.tray_icon:
+            logger.debug("停止托盘图标...")
+            self.tray_icon.stop()
         if self.root:
+            logger.debug("销毁Tkinter根窗口...")
             self.root.quit()
             self.root.destroy()
             self.parent_root.destroy()
+        logger.info("程序已退出。")
 
     def _create_tray_menu(self) -> Menu:
+        logger.debug("正在创建/刷新托盘菜单...")
         profiles = get_calibration_profiles()
+        logger.debug(f"找到 {len(profiles)} 个校准配置文件用于菜单。")
         calib_menu_items = [item('-- 新建 --', lambda *args: self.master_callback({"type": "prepare_calibration"}))]
         if profiles: calib_menu_items.append(Menu.SEPARATOR)
         for p in profiles:
@@ -257,15 +301,20 @@ class OverlayWindow:
                 item('重命名', lambda *args, f=p["filename"]: self._rename_profile(f)),
                 item('删除', lambda *args, f=p["filename"]: self._delete_profile(f)))
             calib_menu_items.append(item(display_name, profile_submenu))
-        return Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR, item('v1.1.1 by Z_06', self._open_about_page),
-                    item('退出', self._quit_application))
+
+        main_menu = Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR, item('关于', self._open_about_page),
+                         item('退出', self._quit_application))
+        logger.debug("托盘菜单创建完成。")
+        return main_menu
 
     def _update_tray_menu(self):
         if self.tray_icon:
             self.tray_icon.menu = self._create_tray_menu()
             self.tray_icon.update_menu()
+            logger.debug("托盘菜单已更新。")
 
     def _rename_profile(self, filename: str):
+        logger.info(f"请求重命名配置文件: {filename}")
         self.root.after(0, self._show_rename_dialog, filename)
 
     def _show_rename_dialog(self, filename: str):
@@ -273,31 +322,42 @@ class OverlayWindow:
         new_basename = Querybox.get_string(prompt=f"为 '{old_basename}' 输入新名称:", title="重命名",
                                            initialvalue=old_basename, parent=self.root)
         if new_basename and new_basename.strip():
+            logger.info(f"用户为 '{filename}' 输入新名称: '{new_basename.strip()}'，发送指令。")
             self.master_callback({"type": "rename_profile", "old": filename, "new_base": new_basename.strip()})
         elif new_basename is not None:
+            logger.warning("用户输入了无效的空名称。")
             Messagebox.show_warning("名称不能为空。", title="无效名称", parent=self.root)
+        else:
+            logger.debug("用户取消了重命名操作。")
 
     def _delete_profile(self, filename: str):
+        logger.info(f"请求删除配置文件: {filename}")
         self.root.after(0, self._show_delete_dialog, filename)
 
     def _show_delete_dialog(self, filename: str):
         basename = get_calibration_basename(filename)
         result = Messagebox.yesno(message=f"确实要删除校准配置 '{basename}' 吗？", title="确认删除", parent=self.root)
-        if result == "Yes": self.master_callback({"type": "delete_profile", "filename": filename})
+        if result == "Yes":
+            logger.info(f"用户确认删除 '{filename}'，发送指令。")
+            self.master_callback({"type": "delete_profile", "filename": filename})
+        else:
+            logger.debug("用户取消了删除操作。")
 
     def _setup_tray_icon(self):
+        logger.info("正在设置系统托盘图标...")
         try:
             icon_path = resource_path(os.path.join("icons", "deco.png"))
             icon_image = Image.open(icon_path)
             self.tray_icon = Icon("ArknightsCostBarRuler", icon_image, "明日方舟费用条尺子",
                                   menu=self._create_tray_menu())
-            tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+            tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True, name="TrayIconThread")
             tray_thread.start()
-            print("托盘图标已启动。")
+            logger.info("托盘图标线程已启动。")
         except Exception as e:
-            print(f"创建托盘图标失败: {e}")
+            logger.exception(f"创建托盘图标失败: {e}")
 
     def set_state_idle(self):
+        logger.info("UI状态切换: idle")
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('deco'), command=None)
         self.pre_cal_label.config(text="右键托盘\n选择一个配置")
@@ -306,6 +366,7 @@ class OverlayWindow:
         self._update_tray_menu()
 
     def set_state_pre_calibration(self):
+        logger.info("UI状态切换: pre_calibration")
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('start'),
                                 command=lambda: self.master_callback({"type": "start_calibration"}))
@@ -315,6 +376,7 @@ class OverlayWindow:
         self._update_tray_menu()
 
     def set_state_calibrating(self):
+        logger.info("UI状态切换: calibrating")
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('wait'), command=None)
         self.cal_progress_label.place(relx=0.5, rely=0.5, anchor="center")
@@ -329,6 +391,7 @@ class OverlayWindow:
     def _on_drag_stop(self, event):
         self._drag_data["x"] = 0
         self._drag_data["y"] = 0
+        logger.debug(f"窗口拖动结束，当前位置: {self.root.winfo_x()}, {self.root.winfo_y()}")
 
     def _on_drag_motion(self, event):
         dx = event.x - self._drag_data["x"]

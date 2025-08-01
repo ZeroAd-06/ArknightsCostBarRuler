@@ -13,6 +13,8 @@ from config_manager import load_config, create_config_with_gui, save_config
 from controllers import create_capture_controller
 from overlay_window import OverlayWindow
 from utils import find_cost_bar_roi, get_logical_frame_from_calibration
+from api_server import start_server_in_thread
+
 
 FRAMES_PER_SECOND = 30
 
@@ -25,7 +27,7 @@ def format_time_from_frames(total_frames: int) -> str:
     seconds = total_seconds % 60
     return f"{minutes:02d}:{seconds:02d}:{frames:02d}"
 
-def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Queue):
+def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Queue, api_queue: queue.Queue):
     """在工作线程中运行的分析循环。"""
     controller = None
     cap = None
@@ -152,8 +154,30 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         time_str = format_time_from_frames(last_known_total_frames)
                         lap_frames_to_display = None
                         if lap_timer_active: lap_frames_to_display = last_known_total_frames - lap_start_frame
+                        is_running = logical_frame is not None
+                        ui_update_data = {
+                            "type": "update",
+                            "frame": logical_frame,
+                            "time_str": time_str,
+                            "lap_frames": lap_frames_to_display
+                        }
+                        ui_queue.put(ui_update_data)
+
+                        api_update_data = {
+                            "isRunning": is_running,
+                            "currentFrame": logical_frame,
+                            "totalFramesInCycle": calibration_data.get('total_frames', 0) if is_running else 0,
+                            "totalElapsedFrames": last_known_total_frames,
+                            "activeProfile": get_calibration_basename(current_profile_filename) if current_profile_filename else None
+                        }
+                        # 使用 put_nowait 避免在分析线程中阻塞
+                        try:
+                            api_queue.put_nowait(api_update_data)
+                        except queue.Full:
+                            pass # 如果API服务器处理不过来，就丢弃一些帧
+
                         ui_queue.put({"type": "update", "frame": logical_frame, "time_str": time_str, "lap_frames": lap_frames_to_display})
-                        time.sleep(0.02)
+
                 else:
                     print(f"错误: 无法加载配置 {filename}")
                     current_profile_filename = None; calibration_data = None; config["active_calibration_profile"] = None; save_config(config)
@@ -182,9 +206,14 @@ def main():
 
     ui_queue = queue.Queue(maxsize=1)
     command_queue = queue.Queue()
-    # --- [核心修改] 创建 OverlayWindow 时不再需要传递屏幕尺寸 ---
+    api_data_queue = queue.Queue(maxsize=1)
     overlay = OverlayWindow(master_callback=command_queue.put, ui_queue=ui_queue, parent_root=root)
-    worker = threading.Thread(target=analysis_worker, args=(config, ui_queue, command_queue), daemon=True)
+    start_server_in_thread(api_data_queue, port=2606)
+    worker = threading.Thread(
+        target=analysis_worker,
+        args=(config, ui_queue, command_queue, api_data_queue),
+        daemon=True
+    )
     worker.start()
     print("分析工作线程已启动...")
     try: overlay.run()

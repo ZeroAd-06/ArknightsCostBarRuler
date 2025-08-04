@@ -13,10 +13,11 @@ from typing import Optional, Tuple
 
 from PIL import Image
 
-if __name__ == '__main__':
-    from base import BaseCaptureController
-else:
+# 兼容独立运行和作为模块导入
+try:
     from .base import BaseCaptureController
+except ImportError:
+    from base import BaseCaptureController
 
 logger = logging.getLogger(__name__)
 
@@ -24,75 +25,59 @@ logger = logging.getLogger(__name__)
 class MuMuPlayerController(BaseCaptureController):
     """
     通过加载 MuMu 模拟器的`external_renderer_ipc.dll`来获取屏幕截图。
-    此方法专为解决 MuMu 模拟器的兼容性问题。
-
+    此版本已添加对“后台保活”功能的支持。
     """
 
-    def __init__(self, mumu_install_path: str, instance_index: int = 0):
+    def __init__(self, mumu_install_path: str, instance_index: int = 0,
+                 package_name: str = "com.hypergryph.arknights"):
         """
         初始化 MuMuPlayerController。
 
         Args:
             mumu_install_path (str): MuMu 模拟器的安装根目录。
             instance_index (int): 模拟器实例的索引，用于多开场景，默认为0。
+            package_name (str): 目标应用包名，默认为明日方舟。
         """
         logger.info(f"MuMuPlayerController 初始化: path='{mumu_install_path}', instance={instance_index}")
         if sys.platform != "win32":
-            logger.critical("MuMuPlayerController 仅支持 Windows 平台。")
             raise NotImplementedError("MuMuPlayerController 仅支持 Windows 平台。")
 
         self.install_path = Path(mumu_install_path)
         if not self.install_path.exists():
-            logger.error(f"指定的MuMu模拟器路径不存在: {self.install_path}")
             raise FileNotFoundError(f"指定的MuMu模拟器路径不存在: {self.install_path}")
 
         self.instance_index = instance_index
+        self.package_name = package_name
+        self.package_name_bytes = self.package_name.encode('utf-8')
 
-        # DLL 和函数句柄
         self.dll: Optional[ctypes.WinDLL] = None
         self.handle: int = 0
+        self.display_id: int = 0 # 关键：用于存储正确的显示设备ID
 
-        # 图像缓冲
         self.width: int = 0
         self.height: int = 0
         self.buffer: Optional[ctypes.Array] = None
 
     def _find_and_load_dll(self) -> Tuple[Path, Path]:
-        """
-        在MuMu安装目录中智能查找并返回核心DLL的路径和正确的根目录。
-
-        Returns:
-            Tuple[Path, Path]: 一个元组，包含(找到的DLL的绝对路径, 修正后的MuMu根目录路径)。
-
-        Raises:
-            FileNotFoundError: 如果在所有可能的路径中都找不到DLL。
-        """
+        """在MuMu安装目录中智能查找并返回核心DLL的路径和正确的根目录。"""
         logger.info(f"开始在 '{self.install_path}' 及其父目录中查找DLL...")
         initial_path = self.install_path
-        # 创建一个搜索路径列表，包含用户提供的路径及其父目录
         search_bases = [initial_path]
-        if initial_path.parent != initial_path:  # 避免在根目录(如C:\)时重复添加
+        if initial_path.parent != initial_path:
             search_bases.append(initial_path.parent)
-        logger.debug(f"搜索基准路径: {search_bases}")
 
-        # 可能的DLL相对路径
         relative_dll_paths = [
             Path("nx_main") / "sdk" / "external_renderer_ipc.dll",
             Path("shell") / "sdk" / "external_renderer_ipc.dll",
         ]
-        logger.debug(f"可能的相对DLL路径: {relative_dll_paths}")
 
         for base in search_bases:
             for rel_path in relative_dll_paths:
                 dll_candidate_path = base / rel_path
-                logger.debug(f"正在尝试路径: {dll_candidate_path}")
                 if dll_candidate_path.exists():
                     logger.info(f"在 '{base}' 找到了DLL: {dll_candidate_path}")
-                    # 找到了！返回DLL的完整路径和它所在的正确根目录
                     return dll_candidate_path, base
 
-        # 如果循环结束都没有找到
-        logger.error("在指定的MuMu安装目录中未找到 'external_renderer_ipc.dll'")
         raise FileNotFoundError(
             "在指定的MuMu安装目录中未找到 'external_renderer_ipc.dll'。\n"
             "请确保路径正确，可以提供MuMu的根目录或其下的'shell'子目录。"
@@ -103,29 +88,26 @@ class MuMuPlayerController(BaseCaptureController):
         logger.debug("正在设置DLL函数原型...")
         self.dll.nemu_connect.argtypes = [wintypes.LPCWSTR, ctypes.c_int]
         self.dll.nemu_connect.restype = ctypes.c_int
-        logger.debug("nemu_connect.argtypes/restype 设置完成。")
 
         self.dll.nemu_disconnect.argtypes = [ctypes.c_int]
-        logger.debug("nemu_disconnect.argtypes 设置完成。")
 
         self.dll.nemu_capture_display.argtypes = [
-            ctypes.c_int,  # handle
-            ctypes.c_int,  # display_id
-            ctypes.c_int,  # buffer_size
-            ctypes.POINTER(ctypes.c_int),  # *width
-            ctypes.POINTER(ctypes.c_int),  # *height
-            ctypes.POINTER(ctypes.c_ubyte)  # *buffer
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ubyte)
         ]
         self.dll.nemu_capture_display.restype = ctypes.c_int
-        logger.debug("nemu_capture_display.argtypes/restype 设置完成。")
+
+        # --- [核心新增] 添加 nemu_get_display_id 的函数原型 ---
+        self.dll.nemu_get_display_id.argtypes = [ctypes.c_int, wintypes.LPCSTR, ctypes.c_int]
+        self.dll.nemu_get_display_id.restype = ctypes.c_int
+        logger.debug("DLL函数原型设置完成。")
+        # --- [结束新增] ---
 
     def connect(self):
         """加载DLL，连接到模拟器实例并初始化截图环境。"""
         logger.info("开始连接到 MuMu 实例...")
-        # 智能查找DLL，并获取正确的DLL路径和根目录
         dll_path, correct_root_path = self._find_and_load_dll()
-
-        # 更新实例的安装路径为修正后的路径
         self.install_path = correct_root_path
         logger.info(f"修正后的MuMu根目录: {self.install_path}")
 
@@ -136,21 +118,29 @@ class MuMuPlayerController(BaseCaptureController):
         self._setup_function_prototypes()
 
         logger.info("正在连接到MuMu实例...")
-        # 使用修正后的根目录进行连接
         self.handle = self.dll.nemu_connect(str(self.install_path), self.instance_index)
         if self.handle == 0:
-            logger.error(f"连接MuMu失败 (handle=0)。路径='{self.install_path}', 索引={self.instance_index}")
-            raise ConnectionError(
-                f"连接MuMu失败 (handle=0)。请确认模拟器正在运行，且路径 '{self.install_path}' 和索引 '{self.instance_index}' 正确。")
+            raise ConnectionError(f"连接MuMu失败 (handle=0)。")
         logger.info(f"连接成功，获得句柄: {self.handle}")
+
+        # --- [核心修改] 使用包名查询正确的 display_id ---
+        logger.info(f"正在为包 '{self.package_name}' 查询显示设备ID...")
+        self.display_id = self.dll.nemu_get_display_id(self.handle, self.package_name_bytes, 0)
+
+        if self.display_id < 0:
+            logger.warning(f"查询应用 '{self.package_name}' 的 display_id 失败，错误码: {self.display_id}。将回退到主显示设备(0)。")
+            self.display_id = 0
+        else:
+            logger.info(f"成功获取到显示设备ID: {self.display_id}")
+        # --- [结束修改] ---
 
         logger.info("正在初始化截图...")
         width_ptr = ctypes.pointer(ctypes.c_int())
         height_ptr = ctypes.pointer(ctypes.c_int())
-        logger.debug("调用 nemu_capture_display 以获取屏幕尺寸。")
-        ret = self.dll.nemu_capture_display(self.handle, 0, 0, width_ptr, height_ptr, None)
+
+        # 使用获取到的 display_id 来查询屏幕尺寸
+        ret = self.dll.nemu_capture_display(self.handle, self.display_id, 0, width_ptr, height_ptr, None)
         if ret != 0:
-            logger.error(f"获取屏幕尺寸失败，错误码: {ret}")
             raise RuntimeError(f"获取屏幕尺寸失败，错误码: {ret}")
 
         self.width = width_ptr.contents.value
@@ -163,37 +153,30 @@ class MuMuPlayerController(BaseCaptureController):
         return self
 
     def capture_frame(self) -> Image.Image:
-        """
-        捕获一帧屏幕图像。
-        """
+        """捕获一帧屏幕图像。"""
         if not all([self.dll, self.handle, self.buffer]):
-            logger.error("捕获帧失败：未连接或初始化失败。")
             raise ConnectionError("未连接或初始化失败。请先调用 connect()。")
 
-        logger.debug("调用 nemu_capture_display 进行截图...")
+        # --- [核心修改] 使用 self.display_id 而不是硬编码的 0 ---
         ret = self.dll.nemu_capture_display(
             self.handle,
-            0,
+            self.display_id, # 使用正确的显示设备ID
             len(self.buffer),
             ctypes.pointer(ctypes.c_int(self.width)),
             ctypes.pointer(ctypes.c_int(self.height)),
             self.buffer
         )
+        # --- [结束修改] ---
 
         if ret != 0:
-            logger.error(f"截图失败，错误码: {ret}")
             raise RuntimeError(f"截图失败，错误码: {ret}")
 
-        logger.debug("截图数据已写入缓冲区，准备转换格式。")
         return self.conv()
 
     def conv(self) -> Image.Image:
         """将原始缓冲区数据转换为 PIL Image 对象。"""
-        logger.debug(f"从缓冲区创建RGBA图像 ({self.width}x{self.height})...")
         image_raw = Image.frombuffer('RGBA', (self.width, self.height), self.buffer, 'raw', 'RGBA', 0, 1)
-        logger.debug("垂直翻转图像...")
         image_flipped = image_raw.transpose(Image.FLIP_TOP_BOTTOM)
-        logger.debug("将图像转换为RGB模式...")
         return image_flipped.convert('RGB')
 
     def disconnect(self):
@@ -203,23 +186,20 @@ class MuMuPlayerController(BaseCaptureController):
             self.dll.nemu_disconnect(self.handle)
             self.handle = 0
             logger.info("断开连接成功。")
-        else:
-            logger.debug("无需断开连接 (dll或handle为空)。")
 
     def __enter__(self):
-        self.connect()
-        return self
+        return self.connect()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.disconnect()
 
-
+# ... (if __name__ == '__main__': 部分保持不变) ...
 if __name__ == '__main__':
-    from logger_setup import setup_logging
-    setup_logging(debug_image_mode=True)
+    # 简单的日志设置，用于独立测试
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     main_logger = logging.getLogger(__name__)
 
-    MUMU_PATH = r"D:\Game\Android\YXArkNights-12.0\shell"
+    MUMU_PATH = r"D:\Game\Android\YXArkNights-12.0\shell" # 请替换为你的路径
     main_logger.info(f"测试 MuMuPlayerController，路径: {MUMU_PATH}")
 
     try:
@@ -236,5 +216,3 @@ if __name__ == '__main__':
 
     except (NotImplementedError, FileNotFoundError, ConnectionError, RuntimeError) as e:
         main_logger.exception(f"程序运行出错: {e}")
-    except KeyboardInterrupt:
-        main_logger.info("用户手动中断程序。")

@@ -302,7 +302,7 @@ class OverlayWindow:
                 item('删除', lambda *args, f=p["filename"]: self._delete_profile(f)))
             calib_menu_items.append(item(display_name, profile_submenu))
 
-        main_menu = Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR, item('关于', self._open_about_page),
+        main_menu = Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR, item('v1.1.1 by Z_06', self._open_about_page),
                          item('退出', self._quit_application))
         logger.debug("托盘菜单创建完成。")
         return main_menu

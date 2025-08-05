@@ -73,8 +73,10 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
 
         initial_profile = config.get("active_calibration_profile")
         if initial_profile and os.path.exists(os.path.join(CALIBRATION_DIR, initial_profile)):
+            worker_logger.info(f"找到上次使用的有效配置文件: {initial_profile}，将自动加载。")
             command_queue.put({"type": "use_profile", "filename": initial_profile})
         else:
+            worker_logger.info("未找到上次使用的配置文件，进入空闲状态。")
             ui_queue.put({"type": "state_change", "state": "idle", "display_mode": frame_display_mode})
             ui_queue.put({"type": "profiles_changed"})
 
@@ -83,30 +85,20 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
             command = command_queue.get()
             worker_logger.info(f"收到指令: {command}")
 
-            cmd_type = command.get("type")
+            # [注意] 外层循环现在只处理“主要指令”
 
-            if cmd_type == "set_display_mode":
-                new_mode = command["mode"]
-                if new_mode != frame_display_mode:
-                    worker_logger.info(f"切换显示模式为: {new_mode}")
-                    frame_display_mode = new_mode
-                    config['frame_display_mode'] = new_mode
-                    save_config(config)
-                    ui_queue.put({"type": "mode_changed", "mode": new_mode})
-                continue
-
-            if cmd_type in ["prepare_calibration", "start_calibration", "delete_profile"]:
+            if command["type"] in ["prepare_calibration", "start_calibration", "delete_profile"]:
                 worker_logger.debug("因校准或删除操作，重置所有计时器状态。")
                 timer_offset_frames, cycle_base_frames, cycle_counter = 0, 0, 0
                 previous_logical_frame, last_known_total_frames = -1, 0
                 lap_timer_active = False
 
-            if cmd_type == "prepare_calibration":
+            if command["type"] == "prepare_calibration":
                 current_profile_filename, calibration_data = None, None
                 ui_queue.put({"type": "state_change", "state": "pre_calibration", "display_mode": frame_display_mode})
                 continue
 
-            elif cmd_type == "delete_profile":
+            elif command["type"] == "delete_profile":
                 filename_to_delete = command["filename"]
                 if remove_calibration_file(filename_to_delete):
                     if filename_to_delete == current_profile_filename:
@@ -118,7 +110,7 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     ui_queue.put({"type": "profiles_changed"})
                 continue
 
-            elif cmd_type == "rename_profile":
+            elif command["type"] == "rename_profile":
                 old_filename, new_basename = command["old"], command["new_base"]
                 worker_logger.info(f"准备重命名 '{old_filename}' 为 '{new_basename}'")
                 try:
@@ -128,14 +120,14 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                                                              loaded_data['screen_height'], basename=new_basename)
                         remove_calibration_file(old_filename)
                         worker_logger.info(f"重命名成功，新文件为 '{new_filename}'")
-                        if old_filename == current_profile_filename: command_queue.put(
-                            {"type": "use_profile", "filename": new_filename})
+                        if old_filename == current_profile_filename:
+                            command_queue.put({"type": "use_profile", "filename": new_filename})
                         ui_queue.put({"type": "profiles_changed"})
                 except Exception as e:
                     worker_logger.exception(f"重命名失败: {e}")
                 continue
 
-            elif cmd_type == "start_calibration":
+            elif command["type"] == "start_calibration":
                 ui_queue.put({"type": "state_change", "state": "calibrating", "display_mode": frame_display_mode})
                 try:
                     new_cal_data = calibrate(cap, progress_callback=lambda p: ui_queue.put(
@@ -152,7 +144,7 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         ui_queue.put({"type": "state_change", "state": "idle", "display_mode": frame_display_mode})
                 continue
 
-            elif cmd_type == "use_profile":
+            elif command["type"] == "use_profile":
                 if calibration_data:
                     offset = cycle_base_frames
                     timer_offset_frames += offset
@@ -167,7 +159,8 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     config["active_calibration_profile"] = filename
                     save_config(config)
 
-                    cycle_counter, cycle_base_frames, previous_logical_frame = 0, 0, -1
+                    cycle_counter, cycle_base_frames = 0, 0
+                    previous_logical_frame = -1
                     last_detection_time = time.time()
                     last_known_total_frames = timer_offset_frames
                     lap_timer_active = False
@@ -184,26 +177,41 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     frame_counter = 0
                     while True:
                         # --- [核心修复] ---
-                        # 在循环内处理不应中断分析的指令
                         try:
-                            runtime_cmd = command_queue.get_nowait()
-                            worker_logger.info(f"运行时收到指令: {runtime_cmd}")
-                            runtime_cmd_type = runtime_cmd.get("type")
-                            if runtime_cmd_type == "toggle_lap_timer":
-                                if not lap_timer_active:
-                                    lap_timer_active = True
-                                    lap_start_frame = last_known_total_frames
-                                    worker_logger.info(f"单圈计时器启动，起始帧: {lap_start_frame}")
-                                else:
-                                    lap_timer_active = False
-                                    worker_logger.info("单圈计时器停止。")
-                            else:  # 如果是其他指令，则中断分析
-                                command_queue.put(runtime_cmd)
-                                worker_logger.info("指令需要中断分析，退出循环。")
-                                break
+                            cmd = command_queue.get_nowait()
+                            worker_logger.info(f"分析循环中收到新指令: {cmd}")
+
+                            cmd_type = cmd.get("type")
+                            # 定义不需要中断循环的“次要指令”
+                            MINOR_COMMANDS = ["toggle_lap_timer", "set_display_mode"]
+
+                            if cmd_type in MINOR_COMMANDS:
+                                # 在循环内部处理次要指令
+                                if cmd_type == "toggle_lap_timer":
+                                    lap_timer_active = not lap_timer_active
+                                    if lap_timer_active:
+                                        lap_start_frame = last_known_total_frames
+                                        worker_logger.info(f"单圈计时器启动，起始帧: {lap_start_frame}")
+                                    else:
+                                        worker_logger.info("单圈计时器停止。")
+
+                                elif cmd_type == "set_display_mode":
+                                    new_mode = cmd["mode"]
+                                    if new_mode != frame_display_mode:
+                                        frame_display_mode = new_mode
+                                        config['frame_display_mode'] = new_mode
+                                        save_config(config)
+                                        ui_queue.put({"type": "mode_changed", "mode": new_mode})
+
+                                continue  # <-- 处理完次要指令后，继续内循环
+
+                            # 如果是其他“主要指令”，则放回队列并中断
+                            worker_logger.info(f"指令 '{cmd_type}' 需要中断分析，正在退出循环。")
+                            command_queue.put(cmd)
+                            break
                         except queue.Empty:
-                            pass  # 队列为空是正常情况，继续分析
-                        # --- [修复结束] ---
+                            pass
+                        # --- [结束修复] ---
 
                         frame = cap.capture_frame()
                         frame_counter += 1
@@ -213,8 +221,10 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                         current_profile_index = cycle_counter % num_profiles
                         active_profile = calibration_data['profiles'][current_profile_index]
 
-                        logical_frame = get_logical_frame_from_calibration(frame, roi, active_profile,
-                                                                           dump_prefix=f"run_frame_{frame_counter}")
+                        logical_frame = get_logical_frame_from_calibration(
+                            frame, roi, active_profile,
+                            dump_prefix=f"run_frame_{frame_counter}"
+                        )
 
                         if logical_frame is not None:
                             last_detection_time = time.time()
@@ -286,7 +296,10 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
 def main():
     """程序主入口。"""
     parser = argparse.ArgumentParser(description="Arknights Cost Bar Ruler")
-    parser.add_argument('--debug-img', action='store_true', help='启用详细的图像转储日志功能，用于调试。')
+    parser.add_argument(
+        '--debug-img', action='store_true',
+        help='启用详细的图像转储日志功能，用于调试。图像将保存到 logs/img_dumps/ 目录。'
+    )
     args = parser.parse_args()
 
     setup_logging(debug_image_mode=args.debug_img)

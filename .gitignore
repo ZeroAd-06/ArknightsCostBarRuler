@@ -1156,3 +1156,7 @@ node_modules/@devicefarmer/minicap-prebuilt/LICENSE
 node_modules/@devicefarmer/minicap-prebuilt/package.json
 node_modules/@devicefarmer/minicap-prebuilt/README.md
 node_modules/@devicefarmer/minicap-prebuilt/.github/dependabot.yml
+logs
+dist
+calibration
+__pycache__

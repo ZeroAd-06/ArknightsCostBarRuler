@@ -273,16 +273,20 @@ class OverlayWindow:
         logger.info("用户点击 '关于'，打开项目主页。")
         webbrowser.open("https://github.com/ZeroAd-06/ArknightsCostBarRuler")
 
-    def _quit_application(self, *args):
-        logger.info("用户点击 '退出'，开始关闭程序...")
+    def _schedule_quit(self):
+        """从任何线程安全地调度退出操作。"""
+        logger.info("接收到退出指令，将在主线程中执行关闭操作。")
+        self.parent_root.after(0, self._quit_application)
+
+    def _quit_application(self):
+        """实际的退出逻辑，确保在主线程中执行。"""
+        logger.info("正在主线程中执行关闭操作...")
         if self.tray_icon:
             logger.debug("停止托盘图标...")
             self.tray_icon.stop()
-        if self.root:
-            logger.debug("销毁Tkinter根窗口...")
-            self.root.quit()
-            self.root.destroy()
-            self.parent_root.destroy()
+
+        logger.debug("销毁Tkinter根窗口...")
+        self.parent_root.destroy()
         logger.info("程序已退出。")
 
     def _create_tray_menu(self) -> Menu:
@@ -302,15 +306,47 @@ class OverlayWindow:
                 item('删除', lambda *args, f=p["filename"]: self._delete_profile(f)))
             calib_menu_items.append(item(display_name, profile_submenu))
 
-        main_menu = Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR, item('v1.1.1 by Z_06', self._open_about_page),
+        main_menu = Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR,
+                         item('v1.1.1 by Z_06', self._open_about_page),
                          item('退出', self._quit_application))
         logger.debug("托盘菜单创建完成。")
         return main_menu
 
+    def _create_profile_submenu(self) -> Menu:
+        """创建一个动态的配置文件子菜单。"""
+        profiles = get_calibration_profiles()
+        calib_menu_items = [item('-- 新建 --', lambda *args: self.master_callback({"type": "prepare_calibration"}))]
+        if profiles:
+            calib_menu_items.append(Menu.SEPARATOR)
+        for p in profiles:
+            is_active = p["filename"] == self.active_profile_filename
+            display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames']}f)"
+
+            # --- [核心修复] ---
+            # 修改lambda以接收并忽略pystray传递的参数，防止它们覆盖我们自己捕获的变量f。
+            profile_actions = Menu(
+                item('选用',
+                     lambda *args, f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
+                     enabled=not is_active),
+                item('重命名',
+                     lambda *args, f=p["filename"]: self._rename_profile(f)),
+                item('删除',
+                     lambda *args, f=p["filename"]: self._delete_profile(f))
+            )
+            # --- [修复结束] ---
+
+            calib_menu_items.append(item(display_name, profile_actions))
+        return Menu(*calib_menu_items)
+
     def _update_tray_menu(self):
+        """更新托盘图标的菜单。"""
         if self.tray_icon:
-            self.tray_icon.menu = self._create_tray_menu()
-            self.tray_icon.update_menu()
+            self.tray_icon.menu = Menu(
+                item('校准配置', self._create_profile_submenu()),
+                Menu.SEPARATOR,
+                item(f'v1.1.1 by Z_06', self._open_about_page),
+                item('退出', self._schedule_quit)
+            )
             logger.debug("托盘菜单已更新。")
 
     def _rename_profile(self, filename: str):
@@ -344,15 +380,29 @@ class OverlayWindow:
             logger.debug("用户取消了删除操作。")
 
     def _setup_tray_icon(self):
+        """设置并以分离模式运行系统托盘图标。"""
         logger.info("正在设置系统托盘图标...")
         try:
             icon_path = resource_path(os.path.join("icons", "deco.png"))
             icon_image = Image.open(icon_path)
-            self.tray_icon = Icon("ArknightsCostBarRuler", icon_image, "明日方舟费用条尺子",
-                                  menu=self._create_tray_menu())
-            tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True, name="TrayIconThread")
-            tray_thread.start()
-            logger.info("托盘图标线程已启动。")
+
+            menu = Menu(
+                item('校准配置', self._create_profile_submenu()),
+                Menu.SEPARATOR,
+                item(f'v1.1.1 by Z_06', self._open_about_page),
+                item('退出', self._schedule_quit)
+            )
+
+            self.tray_icon = Icon(
+                "ArknightsCostBarRuler",
+                icon_image,
+                "明日方舟费用条尺子",
+                menu=menu
+            )
+
+            self.tray_icon.run_detached()
+            logger.info("托盘图标已启动。")
+
         except Exception as e:
             logger.exception(f"创建托盘图标失败: {e}")
 

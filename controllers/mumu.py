@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 class MuMuPlayerController(BaseCaptureController):
     """
     通过加载 MuMu 模拟器的`external_renderer_ipc.dll`来获取屏幕截图。
-    此版本已添加对“后台保活”功能的支持。
     """
 
     def __init__(self, mumu_install_path: str, instance_index: int = 0,
@@ -36,7 +35,7 @@ class MuMuPlayerController(BaseCaptureController):
         Args:
             mumu_install_path (str): MuMu 模拟器的安装根目录。
             instance_index (int): 模拟器实例的索引，用于多开场景，默认为0。
-            package_name (str): 目标应用包名，默认为明日方舟。
+            package_name (str): 目标应用包名，默认为明日方舟国服(com.hypergryph.arknights)。
         """
         logger.info(f"MuMuPlayerController 初始化: path='{mumu_install_path}', instance={instance_index}")
         if sys.platform != "win32":
@@ -98,11 +97,9 @@ class MuMuPlayerController(BaseCaptureController):
         ]
         self.dll.nemu_capture_display.restype = ctypes.c_int
 
-        # --- [核心新增] 添加 nemu_get_display_id 的函数原型 ---
         self.dll.nemu_get_display_id.argtypes = [ctypes.c_int, wintypes.LPCSTR, ctypes.c_int]
         self.dll.nemu_get_display_id.restype = ctypes.c_int
         logger.debug("DLL函数原型设置完成。")
-        # --- [结束新增] ---
 
     def connect(self):
         """加载DLL，连接到模拟器实例并初始化截图环境。"""
@@ -123,7 +120,6 @@ class MuMuPlayerController(BaseCaptureController):
             raise ConnectionError(f"连接MuMu失败 (handle=0)。")
         logger.info(f"连接成功，获得句柄: {self.handle}")
 
-        # --- [核心修改] 使用包名查询正确的 display_id ---
         logger.info(f"正在为包 '{self.package_name}' 查询显示设备ID...")
         self.display_id = self.dll.nemu_get_display_id(self.handle, self.package_name_bytes, 0)
 
@@ -132,7 +128,6 @@ class MuMuPlayerController(BaseCaptureController):
             self.display_id = 0
         else:
             logger.info(f"成功获取到显示设备ID: {self.display_id}")
-        # --- [结束修改] ---
 
         logger.info("正在初始化截图...")
         width_ptr = ctypes.pointer(ctypes.c_int())
@@ -157,7 +152,6 @@ class MuMuPlayerController(BaseCaptureController):
         if not all([self.dll, self.handle, self.buffer]):
             raise ConnectionError("未连接或初始化失败。请先调用 connect()。")
 
-        # --- [核心修改] 使用 self.display_id 而不是硬编码的 0 ---
         ret = self.dll.nemu_capture_display(
             self.handle,
             self.display_id, # 使用正确的显示设备ID
@@ -166,7 +160,6 @@ class MuMuPlayerController(BaseCaptureController):
             ctypes.pointer(ctypes.c_int(self.height)),
             self.buffer
         )
-        # --- [结束修改] ---
 
         if ret != 0:
             raise RuntimeError(f"截图失败，错误码: {ret}")
@@ -193,7 +186,6 @@ class MuMuPlayerController(BaseCaptureController):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.disconnect()
 
-# ... (if __name__ == '__main__': 部分保持不变) ...
 if __name__ == '__main__':
     # 简单的日志设置，用于独立测试
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

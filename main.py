@@ -55,9 +55,10 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
 
     try:
         worker_logger.info("正在创建截图控制器...")
-        controller = create_capture_controller(config)
+        controller = create_capture_controller(config) # config中已包含instance_index
         worker_logger.info("正在连接到设备...")
         cap = controller.connect()
+        # ... (后续代码无需修改) ...
         worker_logger.info("连接成功，捕获测试帧以获取分辨率...")
         temp_frame = cap.capture_frame()
         width, height = temp_frame.size
@@ -311,7 +312,9 @@ def main():
     overlay = OverlayWindow(master_callback=command_queue.put, ui_queue=ui_queue, parent_root=root)
 
     logger.info("正在启动API服务器线程...")
-    start_server_in_thread(api_data_queue, port=2606)
+    # 从配置中读取端口号，如果不存在则使用默认值 2606
+    api_port = config.get("api_port", 2606)
+    start_server_in_thread(api_data_queue, port=api_port)
 
     logger.info("正在启动分析工作线程...")
     worker = threading.Thread(
@@ -335,3 +338,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

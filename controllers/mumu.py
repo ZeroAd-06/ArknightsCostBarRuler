@@ -9,7 +9,7 @@ from ctypes import wintypes
 from pathlib import Path
 import sys
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 from PIL import Image
 
@@ -27,15 +27,14 @@ class MuMuPlayerController(BaseCaptureController):
     通过加载 MuMu 模拟器的`external_renderer_ipc.dll`来获取屏幕截图。
     """
 
-    def __init__(self, mumu_install_path: str, instance_index: int = 0,
-                 package_name: str = "com.hypergryph.arknights"):
+    def __init__(self, mumu_install_path: str, instance_index: int, package_name_list: List[str]):
         """
         初始化 MuMuPlayerController。
 
         Args:
             mumu_install_path (str): MuMu 模拟器的安装根目录。
-            instance_index (int): 模拟器实例的索引，用于多开场景，默认为0。
-            package_name (str): 目标应用包名，默认为明日方舟国服(com.hypergryph.arknights)。
+            instance_index (int): 模拟器实例的索引，用于多开场景。
+            package_name_list (List[str]): 尝试检测的目标应用包名列表。
         """
         logger.info(f"MuMuPlayerController 初始化: path='{mumu_install_path}', instance={instance_index}")
         if sys.platform != "win32":
@@ -46,12 +45,11 @@ class MuMuPlayerController(BaseCaptureController):
             raise FileNotFoundError(f"指定的MuMu模拟器路径不存在: {self.install_path}")
 
         self.instance_index = instance_index
-        self.package_name = package_name
-        self.package_name_bytes = self.package_name.encode('utf-8')
+        self.package_name_list = package_name_list
 
         self.dll: Optional[ctypes.WinDLL] = None
         self.handle: int = 0
-        self.display_id: int = 0 # 关键：用于存储正确的显示设备ID
+        self.display_id: int = -1 # 初始化为-1，表示未找到
 
         self.width: int = 0
         self.height: int = 0
@@ -117,17 +115,27 @@ class MuMuPlayerController(BaseCaptureController):
         logger.info("正在连接到MuMu实例...")
         self.handle = self.dll.nemu_connect(str(self.install_path), self.instance_index)
         if self.handle == 0:
-            raise ConnectionError(f"连接MuMu失败 (handle=0)。")
+            raise ConnectionError(f"连接MuMu失败 (handle=0)。请检查实例索引({self.instance_index})是否正确。")
         logger.info(f"连接成功，获得句柄: {self.handle}")
 
-        logger.info(f"正在为包 '{self.package_name}' 查询显示设备ID...")
-        self.display_id = self.dll.nemu_get_display_id(self.handle, self.package_name_bytes, 0)
+        # --- 遍历包名列表以获取display_id ---
+        logger.info(f"正在为包列表查询显示设备ID...")
+        for pkg_name in self.package_name_list:
+            logger.debug(f"尝试包名: '{pkg_name}'...")
+            pkg_bytes = pkg_name.encode('utf-8')
+            current_display_id = self.dll.nemu_get_display_id(self.handle, pkg_bytes, 0)
+            if current_display_id >= 0:
+                self.display_id = current_display_id
+                logger.info(f"为包 '{pkg_name}' 成功获取到显示设备ID: {self.display_id}")
+                break # 找到后即退出循环
+            else:
+                logger.debug(f"包 '{pkg_name}' 未找到或未运行 (错误码: {current_display_id})。")
 
         if self.display_id < 0:
-            logger.warning(f"查询应用 '{self.package_name}' 的 display_id 失败，错误码: {self.display_id}。将回退到主显示设备(0)。")
+            logger.warning(f"未能从任何已知包名中找到显示设备ID。将回退到主显示设备(0)。")
             self.display_id = 0
-        else:
-            logger.info(f"成功获取到显示设备ID: {self.display_id}")
+
+        # ------------------------------------
 
         logger.info("正在初始化截图...")
         width_ptr = ctypes.pointer(ctypes.c_int())
@@ -187,15 +195,17 @@ class MuMuPlayerController(BaseCaptureController):
         self.disconnect()
 
 if __name__ == '__main__':
-    # 简单的日志设置，用于独立测试
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     main_logger = logging.getLogger(__name__)
 
-    MUMU_PATH = r"D:\Game\Android\YXArkNights-12.0\shell" # 请替换为你的路径
-    main_logger.info(f"测试 MuMuPlayerController，路径: {MUMU_PATH}")
+    MUMU_PATH = r"D:\Game\Android\YXArkNights-12.0\shell"
+    INSTANCE = 0
+    PACKAGE_LIST = ["com.hypergryph.arknights", "com.hypergryph.arknights.bilibili"]
+
+    main_logger.info(f"测试 MuMuPlayerController, 路径: {MUMU_PATH}, 实例: {INSTANCE}")
 
     try:
-        with MuMuPlayerController(mumu_install_path=MUMU_PATH) as mumu_cap:
+        with MuMuPlayerController(mumu_install_path=MUMU_PATH, instance_index=INSTANCE, package_name_list=PACKAGE_LIST) as mumu_cap:
             main_logger.info("--- 开始捕获 ---")
             start_time = time.time()
             frame = mumu_cap.capture_frame()
@@ -208,3 +218,4 @@ if __name__ == '__main__':
 
     except (NotImplementedError, FileNotFoundError, ConnectionError, RuntimeError) as e:
         main_logger.exception(f"程序运行出错: {e}")
+

@@ -114,12 +114,19 @@ class ConfigWindow(ttk.Toplevel):
     def _create_mumu_frame(self, parent) -> ttk.Frame:
         frame = ttk.Labelframe(parent, text=" MuMu模拟器12 设置 ")
         frame.columnconfigure(1, weight=1)
-        label = ttk.Label(frame, text="安装路径:", font=self.FONT_NORMAL)
-        label.grid(row=0, column=0, padx=(10, 5), pady=10, sticky="w")
+        # 安装路径
+        path_label = ttk.Label(frame, text="安装路径:", font=self.FONT_NORMAL)
+        path_label.grid(row=0, column=0, padx=(10, 5), pady=10, sticky="w")
         self.mumu_path_entry = ttk.Entry(frame, font=self.FONT_NORMAL)
         self.mumu_path_entry.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         browse_button = ttk.Button(frame, text="浏览...", command=self._browse_mumu_path, bootstyle="secondary-outline")
         browse_button.grid(row=0, column=2, padx=(5, 10), pady=10, sticky="e")
+        # 实例索引
+        instance_label = ttk.Label(frame, text="实例索引:", font=self.FONT_NORMAL)
+        instance_label.grid(row=1, column=0, padx=(10, 5), pady=(0, 10), sticky="w")
+        self.mumu_instance_entry = ttk.Entry(frame, font=self.FONT_NORMAL)
+        self.mumu_instance_entry.grid(row=1, column=1, padx=5, pady=(0, 10), sticky="ew", columnspan=2)
+        self.mumu_instance_entry.insert(0, "0")  # 默认值为0
         return frame
 
     def _create_minicap_frame(self, parent) -> ttk.Frame:
@@ -160,7 +167,17 @@ class ConfigWindow(ttk.Toplevel):
                 Messagebox.show_error("MuMu模拟器安装路径不能为空！", title="错误", parent=self)
                 return
             self.config_data["install_path"] = mumu_path
-        else:
+
+            # 获取并验证实例索引
+            instance_str = self.mumu_instance_entry.get().strip()
+            try:
+                instance_idx = int(instance_str)
+            except ValueError:
+                logger.warning(f"无效的实例索引 '{instance_str}'，将使用默认值 0。")
+                instance_idx = 0
+            self.config_data["instance_index"] = instance_idx
+
+        else:  # minicap
             minicap_id = self.minicap_id_entry.get().strip()
             if minicap_id:
                 self.config_data["device_id"] = minicap_id

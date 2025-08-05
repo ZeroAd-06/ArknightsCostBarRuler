@@ -316,7 +316,10 @@ class OverlayWindow:
             calib_menu_items.append(Menu.SEPARATOR)
         for p in profiles:
             is_active = p["filename"] == self.active_profile_filename
-            display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames']}f)"
+            # --- [核心修复] ---
+            # 使用正确的键名 'total_frames_str' 来获取帧数信息
+            display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames_str']})"
+            # -----------------
 
             profile_actions = Menu(
                 item('选用',
@@ -338,7 +341,7 @@ class OverlayWindow:
                 item('校准配置', self._create_profile_submenu()),
                 item('帧数显示', self._create_display_mode_submenu()),
                 Menu.SEPARATOR,
-                item(f'v1.1.1 Z_06作品', self._open_about_page),
+                item(f'v1.1.2 by Z_06', self._open_about_page),
                 item('退出', self._schedule_quit)
             )
             logger.debug("托盘菜单已更新。")
@@ -384,7 +387,7 @@ class OverlayWindow:
                 item('校准配置', self._create_profile_submenu()),
                 item('帧数显示', self._create_display_mode_submenu()),
                 Menu.SEPARATOR,
-                item(f'v1.1.1 by Z_06', self._open_about_page),
+                item(f'v1.1.2 by Z_06', self._open_about_page),
                 item('退出', self._schedule_quit)
             )
 

@@ -26,34 +26,32 @@ class OverlayWindow:
         self.master_callback = master_callback
         self.ui_queue = ui_queue
 
-        # 保存主屏幕的物理分辨率
+        self.current_display_mode = '0_to_n-1'
+
         self.screen_width = self.parent_root.winfo_screenwidth()
         self.screen_height = self.parent_root.winfo_screenheight()
         logger.info(f"检测到主屏幕分辨率: {self.screen_width}x{self.screen_height}")
 
-        # 用于存储动态计算出的字体和尺寸
         self.fonts = {}
         self.sizes = {}
-
         self.icons = {}
         self._drag_data = {"x": 0, "y": 0}
         self.tray_icon: Optional[Icon] = None
         self.active_profile_filename: Optional[str] = None
 
     def run(self):
-        """创建并运行悬浮窗的主循环。"""
         logger.info("OverlayWindow.run() - 开始创建和运行窗口。")
         self.root = ttk.Toplevel(self.parent_root)
         self.root.overrideredirect(True)
         self.root.wm_attributes("-topmost", True)
         self.root.wm_attributes("-alpha", 0.75)
         self.root.config(bg='white')
-        self.root.withdraw()  # 初始隐藏
+        self.root.withdraw()
 
         self._load_icons()
         self._create_widgets()
         self._setup_tray_icon()
-        self._process_ui_queue()  # 启动UI队列轮询
+        self._process_ui_queue()
 
         logger.info("进入Tkinter主循环 (mainloop)...")
         self.parent_root.mainloop()
@@ -112,9 +110,7 @@ class OverlayWindow:
         self.lap_container.place_forget()
 
     def setup_geometry(self, emulator_width: int, emulator_height: int):
-        """根据屏幕物理分辨率计算窗口和所有内部元素的尺寸"""
         logger.info(f"根据模拟器分辨率 {emulator_width}x{emulator_height} 设置悬浮窗几何尺寸。")
-        # 注意：这里的 ROI 计算应使用屏幕的物理分辨率来确定费用条的实际像素长度
         roi_x1, roi_x2, _ = find_cost_bar_roi(self.screen_width, self.screen_height)
         cost_bar_pixel_length = roi_x2 - roi_x1
         logger.debug(f"计算出的屏幕费用条像素长度: {cost_bar_pixel_length}")
@@ -147,19 +143,21 @@ class OverlayWindow:
         icon_size = min(button_width, win_height)
         self._resize_icons(icon_size)
 
-        self.root.deiconify()  # 显示窗口
+        self.root.deiconify()
         logger.info("悬浮窗几何尺寸设置完成并已显示。")
 
-    def set_state_running(self, total_frames: int, active_profile: str):
-        logger.info(f"UI状态切换: running (profile='{active_profile}', total_frames={total_frames})")
+    def set_state_running(self, display_total: str, active_profile: str, display_mode: str):
+        logger.info(f"UI状态切换: running (profile='{active_profile}', mode='{display_mode}')")
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('deco'), command=None)
+
+        self.current_display_mode = display_mode  # 更新当前模式状态
 
         padding = self.sizes.get('padding', 4)
         offset_x = self.sizes.get('offset_x', -40)
 
         self.running_frame_label.place(relx=1.0, rely=0.4, anchor='e', x=offset_x)
-        self.running_total_label.config(text=f"/{total_frames - 1}")
+        self.running_total_label.config(text=display_total)  # 直接使用传入的文本
         self.running_total_label.place(relx=1.0, rely=1.0, anchor='se', x=-padding, y=-padding)
         self.timer_container.place(relx=0.0, rely=1.0, anchor='sw', x=padding, y=-padding)
 
@@ -181,7 +179,6 @@ class OverlayWindow:
     def _resize_icons(self, size: int):
         logger.debug(f"正在将所有图标调整为尺寸: {size}x{size}")
         try:
-            # 计算计时器图标的高度
             timer_height = self.fonts['small'].metrics('linespace')
             logger.debug(f"计时器图标高度: {timer_height}")
 
@@ -199,18 +196,16 @@ class OverlayWindow:
             self.icons["timer_sized"] = ImageTk.PhotoImage(image=timer_img)
             self.timer_icon_label.config(image=self.icons["timer_sized"])
 
-            lap_icon_path = resource_path(os.path.join("icons", "wait.png"))  # 复用图标
+            lap_icon_path = resource_path(os.path.join("icons", "wait.png"))
             lap_img = Image.open(lap_icon_path).resize((timer_height, timer_height), Image.Resampling.LANCZOS)
             self.icons["lap_sized"] = ImageTk.PhotoImage(image=lap_img)
             self.lap_icon_label.config(image=self.icons["lap_sized"])
         except Exception as e:
             logger.exception(f"调整图标大小时出错: {e}")
 
-    def update_running_display(self, current_frame: Optional[int]):
-        if current_frame is not None:
-            self.running_frame_label.config(text=f"{current_frame}")
-        else:
-            self.running_frame_label.config(text="--")
+    def update_running_display(self, display_frame: str, display_total: str):
+        self.running_frame_label.config(text=f"{display_frame}")
+        self.running_total_label.config(text=display_total)
 
     def update_timer(self, time_str: str):
         self.timer_label.config(text=time_str)
@@ -219,19 +214,21 @@ class OverlayWindow:
         try:
             message = self.ui_queue.get_nowait()
             msg_type = message.get("type")
-            if msg_type != "update":  # 避免update消息刷屏日志
+            if msg_type != "update":
                 logger.debug(f"从UI队列收到消息: {message}")
 
             if msg_type == "update":
-                self.update_running_display(message["frame"])
+                self.update_running_display(message["display_frame"], message["display_total"])
                 if "time_str" in message: self.update_timer(message["time_str"])
                 if "lap_frames" in message: self.update_lap_timer(message["lap_frames"])
             elif msg_type == "geometry":
                 self.setup_geometry(message["width"], message["height"])
             elif msg_type == "state_change":
+                self.current_display_mode = message.get('display_mode', '0_to_n-1')
                 state = message["state"]
                 if state == "running":
-                    self.set_state_running(message["total_frames"], message["active_profile"])
+                    self.set_state_running(message["display_total"], message["active_profile"],
+                                           self.current_display_mode)
                 elif state == "idle":
                     self.set_state_idle()
                 elif state == "pre_calibration":
@@ -243,6 +240,10 @@ class OverlayWindow:
             elif msg_type == "profiles_changed":
                 logger.info("收到配置文件变更通知，正在更新托盘菜单...")
                 self._update_tray_menu()
+            elif msg_type == "mode_changed":
+                logger.info("收到显示模式变更通知，正在更新托盘菜单...")
+                self.current_display_mode = message["mode"]
+                self._update_tray_menu()
             elif msg_type == "error":
                 logger.error(f"UI收到错误消息: {message['message']}")
                 self._hide_all_dynamic_labels()
@@ -253,7 +254,6 @@ class OverlayWindow:
         except Exception as e:
             logger.exception("处理UI队列消息时发生未预料的错误。")
         finally:
-            # 持续轮询
             if self.root and self.root.winfo_exists(): self.root.after(50, self._process_ui_queue)
 
     def _load_icons(self):
@@ -274,46 +274,42 @@ class OverlayWindow:
         webbrowser.open("https://github.com/ZeroAd-06/ArknightsCostBarRuler")
 
     def _schedule_quit(self):
-        """从任何线程安全地调度退出操作。"""
         logger.info("接收到退出指令，将在主线程中执行关闭操作。")
         self.parent_root.after(0, self._quit_application)
 
     def _quit_application(self):
-        """实际的退出逻辑，确保在主线程中执行。"""
         logger.info("正在主线程中执行关闭操作...")
         if self.tray_icon:
             logger.debug("停止托盘图标...")
             self.tray_icon.stop()
-
         logger.debug("销毁Tkinter根窗口...")
         self.parent_root.destroy()
         logger.info("程序已退出。")
 
-    def _create_tray_menu(self) -> Menu:
-        logger.debug("正在创建/刷新托盘菜单...")
-        profiles = get_calibration_profiles()
-        logger.debug(f"找到 {len(profiles)} 个校准配置文件用于菜单。")
-        calib_menu_items = [item('-- 新建 --', lambda *args: self.master_callback({"type": "prepare_calibration"}))]
-        if profiles: calib_menu_items.append(Menu.SEPARATOR)
-        for p in profiles:
-            is_active = p["filename"] == self.active_profile_filename
-            display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames']}f)"
-            profile_submenu = Menu(
-                item('选用',
-                     lambda *args, f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
-                     enabled=not is_active),
-                item('重命名', lambda *args, f=p["filename"]: self._rename_profile(f)),
-                item('删除', lambda *args, f=p["filename"]: self._delete_profile(f)))
-            calib_menu_items.append(item(display_name, profile_submenu))
+    def _create_display_mode_submenu(self) -> Menu:
+        """创建一个动态的显示模式子菜单。"""
+        modes = {
+            "0_to_n-1": "0 / n-1",
+            "0_to_n": "0 / n",
+            "1_to_n": "1 / n"
+        }
 
-        main_menu = Menu(item('校准配置', Menu(*calib_menu_items)), Menu.SEPARATOR,
-                         item('v1.1.1 by Z_06', self._open_about_page),
-                         item('退出', self._quit_application))
-        logger.debug("托盘菜单创建完成。")
-        return main_menu
+        def is_checked(mode_key):
+            return self.current_display_mode == mode_key
+
+        menu_items = []
+        for key, text in modes.items():
+            menu_items.append(
+                item(
+                    text,
+                    lambda *args, m=key: self.master_callback({"type": "set_display_mode", "mode": m}),
+                    checked=lambda *args, m=key: is_checked(m),
+                    radio=True
+                )
+            )
+        return Menu(*menu_items)
 
     def _create_profile_submenu(self) -> Menu:
-        """创建一个动态的配置文件子菜单。"""
         profiles = get_calibration_profiles()
         calib_menu_items = [item('-- 新建 --', lambda *args: self.master_callback({"type": "prepare_calibration"}))]
         if profiles:
@@ -322,8 +318,6 @@ class OverlayWindow:
             is_active = p["filename"] == self.active_profile_filename
             display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames']}f)"
 
-            # --- [核心修复] ---
-            # 修改lambda以接收并忽略pystray传递的参数，防止它们覆盖我们自己捕获的变量f。
             profile_actions = Menu(
                 item('选用',
                      lambda *args, f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
@@ -333,7 +327,6 @@ class OverlayWindow:
                 item('删除',
                      lambda *args, f=p["filename"]: self._delete_profile(f))
             )
-            # --- [修复结束] ---
 
             calib_menu_items.append(item(display_name, profile_actions))
         return Menu(*calib_menu_items)
@@ -343,8 +336,9 @@ class OverlayWindow:
         if self.tray_icon:
             self.tray_icon.menu = Menu(
                 item('校准配置', self._create_profile_submenu()),
+                item('帧数显示', self._create_display_mode_submenu()),
                 Menu.SEPARATOR,
-                item(f'v1.1.1 by Z_06', self._open_about_page),
+                item(f'v1.1.1 Z_06作品', self._open_about_page),
                 item('退出', self._schedule_quit)
             )
             logger.debug("托盘菜单已更新。")
@@ -388,6 +382,7 @@ class OverlayWindow:
 
             menu = Menu(
                 item('校准配置', self._create_profile_submenu()),
+                item('帧数显示', self._create_display_mode_submenu()),
                 Menu.SEPARATOR,
                 item(f'v1.1.1 by Z_06', self._open_about_page),
                 item('退出', self._schedule_quit)
@@ -402,7 +397,6 @@ class OverlayWindow:
 
             self.tray_icon.run_detached()
             logger.info("托盘图标已启动。")
-
         except Exception as e:
             logger.exception(f"创建托盘图标失败: {e}")
 

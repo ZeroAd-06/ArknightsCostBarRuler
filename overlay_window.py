@@ -3,12 +3,12 @@ import os
 import queue
 import sys
 import tkinter as tk
+from tkinter import Menu as tkMenu
 import ttkbootstrap as ttk
 from ttkbootstrap.dialogs import Querybox, Messagebox
 from tkinter import font as tkFont
 import webbrowser
 import threading
-from pystray import MenuItem as item, Menu, Icon
 from PIL import Image, ImageTk
 from typing import Optional, Callable
 
@@ -16,6 +16,24 @@ from utils import find_cost_bar_roi, resource_path
 from calibration_manager import get_calibration_profiles, get_calibration_basename
 
 logger = logging.getLogger(__name__)
+
+TRAY_SUPPORTED = False
+try:
+    from pystray import MenuItem as item, Menu, Icon
+
+    TRAY_SUPPORTED = True
+    logger.info("pystray 模块已加载，系统托盘功能已启用。")
+except (ImportError, ModuleNotFoundError):
+    logger.warning("pystray 模块未安装或不受支持，系统托盘功能将被禁用。将使用右键菜单作为替代。")
+
+    class Icon:
+        pass
+    class Menu:
+        pass
+    class item:
+        pass
+
+
 
 
 class OverlayWindow:
@@ -50,7 +68,10 @@ class OverlayWindow:
 
         self._load_icons()
         self._create_widgets()
-        self._setup_tray_icon()
+
+        if TRAY_SUPPORTED:
+            self._setup_tray_icon()
+
         self._process_ui_queue()
 
         logger.info("进入Tkinter主循环 (mainloop)...")
@@ -66,35 +87,93 @@ class OverlayWindow:
         style.configure('Overlay.Timer.TLabel', background=overlay_bg, foreground='gray60')
         style.configure('Overlay.TButton', background=overlay_bg, borderwidth=0, highlightthickness=0, padding=0)
         style.map('Overlay.TButton', background=[('active', 'gray40')])
-        container = ttk.Frame(self.root, style='Overlay.TFrame')
-        container.pack(expand=True, fill='both')
-        self.left_frame = ttk.Frame(container, style='Overlay.TFrame')
+
+        self.container = ttk.Frame(self.root, style='Overlay.TFrame')
+        self.container.pack(expand=True, fill='both')
+
+        self.left_frame = ttk.Frame(self.container, style='Overlay.TFrame')
         self.left_frame.place(relx=0, rely=0, relwidth=0.33, relheight=1.0)
+
         self.icon_button = ttk.Button(self.left_frame, style='Overlay.TButton')
         self.icon_button.pack(expand=True, fill="both")
-        self.right_frame = ttk.Frame(container, style='Overlay.TFrame')
+
+        self.right_frame = ttk.Frame(self.container, style='Overlay.TFrame')
         self.right_frame.place(relx=0.33, rely=0, relwidth=0.67, relheight=1.0)
-        self.right_frame.bind("<ButtonPress-1>", self._on_drag_start)
-        self.right_frame.bind("<ButtonRelease-1>", self._on_drag_stop)
-        self.right_frame.bind("<B1-Motion>", self._on_drag_motion)
+
+        for widget in [self.container, self.left_frame, self.right_frame, self.icon_button]:
+            widget.bind("<ButtonPress-1>", self._on_drag_start)
+            widget.bind("<ButtonRelease-1>", self._on_drag_stop)
+            widget.bind("<B1-Motion>", self._on_drag_motion)
+            widget.bind("<Button-3>", self._show_context_menu)
 
         self.pre_cal_label = ttk.Label(self.right_frame, text="", style='Overlay.TLabel', justify='center')
         self.cal_progress_label = ttk.Label(self.right_frame, text="0%", style='Overlay.TLabel')
         self.running_frame_label = ttk.Label(self.right_frame, text="--", style='Overlay.TLabel')
-        self.running_total_label = ttk.Label(container, text="/--", style='Overlay.Total.TLabel')
-        self.timer_container = ttk.Frame(container, style='Overlay.TFrame')
+        self.running_total_label = ttk.Label(self.container, text="/--", style='Overlay.Total.TLabel')
+
+        self.timer_container = ttk.Frame(self.container, style='Overlay.TFrame')
         self.timer_icon_label = ttk.Label(self.timer_container, style='Overlay.TLabel')
         self.timer_icon_label.pack(side=tk.LEFT)
         self.timer_label = ttk.Label(self.timer_container, text="00:00:00", style='Overlay.Timer.TLabel',
                                      cursor="hand2")
         self.timer_label.pack(side=tk.LEFT)
         self.timer_label.bind("<Button-1>", self._on_timer_click)
-        self.lap_container = ttk.Frame(container, style='Overlay.TFrame')
+        self.timer_container.bind("<Button-3>", self._show_context_menu)
+        self.timer_label.bind("<Button-3>", self._show_context_menu)
+        self.timer_icon_label.bind("<Button-3>", self._show_context_menu)
+
+        self.lap_container = ttk.Frame(self.container, style='Overlay.TFrame')
         self.lap_icon_label = ttk.Label(self.lap_container, style='Overlay.TLabel')
         self.lap_icon_label.pack(side=tk.LEFT)
         self.lap_frame_label = ttk.Label(self.lap_container, text="0", style='Overlay.Timer.TLabel')
         self.lap_frame_label.pack(side=tk.LEFT)
+
         logger.debug("悬浮窗控件创建完成。")
+
+    def _show_context_menu(self, event):
+        """创建并显示Tkinter上下文菜单。"""
+        logger.debug("显示右键上下文菜单...")
+        context_menu = tkMenu(self.root, tearoff=0)
+
+        profile_submenu = tkMenu(context_menu, tearoff=0)
+        profiles = get_calibration_profiles()
+        profile_submenu.add_command(label="-- 新建 --",
+                                    command=lambda: self.master_callback({"type": "prepare_calibration"}))
+        if profiles:
+            profile_submenu.add_separator()
+        for p in profiles:
+            is_active = p["filename"] == self.active_profile_filename
+            display_name = f"{p['basename']} ({p['total_frames_str']})"
+
+            actions_submenu = tkMenu(profile_submenu, tearoff=0)
+            actions_submenu.add_command(label="选用", command=lambda f=p["filename"]: self.master_callback(
+                {"type": "use_profile", "filename": f}), state="disabled" if is_active else "normal")
+            actions_submenu.add_command(label="重命名", command=lambda f=p["filename"]: self._rename_profile(f))
+            actions_submenu.add_command(label="删除", command=lambda f=p["filename"]: self._delete_profile(f))
+
+            profile_submenu.add_cascade(label=display_name, menu=actions_submenu,
+                                        foreground="blue" if is_active else "black")
+
+        context_menu.add_cascade(label="校准配置", menu=profile_submenu)
+
+        display_mode_submenu = tkMenu(context_menu, tearoff=0)
+        modes = {"0_to_n-1": "0 / n-1", "0_to_n": "0 / n", "1_to_n": "1 / n"}
+        tk_display_mode = tk.StringVar(value=self.current_display_mode)
+        for key, text in modes.items():
+            display_mode_submenu.add_radiobutton(label=text, variable=tk_display_mode, value=key,
+                                                 command=lambda m=key: self.master_callback(
+                                                     {"type": "set_display_mode", "mode": m}))
+        context_menu.add_cascade(label="帧数显示", menu=display_mode_submenu)
+
+        context_menu.add_separator()
+        context_menu.add_command(label=f'v1.1.2 Z_06 作品', command=self._open_about_page)
+        context_menu.add_command(label="退出", command=self._schedule_quit)
+
+        try:
+            context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            context_menu.grab_release()
+
 
     def _on_timer_click(self, event=None):
         logger.info("计时器标签被点击，发送 toggle_lap_timer 指令。")
@@ -151,18 +230,20 @@ class OverlayWindow:
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('deco'), command=None)
 
-        self.current_display_mode = display_mode  # 更新当前模式状态
+        self.current_display_mode = display_mode
 
         padding = self.sizes.get('padding', 4)
         offset_x = self.sizes.get('offset_x', -40)
 
         self.running_frame_label.place(relx=1.0, rely=0.4, anchor='e', x=offset_x)
-        self.running_total_label.config(text=display_total)  # 直接使用传入的文本
+        self.running_total_label.config(text=display_total)
         self.running_total_label.place(relx=1.0, rely=1.0, anchor='se', x=-padding, y=-padding)
         self.timer_container.place(relx=0.0, rely=1.0, anchor='sw', x=padding, y=-padding)
 
         self.active_profile_filename = active_profile
-        self._update_tray_menu()
+
+        if TRAY_SUPPORTED:
+            self._update_tray_menu()
 
     def update_lap_timer(self, lap_frames: Optional[int]):
         padding = self.sizes.get('padding', 4)
@@ -239,11 +320,11 @@ class OverlayWindow:
                 self.update_calibration_progress(message["progress"])
             elif msg_type == "profiles_changed":
                 logger.info("收到配置文件变更通知，正在更新托盘菜单...")
-                self._update_tray_menu()
+                if TRAY_SUPPORTED: self._update_tray_menu()
             elif msg_type == "mode_changed":
                 logger.info("收到显示模式变更通知，正在更新托盘菜单...")
                 self.current_display_mode = message["mode"]
-                self._update_tray_menu()
+                if TRAY_SUPPORTED: self._update_tray_menu()
             elif msg_type == "error":
                 logger.error(f"UI收到错误消息: {message['message']}")
                 self._hide_all_dynamic_labels()
@@ -279,72 +360,51 @@ class OverlayWindow:
 
     def _quit_application(self):
         logger.info("正在主线程中执行关闭操作...")
-        if self.tray_icon:
+        if TRAY_SUPPORTED and self.tray_icon:
             logger.debug("停止托盘图标...")
             self.tray_icon.stop()
         logger.debug("销毁Tkinter根窗口...")
         self.parent_root.destroy()
         logger.info("程序已退出。")
 
-    def _create_display_mode_submenu(self) -> Menu:
-        """创建一个动态的显示模式子菜单。"""
-        modes = {
-            "0_to_n-1": "0 / n-1",
-            "0_to_n": "0 / n",
-            "1_to_n": "1 / n"
-        }
+    def _create_pystray_display_mode_submenu(self) -> Menu:
+        modes = {"0_to_n-1": "0 / n-1", "0_to_n": "0 / n", "1_to_n": "1 / n"}
 
-        def is_checked(mode_key):
-            return self.current_display_mode == mode_key
+        def is_checked(mode_key): return self.current_display_mode == mode_key
 
-        menu_items = []
-        for key, text in modes.items():
-            menu_items.append(
-                item(
-                    text,
-                    lambda *args, m=key: self.master_callback({"type": "set_display_mode", "mode": m}),
-                    checked=lambda *args, m=key: is_checked(m),
-                    radio=True
-                )
-            )
+        menu_items = [
+            item(text, lambda m=key: self.master_callback({"type": "set_display_mode", "mode": m}),
+                 checked=lambda *args, m=key: is_checked(m), radio=True)
+            for key, text in modes.items()
+        ]
         return Menu(*menu_items)
 
-    def _create_profile_submenu(self) -> Menu:
+    def _create_pystray_profile_submenu(self) -> Menu:
         profiles = get_calibration_profiles()
-        calib_menu_items = [item('-- 新建 --', lambda *args: self.master_callback({"type": "prepare_calibration"}))]
-        if profiles:
-            calib_menu_items.append(Menu.SEPARATOR)
+        calib_menu_items = [item('-- 新建 --', lambda: self.master_callback({"type": "prepare_calibration"}))]
+        if profiles: calib_menu_items.append(Menu.SEPARATOR)
         for p in profiles:
             is_active = p["filename"] == self.active_profile_filename
-            # --- [核心修复] ---
-            # 使用正确的键名 'total_frames_str' 来获取帧数信息
             display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames_str']})"
-            # -----------------
-
             profile_actions = Menu(
-                item('选用',
-                     lambda *args, f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
+                item('选用', lambda f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
                      enabled=not is_active),
-                item('重命名',
-                     lambda *args, f=p["filename"]: self._rename_profile(f)),
-                item('删除',
-                     lambda *args, f=p["filename"]: self._delete_profile(f))
+                item('重命名', lambda f=p["filename"]: self._rename_profile(f)),
+                item('删除', lambda f=p["filename"]: self._delete_profile(f))
             )
-
             calib_menu_items.append(item(display_name, profile_actions))
         return Menu(*calib_menu_items)
 
     def _update_tray_menu(self):
-        """更新托盘图标的菜单。"""
-        if self.tray_icon:
-            self.tray_icon.menu = Menu(
-                item('校准配置', self._create_profile_submenu()),
-                item('帧数显示', self._create_display_mode_submenu()),
-                Menu.SEPARATOR,
-                item(f'v1.1.2 Z_06作品', self._open_about_page),
-                item('退出', self._schedule_quit)
-            )
-            logger.debug("托盘菜单已更新。")
+        if not TRAY_SUPPORTED or not self.tray_icon: return
+        self.tray_icon.menu = Menu(
+            item('校准配置', self._create_pystray_profile_submenu()),
+            item('帧数显示', self._create_pystray_display_mode_submenu()),
+            Menu.SEPARATOR,
+            item(f'v1.1.2 Z_06 作品', self._open_about_page),
+            item('退出', self._schedule_quit)
+        )
+        logger.debug("托盘菜单已更新。")
 
     def _rename_profile(self, filename: str):
         logger.info(f"请求重命名配置文件: {filename}")
@@ -370,34 +430,20 @@ class OverlayWindow:
     def _show_delete_dialog(self, filename: str):
         basename = get_calibration_basename(filename)
         result = Messagebox.yesno(message=f"确实要删除校准配置 '{basename}' 吗？", title="确认删除", parent=self.root)
-        if result == "Yes" or "确认":
+        if result == "Yes":
             logger.info(f"用户确认删除 '{filename}'，发送指令。")
             self.master_callback({"type": "delete_profile", "filename": filename})
         else:
             logger.debug("用户取消了删除操作。")
 
     def _setup_tray_icon(self):
-        """设置并以分离模式运行系统托盘图标。"""
+        if not TRAY_SUPPORTED: return
         logger.info("正在设置系统托盘图标...")
         try:
             icon_path = resource_path(os.path.join("icons", "deco.png"))
             icon_image = Image.open(icon_path)
-
-            menu = Menu(
-                item('校准配置', self._create_profile_submenu()),
-                item('帧数显示', self._create_display_mode_submenu()),
-                Menu.SEPARATOR,
-                item(f'v1.1.2 Z_06作品', self._open_about_page),
-                item('退出', self._schedule_quit)
-            )
-
-            self.tray_icon = Icon(
-                "ArknightsCostBarRuler",
-                icon_image,
-                "明日方舟费用条尺子",
-                menu=menu
-            )
-
+            self.tray_icon = Icon("ArknightsCostBarRuler", icon_image, "明日方舟费用条尺子")
+            self._update_tray_menu()
             self.tray_icon.run_detached()
             logger.info("托盘图标已启动。")
         except Exception as e:
@@ -407,10 +453,10 @@ class OverlayWindow:
         logger.info("UI状态切换: idle")
         self._hide_all_dynamic_labels()
         self.icon_button.config(image=self.icons.get('deco'), command=None)
-        self.pre_cal_label.config(text="右键托盘\n选择一个配置")
+        self.pre_cal_label.config(text="右键托盘或窗口\n选择一个配置")
         self.pre_cal_label.place(relx=0.5, rely=0.5, anchor="center")
         self.active_profile_filename = None
-        self._update_tray_menu()
+        if TRAY_SUPPORTED: self._update_tray_menu()
 
     def set_state_pre_calibration(self):
         logger.info("UI状态切换: pre_calibration")
@@ -420,7 +466,7 @@ class OverlayWindow:
         self.pre_cal_label.config(text="选中干员后\n点击左侧校准")
         self.pre_cal_label.place(relx=0.5, rely=0.5, anchor="center")
         self.active_profile_filename = None
-        self._update_tray_menu()
+        if TRAY_SUPPORTED: self._update_tray_menu()
 
     def set_state_calibrating(self):
         logger.info("UI状态切换: calibrating")

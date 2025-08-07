@@ -341,7 +341,7 @@ class OverlayWindow:
                 item('校准配置', self._create_profile_submenu()),
                 item('帧数显示', self._create_display_mode_submenu()),
                 Menu.SEPARATOR,
-                item(f'v1.1.2? Z_06作品', self._open_about_page),
+                item(f'v1.1.2 Z_06作品', self._open_about_page),
                 item('退出', self._schedule_quit)
             )
             logger.debug("托盘菜单已更新。")
@@ -387,7 +387,7 @@ class OverlayWindow:
                 item('校准配置', self._create_profile_submenu()),
                 item('帧数显示', self._create_display_mode_submenu()),
                 Menu.SEPARATOR,
-                item(f'v1.1.2? Z_06作品', self._open_about_page),
+                item(f'v1.1.2 Z_06作品', self._open_about_page),
                 item('退出', self._schedule_quit)
             )
 

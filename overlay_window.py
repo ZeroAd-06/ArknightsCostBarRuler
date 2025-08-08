@@ -373,7 +373,8 @@ class OverlayWindow:
         def is_checked(mode_key): return self.current_display_mode == mode_key
 
         menu_items = [
-            item(text, lambda m=key: self.master_callback({"type": "set_display_mode", "mode": m}),
+            # 使用 *args 忽略所有传入的位置参数，并安全地使用关键字参数 m
+            item(text, lambda *args, m=key: self.master_callback({"type": "set_display_mode", "mode": m}),
                  checked=lambda *args, m=key: is_checked(m), radio=True)
             for key, text in modes.items()
         ]
@@ -387,7 +388,8 @@ class OverlayWindow:
             is_active = p["filename"] == self.active_profile_filename
             display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames_str']})"
             profile_actions = Menu(
-                item('选用', lambda f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
+                item('选用',
+                     lambda *args, f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
                      enabled=not is_active),
                 item('重命名', lambda f=p["filename"]: self._rename_profile(f)),
                 item('删除', lambda f=p["filename"]: self._delete_profile(f))

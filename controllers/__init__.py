@@ -60,6 +60,20 @@ def create_capture_controller(config: Dict[str, Any]) -> BaseCaptureController:
         logger.debug(f"创建 MinicapController, device_id='{device_id}'")
         return MinicapController(device_id=device_id)
 
+    elif controller_type == "ldplayer":
+        from .ldplayer import LDPlayerController
+        install_path = config.get("install_path")
+        if not install_path:
+            raise ValueError("类型为 'ldplayer' 的配置必须包含 'install_path'。")
+        instance_index = config.get("instance_index", 0)
+        # device_id 是可选的，如果未提供，LDController会自己检测
+        device_id = config.get("device_id")
+        return LDPlayerController(
+            ld_install_path=install_path,
+            instance_index=instance_index,
+            device_id=device_id
+        )
+
     else:
         logger.error(f"不支持的控制器类型: '{controller_type}'")
         raise ValueError(f"不支持的控制器类型: '{controller_type}'")

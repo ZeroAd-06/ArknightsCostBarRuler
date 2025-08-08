@@ -315,6 +315,31 @@ def main():
             except (AttributeError, OSError):
                 logger.warning("设置DPI感知失败。")
 
+        try:
+            # 检查当前是否为管理员
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            is_admin = False  # 如果检查失败，保守地认为不是管理员
+
+        if not is_admin:
+            print("权限不足，正在尝试以管理员身份重新启动...")
+            try:
+                # 使用 ShellExecuteW 提权并重新运行脚本
+                ctypes.windll.shell32.ShellExecuteW(
+                    None,  # hwnd
+                    "runas",  # lpOperation
+                    sys.executable,  # lpFile
+                    " ".join(sys.argv),  # lpParameters
+                    None,  # lpDirectory
+                    1  # nShowCmd
+                )
+            except Exception as e:
+                print(f"自动提权失败: {e}")
+                print("请手动右键，选择“以管理员身份运行”本程序。")
+                input("按回车键退出...")
+            sys.exit(0)  # 退出当前的非管理员进程
+
+
     root = ttk.Window(themename="litera")
     root.withdraw()
 

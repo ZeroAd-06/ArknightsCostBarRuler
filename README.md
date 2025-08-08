@@ -77,7 +77,7 @@
 
 - **[Minicap](https://github.com/DeviceFarmer/minicap)**: 用于通用的安卓屏幕高速截图。在 `Apache License 2.0` 下使用。
 - **[Google Material Symbols](https://fonts.google.com/icons)**: 本项目使用的图标资源。在 `Apache License 2.0` 下使用。
-- **[MaaFramework)](https://github.com/MaaXYZ/MaaFramework)**: 虽然本项目 **并不** 由 MaaFramework 强力驱动，但是如果没有其代码作为参考，编写 MuMu模拟器12 的适配是不可能的。`mumu.py` 模块遵循 `GNU Lesser General Public License v3.0`。
+- **[MaaFramework)](https://github.com/MaaXYZ/MaaFramework)**: 虽然本项目 **并不** 由 MaaFramework 强力驱动，但是如果没有其代码作为参考，编写 MuMu模拟器12 和 雷电模拟器9 的截图增强功能的适配是不可能的。`mumu.py` 和 `ldplayer.py` 模块遵循 `GNU Lesser General Public License v3.0`。
 
 您可以在本仓库的 `LICENSE` 文件夹中找到相关协议的副本。
 

@@ -337,7 +337,7 @@ def main():
                 print(f"自动提权失败: {e}")
                 print("请手动右键，选择“以管理员身份运行”本程序。")
                 input("按回车键退出...")
-            sys.exit(0)  # 退出当前的非管理员进程
+                sys.exit(0)  # 退出当前的非管理员进程
 
 
     root = ttk.Window(themename="litera")

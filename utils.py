@@ -114,7 +114,7 @@ def _get_raw_filled_pixel_width(
     从费用条ROI中提取填充部分的像素宽度。
     """
     WHITE_THRESHOLD = 250
-    GRAY_TOLERANCE = 10
+    GRAY_TOLERANCE = 20
     ALPHA_OPAQUE = 255
     def is_pixel_grayscale(r, g, b):
         return abs(r - g) <= GRAY_TOLERANCE and abs(g - b) <= GRAY_TOLERANCE

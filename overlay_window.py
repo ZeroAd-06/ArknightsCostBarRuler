@@ -388,11 +388,10 @@ class OverlayWindow:
             is_active = p["filename"] == self.active_profile_filename
             display_name = f"{'● ' if is_active else ''}{p['basename']} ({p['total_frames_str']})"
             profile_actions = Menu(
-                item('选用',
-                     lambda *args, f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
+                item('选用', lambda *args, f=p["filename"]: self.master_callback({"type": "use_profile", "filename": f}),
                      enabled=not is_active),
-                item('重命名', lambda f=p["filename"]: self._rename_profile(f)),
-                item('删除', lambda f=p["filename"]: self._delete_profile(f))
+                item('重命名', lambda *args, f=p["filename"]: self._rename_profile(f)),
+                item('删除', lambda *args, f=p["filename"]: self._delete_profile(f))
             )
             calib_menu_items.append(item(display_name, profile_actions))
         return Menu(*calib_menu_items)
@@ -432,7 +431,7 @@ class OverlayWindow:
     def _show_delete_dialog(self, filename: str):
         basename = get_calibration_basename(filename)
         result = Messagebox.yesno(message=f"确实要删除校准配置 '{basename}' 吗？", title="确认删除", parent=self.root)
-        if result == "Yes":
+        if result == "Yes" or "确认":
             logger.info(f"用户确认删除 '{filename}'，发送指令。")
             self.master_callback({"type": "delete_profile", "filename": filename})
         else:

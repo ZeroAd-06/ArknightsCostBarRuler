@@ -138,7 +138,7 @@ def _get_raw_filled_pixel_width(
         logger.debug(f"费用条已满 (末端像素为白色)，宽度: {filled_width}")
         return filled_width
     filled_width = 0
-    for x in range(x2 - 2, x1 - 1, -1):
+    for x in range(x2 - 2, x1, -1):
         r, g, b, a = frame.getpixel((x, y))
         if a != ALPHA_OPAQUE or not is_pixel_grayscale(r, g, b):
             logger.debug(f"ROI区域在扫描时发现无效像素 (x={x})，判定为非费用条。")

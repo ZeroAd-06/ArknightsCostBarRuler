@@ -6,7 +6,7 @@ from typing import Optional
 
 # 全局变量，用于控制是否启用图像转储功能
 DEBUG_IMAGE_MODE = False
-LOG_DIR = "logs"
+LOG_DIR = "../logs"
 IMG_DUMP_DIR: Optional[str] = None
 
 

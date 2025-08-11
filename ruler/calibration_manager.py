@@ -3,18 +3,16 @@ import logging
 import time
 import os
 import glob
-from typing import Dict, Any, List, Tuple, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable
 from collections import Counter
 import statistics
 
-from PIL import Image
-
-from controllers.base import BaseCaptureController
-from utils import find_cost_bar_roi, get_logical_frame_from_calibration, _get_raw_filled_pixel_width
+from ruler.controllers.base import BaseCaptureController
+from utils import find_cost_bar_roi, _get_raw_filled_pixel_width
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_DIR = "calibration"
+CALIBRATION_DIR = "../calibration"
 
 
 def _calculate_jaccard_similarity(set1: set, set2: set) -> float:

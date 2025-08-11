@@ -10,7 +10,7 @@ from typing import Optional
 from PIL import Image
 
 from .base import BaseCaptureController
-from utils import resource_path
+from ruler.utils import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class MinicapController(BaseCaptureController):
     它会自动处理设备属性检测、文件推送、服务启动和图像帧捕获。
     """
 
-    def __init__(self, device_id: Optional[str] = None, minicap_path: str = 'controllers/minicap',
+    def __init__(self, device_id: Optional[str] = None, minicap_path: str = 'ruler/controllers/minicap',
                  local_port: int = 1717):
         """
         初始化 MinicapController。
@@ -268,13 +268,13 @@ class MinicapController(BaseCaptureController):
 
 if __name__ == '__main__':
     # 注意：为了在独立运行时看到日志，需要手动配置
-    from logger_setup import setup_logging
+    from ruler.logger_setup import setup_logging
 
     setup_logging(debug_image_mode=True)
     main_logger = logging.getLogger(__name__)
 
     try:
-        with MinicapController(minicap_path='./minicap') as cap:
+        with MinicapController(minicap_path='minicap') as cap:
             for i in range(5):
                 main_logger.info(f"--- 正在捕获第 {i + 1} 帧 ---")
                 start_time = time.time()

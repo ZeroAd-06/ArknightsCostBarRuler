@@ -8,15 +8,15 @@ import time
 import os
 import ttkbootstrap as ttk
 
-from calibration_manager import (load_calibration_by_filename, calibrate, save_calibration_data,
-                                 remove_calibration_file, get_calibration_basename,
-                                 CALIBRATION_DIR)
-from config_manager import load_config, create_config_with_gui, save_config
-from controllers import create_capture_controller
+from ruler.calibration_manager import (load_calibration_by_filename, calibrate, save_calibration_data,
+                                       remove_calibration_file, get_calibration_basename,
+                                       CALIBRATION_DIR)
+from ruler.config_manager import load_config, create_config_with_gui, save_config
+from ruler.controllers import create_capture_controller
 from overlay_window import OverlayWindow
 from utils import find_cost_bar_roi, get_logical_frame_from_calibration
-from api_server import start_server_in_thread
-from logger_setup import setup_logging
+from ruler.api_server import start_server_in_thread
+from ruler.logger_setup import setup_logging
 
 logger = logging.getLogger(__name__)
 

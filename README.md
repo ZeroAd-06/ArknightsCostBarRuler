@@ -11,7 +11,7 @@
   - 快速切换不同的费用校准文件。
 - **实时显示**: 几乎无延迟的悬浮窗，实时反馈当前帧数。
 - **广泛的模拟器支持**:
-  - **支持MuMu模拟器12截图增强**: 速度极快。
+  - **支持 MuMu模拟器12 与 雷电模拟器9 截图增强**: 速度极快。
   - **通用Minicap截图方案**: 兼容绝大多数 Android 9 及以下的模拟器。
 - **分辨率自适应**: 自动计算费用条位置，无需手动设置。
 - **用户友好**:
@@ -46,7 +46,7 @@
 2.  下载Minicap二进制文件: `https://github.com/openatx/stf-binaries/tree/master/node_modules/minicap-prebuilt/prebuilt` 并添加到目录 `controllers/minicap` 中。
 3.  安装Python 3.8+。
 4.  安装依赖: `pip install Pillow pystray ttkbootstrap websockets`
-5.  运行主程序: `python main.py`
+5.  运行主程序: `python ruler/main.py`
 
 ## 注意
 

@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = "../config.json"
 
 
 def load_config() -> Optional[Dict[str, Any]]:

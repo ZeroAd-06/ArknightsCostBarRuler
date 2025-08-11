@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional, Callable
 from collections import Counter
 import statistics
 
-from ruler.controllers.base import BaseCaptureController
+from controllers.base import BaseCaptureController
 from utils import find_cost_bar_roi, _get_raw_filled_pixel_width
 
 logger = logging.getLogger(__name__)

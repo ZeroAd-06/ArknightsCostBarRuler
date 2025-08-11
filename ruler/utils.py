@@ -7,14 +7,12 @@ from typing import Optional, Tuple, Dict
 
 from PIL import Image, ImageDraw
 
-from ruler import logger_setup
+import logger_setup
 
 logger = logging.getLogger(__name__)
 
-# === 新增: 用于节流的全局变量 ===
 # 记录上一次转储图片的时间戳，初始化为0以确保第一次总能成功
 last_dump_time = 0.0
-
 
 def resource_path(relative_path: str) -> str:
     """

@@ -12,10 +12,11 @@ from PIL import Image, ImageTk
 from typing import Optional, Callable
 
 from utils import find_cost_bar_roi, resource_path
-from ruler.calibration_manager import get_calibration_profiles, get_calibration_basename
+from calibration_manager import get_calibration_profiles, get_calibration_basename
 
 logger = logging.getLogger(__name__)
 
+VERSION = "v1.2"
 TRAY_SUPPORTED = False
 try:
     from pystray import MenuItem as item, Menu, Icon
@@ -165,7 +166,7 @@ class OverlayWindow:
         context_menu.add_cascade(label="帧数显示", menu=display_mode_submenu)
 
         context_menu.add_separator()
-        context_menu.add_command(label=f'v1.1.2 Z_06 作品', command=self._open_about_page)
+        context_menu.add_command(label=f'{VERSION} Z_06 作品', command=self._open_about_page)
         context_menu.add_command(label="退出", command=self._schedule_quit)
 
         try:
@@ -401,7 +402,7 @@ class OverlayWindow:
             item('校准配置', self._create_pystray_profile_submenu()),
             item('帧数显示', self._create_pystray_display_mode_submenu()),
             Menu.SEPARATOR,
-            item(f'v1.1.2 Z_06 作品', self._open_about_page),
+            item(f'{VERSION} Z_06 作品', self._open_about_page),
             item('退出', self._schedule_quit)
         )
         logger.debug("托盘菜单已更新。")

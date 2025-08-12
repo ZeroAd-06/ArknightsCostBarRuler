@@ -8,7 +8,6 @@ import ttkbootstrap as ttk
 from ttkbootstrap.dialogs import Querybox, Messagebox
 from tkinter import font as tkFont
 import webbrowser
-import threading
 from PIL import Image, ImageTk
 from typing import Optional, Callable
 
@@ -17,6 +16,7 @@ from calibration_manager import get_calibration_profiles, get_calibration_basena
 
 logger = logging.getLogger(__name__)
 
+VERSION = "v1.2"
 TRAY_SUPPORTED = False
 try:
     from pystray import MenuItem as item, Menu, Icon
@@ -166,7 +166,7 @@ class OverlayWindow:
         context_menu.add_cascade(label="帧数显示", menu=display_mode_submenu)
 
         context_menu.add_separator()
-        context_menu.add_command(label=f'v1.1.2 Z_06 作品', command=self._open_about_page)
+        context_menu.add_command(label=f'{VERSION} Z_06 作品', command=self._open_about_page)
         context_menu.add_command(label="退出", command=self._schedule_quit)
 
         try:
@@ -264,20 +264,20 @@ class OverlayWindow:
             logger.debug(f"计时器图标高度: {timer_height}")
 
             for name in ["start", "deco"]:
-                path = resource_path(os.path.join("icons", f"{name}.png"))
+                path = resource_path(os.path.join("./icons", f"{name}.png"))
                 img = Image.open(path).resize((size, size), Image.Resampling.LANCZOS)
                 self.icons[name] = ImageTk.PhotoImage(image=img)
 
-            wait_path = resource_path(os.path.join("icons", "wait.png"))
+            wait_path = resource_path(os.path.join("./icons", "wait.png"))
             wait_img_large = Image.open(wait_path).resize((size, size), Image.Resampling.LANCZOS)
             self.icons["wait"] = ImageTk.PhotoImage(image=wait_img_large)
 
-            timer_icon_path = resource_path(os.path.join("icons", "timer.png"))
+            timer_icon_path = resource_path(os.path.join("./icons", "timer.png"))
             timer_img = Image.open(timer_icon_path).resize((timer_height, timer_height), Image.Resampling.LANCZOS)
             self.icons["timer_sized"] = ImageTk.PhotoImage(image=timer_img)
             self.timer_icon_label.config(image=self.icons["timer_sized"])
 
-            lap_icon_path = resource_path(os.path.join("icons", "wait.png"))
+            lap_icon_path = resource_path(os.path.join("./icons", "wait.png"))
             lap_img = Image.open(lap_icon_path).resize((timer_height, timer_height), Image.Resampling.LANCZOS)
             self.icons["lap_sized"] = ImageTk.PhotoImage(image=lap_img)
             self.lap_icon_label.config(image=self.icons["lap_sized"])
@@ -342,7 +342,7 @@ class OverlayWindow:
         try:
             icon_names = ["start", "wait", "deco", "timer"]
             for name in icon_names:
-                path = resource_path(os.path.join("icons", f"{name}.png"))
+                path = resource_path(os.path.join(".\icons", f"{name}.png"))
                 img = Image.open(path).convert("RGBA")
                 self.icons[name] = ImageTk.PhotoImage(image=img)
             logger.debug("图标资源加载完成。")
@@ -402,7 +402,7 @@ class OverlayWindow:
             item('校准配置', self._create_pystray_profile_submenu()),
             item('帧数显示', self._create_pystray_display_mode_submenu()),
             Menu.SEPARATOR,
-            item(f'v1.1.2 Z_06 作品', self._open_about_page),
+            item(f'{VERSION} Z_06 作品', self._open_about_page),
             item('退出', self._schedule_quit)
         )
         logger.debug("托盘菜单已更新。")
@@ -441,7 +441,7 @@ class OverlayWindow:
         if not TRAY_SUPPORTED: return
         logger.info("正在设置系统托盘图标...")
         try:
-            icon_path = resource_path(os.path.join("icons", "deco.png"))
+            icon_path = resource_path(os.path.join("./icons", "deco.png"))
             icon_image = Image.open(icon_path)
             self.tray_icon = Icon("ArknightsCostBarRuler", icon_image, "明日方舟费用条尺子")
             self._update_tray_menu()

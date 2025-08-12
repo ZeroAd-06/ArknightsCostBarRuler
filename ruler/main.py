@@ -9,8 +9,8 @@ import os
 import ttkbootstrap as ttk
 
 from calibration_manager import (load_calibration_by_filename, calibrate, save_calibration_data,
-                                 remove_calibration_file, get_calibration_basename,
-                                 CALIBRATION_DIR)
+                                       remove_calibration_file, get_calibration_basename,
+                                       CALIBRATION_DIR)
 from config_manager import load_config, create_config_with_gui, save_config
 from controllers import create_capture_controller
 from overlay_window import OverlayWindow
@@ -230,7 +230,7 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                             last_detection_time = time.time()
                             total_frames_this_cycle = active_profile.get('total_frames', 30)
 
-                            if previous_logical_frame > total_frames_this_cycle * 0.9 and logical_frame < total_frames_this_cycle * 0.1:
+                            if previous_logical_frame > total_frames_this_cycle * 0.75 and logical_frame < total_frames_this_cycle * 0.25:
                                 worker_logger.info(
                                     f"费用条循环 {cycle_counter} 完成! (周期长度: {total_frames_this_cycle} 帧)")
                                 cycle_base_frames += total_frames_this_cycle

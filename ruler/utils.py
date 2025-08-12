@@ -11,10 +11,8 @@ import logger_setup
 
 logger = logging.getLogger(__name__)
 
-# === 新增: 用于节流的全局变量 ===
 # 记录上一次转储图片的时间戳，初始化为0以确保第一次总能成功
 last_dump_time = 0.0
-
 
 def resource_path(relative_path: str) -> str:
     """
@@ -24,8 +22,12 @@ def resource_path(relative_path: str) -> str:
         # PyInstaller 创建一个临时文件夹，并把路径存储在 _MEIPASS 中
         base_path = sys._MEIPASS
     except Exception:
-        # 如果没有 _MEIPASS 属性，说明是直接从源码运行的
-        base_path = os.path.abspath(".")
+        # 在开发模式下：
+        # 1. os.path.abspath(__file__) 获取当前文件(utils.py)的绝对路径
+        # 2. os.path.dirname(...) 获取该文件所在的目录 (ruler/)
+        # 3. 再用一次 os.path.dirname(...) 返回上一级目录，即项目根目录
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        base_path = os.path.dirname(script_dir) if os.path.basename(script_dir) == "ruler" else script_dir
 
     return os.path.join(base_path, relative_path)
 

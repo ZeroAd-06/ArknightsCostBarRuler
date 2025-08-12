@@ -45,7 +45,6 @@ class TimelineApp:
         self.alert_lead_frames = {"sound": 60, "visual": 60}
 
         self.last_sound_alert_frame = -1
-        # is_flashing 现在表示是否正处于持续闪烁的状态
         self.is_flashing = False
 
         self.alert_lead_var = tk.StringVar()
@@ -103,6 +102,7 @@ class TimelineApp:
         style.configure("Info.TLabel", font=("Segoe UI", 12))
 
     def _setup_ui(self):
+        # 这个main_frame会覆盖整个root窗口，所以改变root背景是无效的
         main_frame = ttk.Frame(self.root, style="TFrame")
         main_frame.pack(expand=True, fill=BOTH)
         self.ops_frame = ttk.Frame(main_frame, width=config.WINDOW_WIDTH // 4, style="TFrame")
@@ -283,7 +283,6 @@ class TimelineApp:
             self.info_remaining_label.config(text=f" {time_to_next}帧后")
             if self.mode.get() == "对轴模式": self._handle_alerts(time_to_next, node['frame'])
         else:
-            # 如果没有下一个节点，确保停止所有提醒
             if self.mode.get() == "对轴模式": self._handle_alerts(-1, -1)
             self.info_diamond_label.config(text="")
             self.info_name_label.config(text="")
@@ -394,8 +393,6 @@ class TimelineApp:
             logger.debug(f"节点 '{node['name']}' 颜色已更改为 {node['color']}")
 
     def _handle_alerts(self, time_to_next, node_frame):
-        # BUG修复：重写视觉和声音提醒逻辑
-
         # --- 声音提醒 ---
         if HAS_WINSOUND and self.sound_alert_enabled.get() and \
                 0 < time_to_next <= self.alert_lead_frames["sound"] and \
@@ -404,35 +401,38 @@ class TimelineApp:
             self.last_sound_alert_frame = node_frame
 
         # --- 视觉提醒 ---
-        # 判断当前是否应该处于闪烁状态
         should_be_flashing = self.visual_alert_enabled.get() and 0 < time_to_next <= self.alert_lead_frames["visual"]
 
         if should_be_flashing and not self.is_flashing:
-            # 如果应该闪烁，但闪烁循环还未开始，则启动它
             self.is_flashing = True
             self._flash_loop()
         elif not should_be_flashing and self.is_flashing:
-            # 如果不应闪烁，但闪烁循环仍在运行，则将其关闭
-            # _flash_loop 会检测到这个变化并自动停止
             self.is_flashing = False
 
     def _flash_loop(self):
-        # BUG修复：新的持续闪烁循环
+        # BUG修复：修改ttk控件的样式，而不是无效的root背景
         if not self.is_flashing:
-            # 状态已被关闭，重置背景颜色并终止循环
             try:
-                self.root.config(bg="#282c34")
-            except tk.TclError:  # 窗口关闭时可能出错，安全退出
+                # 循环结束，恢复所有相关控件的原始样式
+                style = ttkb.Style.get_instance()
+                style.configure("TFrame", background="#282c34")
+                style.configure("TLabel", background="#282c34")
+                style.configure("Tool.TButton", background="#282c34")
+            except tk.TclError:
                 pass
             return
 
         try:
-            # 切换背景颜色
-            current_bg = self.root.cget("bg")
+            style = ttkb.Style.get_instance()
+            # 检查当前TFrame的背景色来决定下一个颜色
+            current_bg = style.lookup("TFrame", "background")
             next_bg = "#ff6347" if current_bg == "#282c34" else "#282c34"
-            self.root.config(bg=next_bg)
 
-            # 预约下一次闪烁
+            # 同时改变所有相关控件的背景色，以达到全局闪烁效果
+            style.configure("TFrame", background=next_bg)
+            style.configure("TLabel", background=next_bg)
+            style.configure("Tool.TButton", background=next_bg)
+
             self.root.after(250, self._flash_loop)
-        except tk.TclError:  # 窗口关闭时可能出错，安全退出
+        except tk.TclError:
             pass

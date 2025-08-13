@@ -10,7 +10,10 @@ from typing import Optional
 from PIL import Image
 
 from .base import BaseCaptureController
-from ruler.utils import resource_path
+try:
+    from ruler.utils import resource_path
+except ImportError:
+    from utils import resource_path
 
 logger = logging.getLogger(__name__)
 

@@ -342,7 +342,7 @@ class OverlayWindow:
         try:
             icon_names = ["start", "wait", "deco", "timer"]
             for name in icon_names:
-                path = resource_path(os.path.join(".\icons", f"{name}.png"))
+                path = resource_path(os.path.join("./icons", f"{name}.png"))
                 img = Image.open(path).convert("RGBA")
                 self.icons[name] = ImageTk.PhotoImage(image=img)
             logger.debug("图标资源加载完成。")

@@ -16,34 +16,104 @@ class I18n:
             cls._instance._initialized = False
         return cls._instance
 
+    def _get_locale_candidates(self):
+        candidates = []
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Standard project layout
+        candidates.append(os.path.join(module_dir, 'locales'))
+        candidates.append(os.path.join(module_dir, '..', 'locales'))
+        candidates.append(os.path.join(module_dir, '..', '..', 'locales'))
+        candidates.append(os.path.join(module_dir, 'ruler', 'locales'))
+
+        # PyInstaller onefile or onedir extraction path
+        if hasattr(sys, '_MEIPASS') and sys._MEIPASS:
+            candidates.append(os.path.join(sys._MEIPASS, 'locales'))
+            candidates.append(os.path.join(sys._MEIPASS, 'ruler', 'locales'))
+            candidates.append(os.path.join(sys._MEIPASS, '_internal', 'locales'))
+            candidates.append(os.path.join(sys._MEIPASS, '_internal', 'ruler', 'locales'))
+
+        # Relative to executable path
+        executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(executable_dir, 'locales'))
+        candidates.append(os.path.join(executable_dir, 'ruler', 'locales'))
+        candidates.append(os.path.join(executable_dir, '_internal', 'locales'))
+        candidates.append(os.path.join(executable_dir, '_internal', 'ruler', 'locales'))
+
+        # Current working directory
+        cwd = os.path.abspath(os.getcwd())
+        candidates.append(os.path.join(cwd, 'locales'))
+        candidates.append(os.path.join(cwd, 'ruler', 'locales'))
+        candidates.append(os.path.join(cwd, '_internal', 'locales'))
+        candidates.append(os.path.join(cwd, '_internal', 'ruler', 'locales'))
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique = []
+        for candidate in candidates:
+            normalized = os.path.normpath(candidate)
+            if normalized not in seen:
+                seen.add(normalized)
+                unique.append(normalized)
+        return unique
+
+    def _resolve_locale_dir(self):
+        candidates = self._get_locale_candidates()
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                # Prefer directories with at least one locale file
+                if any(name.endswith('.json') for name in os.listdir(candidate)):
+                    logger.debug(f"Resolved locale directory: {candidate}")
+                    return candidate
+        # Fallback to module-local path
+        fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'locales')
+        logger.warning(f"No locale directory found from candidates. Falling back to {fallback}")
+        return fallback
+
     def __init__(self):
         if self._initialized:
             return
-        
-        self.locale_dir = os.path.join(os.path.dirname(__file__), 'locales')
+
+        self.locale_dir = self._resolve_locale_dir()
         self.current_locale: str = 'zh_CN'
         self.translations: Dict[str, str] = {}
         self._initialized = True
-        logger.info("I18n module initialized.")
+        logger.info("Ruler I18n module initialized.")
 
     def load_locale(self, locale_code: str):
         """加载指定的语言文件"""
         self.current_locale = locale_code
-        file_path = os.path.join(self.locale_dir, f"{locale_code}.json")
-        
+        locale_file_name = f"{locale_code}.json"
+
+        # Re-resolve locale dir each time in case working directory changes
+        self.locale_dir = self._resolve_locale_dir()
+        file_path = os.path.join(self.locale_dir, locale_file_name)
+
         logger.info(f"Loading locale file: {file_path}")
+        if not os.path.exists(file_path):
+            # Try to find in candidate locations
+            found = False
+            for candidate in self._get_locale_candidates():
+                candidate_path = os.path.join(candidate, locale_file_name)
+                if os.path.isfile(candidate_path):
+                    file_path = candidate_path
+                    found = True
+                    logger.info(f"Found locale file at fallback path: {file_path}")
+                    break
+            if not found:
+                logger.error(f"Locale file not found: {file_path}. Falling back to empty translations.")
+                self.translations = {}
+                return
+
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 self.translations = json.load(f)
-            logger.info(f"Locale '{locale_code}' loaded successfully.")
-        except FileNotFoundError:
-            logger.error(f"Locale file not found: {file_path}. Falling back to empty translations.")
-            self.translations = {}
+            logger.info(f"Locale '{locale_code}' loaded successfully from {file_path}.")
         except json.JSONDecodeError:
             logger.error(f"Locale file is invalid JSON: {file_path}. Falling back to empty translations.")
             self.translations = {}
         except Exception as e:
-            logger.exception(f"Error loading locale '{locale_code}': {e}")
+            logger.exception(f"Error loading locale '{locale_code}' from {file_path}: {e}")
             self.translations = {}
 
     def get(self, key: str, default: Optional[str] = None, **kwargs) -> str:

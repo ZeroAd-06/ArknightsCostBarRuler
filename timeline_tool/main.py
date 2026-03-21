@@ -34,6 +34,25 @@ def main():
             except (AttributeError, OSError):
                 logger.warning("设置DPI感知失败。")
 
+    if sys.platform == "win32":
+        try:
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            is_admin = False
+
+        if not is_admin:
+            logger.info("权限不足，正在尝试以管理员身份重新启动...")
+            try:
+                params = " ".join(sys.argv)
+                ret = ctypes.windll.shell32.ShellExecuteW(
+                    None, "runas", sys.executable, params, None, 1
+                )
+                if int(ret) > 32:
+                    sys.exit(0)
+            except Exception as e:
+                logger.error(f"自动提权失败: {e}")
+                sys.exit(0)
+
     try:
         root = ttkb.Window(themename="darkly")
 

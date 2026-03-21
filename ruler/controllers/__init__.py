@@ -74,6 +74,17 @@ def create_capture_controller(config: Dict[str, Any]) -> BaseCaptureController:
             device_id=device_id
         )
 
+    elif controller_type == "window":
+        from .windows import WindowsWindowController
+        window_handle = config.get("window_handle")
+        window_title = config.get("window_title")
+        window_class = config.get("window_class")
+        if window_handle is not None:
+            return WindowsWindowController(hwnd=int(window_handle), window_title=window_title, class_name=window_class)
+        if not window_title:
+            raise ValueError("类型为 'window' 的配置必须包含 'window_handle' 或 'window_title'。")
+        return WindowsWindowController(window_title=window_title, class_name=window_class)
+
     else:
         logger.error(f"不支持的控制器类型: '{controller_type}'")
         raise ValueError(f"不支持的控制器类型: '{controller_type}'")

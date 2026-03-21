@@ -1,12 +1,22 @@
 import json
 import logging
+import sys
+import ctypes
+from ctypes import wintypes
+import tkinter as tk
 from tkinter import filedialog
 
+from PIL import Image, ImageTk
 import ttkbootstrap as ttk
 from ttkbootstrap.dialogs import Messagebox
 from typing import Dict, Any, Optional
 
 from i18n import i18n
+
+try:
+    from controllers.windows import WindowsWindowController
+except ImportError:
+    WindowsWindowController = None
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +80,20 @@ class ConfigWindow(ttk.Toplevel):
         self.title(i18n.get("config.window.title"))
         self.grab_set()  # 模态窗口
 
-        # --- 核心修改：使用字典管理模拟器选项 ---
+        # --- 核心修改：使用字典管理连接类型选项 ---
         self.EMULATOR_OPTIONS = {
-            "MuMu模拟器12": "mumu",
-            "雷电模拟器": "ldplayer",
-            "其他 (通用ADB)": "minicap"
+            i18n.get("config.type.mumu"): "mumu",
+            i18n.get("config.type.ldplayer"): "ldplayer",
+            i18n.get("config.type.minicap"): "minicap",
+            i18n.get("config.type.window"): "window"
         }
         self.selected_display_name = ttk.StringVar(master=self)
+        self.selected_window_handle = None
+        self.selected_window_title = None
+        self.selected_window_class = None
+        self.window_items = []
+        self._window_preview_photo = None
+        self.window_preview_after_id = None
 
         main_frame = ttk.Frame(self, padding="15 15 15 15")
         main_frame.pack(expand=True, fill="both")
@@ -84,9 +101,10 @@ class ConfigWindow(ttk.Toplevel):
         self._create_widgets(main_frame)
         self._on_selection_change()  # 初始化显示正确的设置
         self.update_idletasks()
+        self._adjust_window_size()
         self.center_on_screen()
 
-        self.resizable(False, False)
+        self.resizable(True, True)
         logger.debug("ConfigWindow 初始化完成。")
 
     def center_on_screen(self):
@@ -100,6 +118,26 @@ class ConfigWindow(ttk.Toplevel):
         y = (screen_height // 2) - (height // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
         logger.debug(f"窗口位置设置为: {x}, {y}")
+
+    def _adjust_window_size(self):
+        """根据内容自适应窗口大小。"""
+        # 先确保内部控件完成测量
+        self.update_idletasks()
+
+        # 获取自适应尺寸
+        width = max(self.winfo_reqwidth(), 620)
+        height = max(self.winfo_reqheight(), 420)
+        max_width = int(self.winfo_screenwidth() * 0.9)
+        max_height = int(self.winfo_screenheight() * 0.9)
+        width = min(width, max_width)
+        height = min(height, max_height)
+
+        self.geometry(f"{width}x{height}")
+        self.minsize(620, 420)
+
+        # 标签换行长度随窗口宽度调整
+        self.header_label.config(wraplength=width - 30)
+        self.update_idletasks()
 
     def _create_widgets(self, parent: ttk.Frame):
         logger.debug("正在创建 ConfigWindow 的控件...")
@@ -118,8 +156,8 @@ class ConfigWindow(ttk.Toplevel):
         self.language_combo.pack(side="left")
         self.language_combo.bind("<<ComboboxSelected>>", self._on_language_change)
 
-        self.header_label = ttk.Label(parent, text=i18n.get("config.header"), font=("Microsoft YaHei UI", 14, "bold"))
-        self.header_label.grid(row=1, column=0, pady=(0, 20), sticky="w")
+        self.header_label = ttk.Label(parent, text=i18n.get("config.header"), font=("Microsoft YaHei UI", 14, "bold"), wraplength=700, justify="left")
+        self.header_label.grid(row=1, column=0, pady=(0, 20), sticky="ew")
 
         # --- 核心修改：使用下拉框代替单选按钮 ---
         self.type_frame = ttk.Labelframe(parent, text=i18n.get("config.emulator_type"))
@@ -135,10 +173,12 @@ class ConfigWindow(ttk.Toplevel):
         self.emulator_combobox.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
         self.emulator_combobox.set(list(self.EMULATOR_OPTIONS.keys())[0])  # 默认选中第一个
         self.emulator_combobox.bind("<<ComboboxSelected>>", self._on_selection_change)
-        # --- 修改结束 ---
+
+        self.window_frame = self._create_window_frame(parent)
+        self.window_frame.grid(row=3, column=0, sticky="ew", pady=5)
 
         self.options_container = ttk.Frame(parent)
-        self.options_container.grid(row=3, column=0, sticky="ew", pady=5)
+        self.options_container.grid(row=4, column=0, sticky="ew", pady=5)
         self.options_container.columnconfigure(0, weight=1)
 
         # 创建所有可能的设置框架
@@ -152,8 +192,176 @@ class ConfigWindow(ttk.Toplevel):
         self.minicap_frame.grid(row=0, column=0, sticky="nsew")
 
         self.save_button = ttk.Button(parent, text=i18n.get("config.btn.save_start"), command=self._save_and_close, bootstyle="success")
-        self.save_button.grid(row=4, column=0, pady=(20, 0), ipady=5, sticky="ew")
+        self.save_button.grid(row=5, column=0, pady=(8, 0), ipady=5, sticky="ew")
         logger.debug("控件创建完成。")
+
+    def _create_window_frame(self, parent) -> ttk.Frame:
+        frame = ttk.Labelframe(parent, text=i18n.get("config.window.frame.title"))
+        frame.columnconfigure(0, weight=1)
+
+        scan_frame = ttk.Frame(frame)
+        scan_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        scan_frame.columnconfigure(1, weight=1)
+
+        self.window_scan_btn = ttk.Button(scan_frame, text=i18n.get("config.window.btn.scan"), command=self._refresh_window_list)
+        self.window_scan_btn.grid(row=0, column=0, sticky="w")
+
+        self.window_scan_status = ttk.Label(scan_frame, text="", font=self.FONT_NORMAL)
+        self.window_scan_status.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        list_frame = ttk.Frame(frame)
+        list_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        list_frame.columnconfigure(0, weight=1)
+
+        self.window_listbox = tk.Listbox(list_frame, height=5, activestyle="dotbox")
+        self.window_listbox.grid(row=0, column=0, sticky="ew")
+        self.window_listbox.bind("<<ListboxSelect>>", self._on_window_select)
+
+        scroll = ttk.Scrollbar(list_frame, command=self.window_listbox.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.window_listbox.config(yscrollcommand=scroll.set)
+
+        self.window_selected_label = ttk.Label(frame, text=i18n.get("config.window.selected", "Selected: None"), font=self.FONT_NORMAL)
+        self.window_selected_label.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 5))
+
+        self.window_preview_label = ttk.Label(frame, text=i18n.get("config.window.preview.unavailable", "Preview unavailable"), font=self.FONT_NORMAL, anchor="center", compound="top", justify="center")
+        self.window_preview_label.grid(row=3, column=0, sticky="ew", padx=10, pady=(5, 5), ipady=18)
+        frame.rowconfigure(3, weight=0)
+
+        return frame
+
+    def _refresh_window_list(self):
+        self.window_items = []
+        self.window_listbox.delete(0, "end")
+
+        if sys.platform != "win32":
+            self.window_scan_status.config(text=i18n.get("config.window.scan.not_supported"))
+            return
+
+        EnumWindows = ctypes.windll.user32.EnumWindows
+        GetWindowTextLengthW = ctypes.windll.user32.GetWindowTextLengthW
+        GetWindowTextW = ctypes.windll.user32.GetWindowTextW
+        GetClassNameW = ctypes.windll.user32.GetClassNameW
+        IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+
+        candidates = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def enum_proc(hwnd, lparam):
+            if not IsWindowVisible(hwnd):
+                return True
+            length = GetWindowTextLengthW(hwnd)
+            title = ""
+            if length > 0:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                GetWindowTextW(hwnd, buffer, length + 1)
+                title = buffer.value.strip()
+
+            class_name_buffer = ctypes.create_unicode_buffer(256)
+            GetClassNameW(hwnd, class_name_buffer, 256)
+            class_name = class_name_buffer.value.strip()
+
+            low_title = title.lower()
+            low_class = class_name.lower()
+            
+            if title:
+                priority = 0
+                if title == "明日方舟":
+                    priority = 10
+                elif "明日方舟" in title:
+                    priority = 8
+                elif "arknights" in low_title:
+                    priority = 6
+                elif "方舟" in title:
+                    priority = 4
+                elif "unitywndclass" in low_class or "unityhwndclass" in low_class:
+                    priority = 2
+                else:
+                    priority = 1
+                candidates.append((priority, hwnd, title, class_name))
+            return True
+
+        EnumWindows(enum_proc, 0)
+
+        # 按优先级降序，先显示重要窗口
+        candidates.sort(key=lambda x: (-x[0], x[2]))
+
+        for priority, hwnd, title, class_name in candidates:
+            display = f"{title} ({class_name}) [0x{hwnd:08X}]"
+            self.window_items.append((hwnd, title, class_name))
+            self.window_listbox.insert("end", display)
+
+        if self.window_items:
+            self.window_scan_status.config(text=i18n.get("config.window.scan.found", "{count} windows found").format(count=len(self.window_items)))
+            self.window_listbox.selection_set(0)
+            self._on_window_select(None)
+        else:
+            self.window_scan_status.config(text=i18n.get("config.window.scan.none", "No windows found."))
+            self.window_selected_label.config(text=i18n.get("config.window.selected", "Selected: None"))
+            self.selected_window_handle = None
+            self.selected_window_title = None
+
+        # After updating list and labels, adjust window size in case text wraps differently.
+        self._adjust_window_size()
+
+    def _on_window_select(self, event=None):
+        selections = self.window_listbox.curselection()
+        if not selections:
+            return
+        idx = selections[0]
+        hwnd, title, class_name = self.window_items[idx]
+        self.selected_window_handle = int(hwnd)
+        self.selected_window_title = title
+        self.selected_window_class = class_name
+        self.window_selected_label.config(text=i18n.get("config.window.selected", "Selected: {title}").format(title=title))
+        self._start_window_preview()
+        self._adjust_window_size()
+
+    def _start_window_preview(self):
+        if self.window_preview_after_id:
+            self.after_cancel(self.window_preview_after_id)
+            self.window_preview_after_id = None
+        self._update_window_preview()
+
+    def _stop_window_preview(self):
+        if self.window_preview_after_id:
+            self.after_cancel(self.window_preview_after_id)
+            self.window_preview_after_id = None
+
+    def _update_window_preview(self):
+        if self.selected_window_handle is None:
+            self.window_preview_label.config(text=i18n.get("config.window.preview.unavailable", "Preview unavailable"), image="")
+            return
+
+        if WindowsWindowController is None:
+            self.window_preview_label.config(text="Error: Controller not found", image="")
+            return
+
+        try:
+            # 强制不使用缓存，每次都重新创建控制器并连接
+            with WindowsWindowController(self.selected_window_handle) as window_controller:
+                img = window_controller.capture_frame()
+
+            if img:
+                # 显式转换并确保图像数据是新鲜的
+                img = img.convert("RGB") 
+                display_img = img.copy()
+                display_img.thumbnail((500, 240))
+                # 显式更新 PhotoImage 对象以强制 Tkinter 刷新
+                self._window_preview_photo = ImageTk.PhotoImage(display_img)
+                self.window_preview_label.config(image=self._window_preview_photo, text="")
+            else:
+                raise ValueError("Captured image is empty")
+
+        except Exception as e:
+            logger.warning(f"窗口预览获取失败: {e}")
+            # 失败时清空旧预览图，避免误导用户
+            self.window_preview_label.config(text=i18n.get("config.window.preview.error", "Preview error"), image="")
+            self._window_preview_photo = None
+
+        # 预览内容可能发生变化导致高度/宽度变化，强制重调整窗口尺寸
+        self._adjust_window_size()
+        self.window_preview_after_id = self.after(1000, self._update_window_preview)
 
     def _create_mumu_frame(self, parent) -> ttk.Frame:
         frame = ttk.Labelframe(parent, text=i18n.get("config.mumu.frame.title"))
@@ -247,14 +455,22 @@ class ConfigWindow(ttk.Toplevel):
         self.minicap_frame.config(text=i18n.get("config.minicap.frame.title"))
         self.minicap_adb_label.config(text=i18n.get("config.label.adb_id_auto"))
 
+        self.window_frame.config(text=i18n.get("config.window.frame.title"))
+        self.window_scan_btn.config(text=i18n.get("config.window.btn.scan"))
+        self.window_selected_label.config(text=i18n.get("config.window.selected", "Selected: None").format(title=self.selected_window_title or "None"))
+        self.window_preview_label.config(text=i18n.get("config.window.preview.unavailable", "Preview unavailable"), image="")
+
+        # 调整窗口大小以适应新的标题文本
+        self._adjust_window_size()
+
         # Refill emulator options with translated strings while keeping the mapping
-        # This is tricky because `self.selected_display_name` holds the current display name.
         current_selection_key = self.EMULATOR_OPTIONS.get(self.selected_display_name.get())
         
         self.EMULATOR_OPTIONS = {
             i18n.get("config.type.mumu"): "mumu",
             i18n.get("config.type.ldplayer"): "ldplayer",
-            i18n.get("config.type.minicap"): "minicap"
+            i18n.get("config.type.minicap"): "minicap",
+            i18n.get("config.type.window"): "window"
         }
         self.emulator_combobox['values'] = list(self.EMULATOR_OPTIONS.keys())
         
@@ -267,14 +483,34 @@ class ConfigWindow(ttk.Toplevel):
     def _on_selection_change(self, event=None):
         display_name = self.selected_display_name.get()
         selected_type = self.EMULATOR_OPTIONS.get(display_name)
-        logger.debug(f"模拟器类型切换为: {selected_type}")
+        logger.debug(f"连接类型切换为: {selected_type}")
+
+        # Show/hide panes
+        self.mumu_frame.grid_remove()
+        self.ldplayer_frame.grid_remove()
+        self.minicap_frame.grid_remove()
+        self.window_frame.grid_remove()
 
         if selected_type == "mumu":
-            self.mumu_frame.tkraise()
+            self.mumu_frame.grid()
+            self._stop_window_preview()
         elif selected_type == "ldplayer":
-            self.ldplayer_frame.tkraise()
-        else:  # minicap
-            self.minicap_frame.tkraise()
+            self.ldplayer_frame.grid()
+            self._stop_window_preview()
+        elif selected_type == "minicap":
+            self.minicap_frame.grid()
+            self._stop_window_preview()
+        elif selected_type == "window":
+            self.window_frame.grid()
+            self._refresh_window_list()
+            self._start_window_preview()
+        else:
+            self.minicap_frame.grid()
+            self._stop_window_preview()
+
+        self.selected_display_name.set(display_name)
+        self._adjust_window_size()
+
 
     def _browse_mumu_path(self):
         logger.debug("打开 '浏览' 对话框以选择MuMu路径。")
@@ -338,6 +574,19 @@ class ConfigWindow(ttk.Toplevel):
             ld_id = self.ldplayer_id_entry.get().strip()
             if ld_id:
                 self.config_data["device_id"] = ld_id
+
+        elif cfg_type == "window":
+            if self.selected_window_handle is None:
+                logger.warning("保存失败：未选择窗口。")
+                Messagebox.show_error(i18n.get("config.window.error.no_window_selected"), title=i18n.get("config.window.error.no_window_selected.title"), parent=self)
+                return
+            if self.selected_window_title:
+                self.config_data["window_title"] = self.selected_window_title
+            self.config_data["window_handle"] = self.selected_window_handle
+        if self.selected_window_title:
+            self.config_data["window_title"] = self.selected_window_title
+        if self.selected_window_class:
+            self.config_data["window_class"] = self.selected_window_class
 
         else:  # minicap
             minicap_id = self.minicap_id_entry.get().strip()

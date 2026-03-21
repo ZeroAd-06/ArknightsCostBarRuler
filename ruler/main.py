@@ -338,19 +338,24 @@ def main():
             print("权限不足，正在尝试以管理员身份重新启动...")
             try:
                 # 使用 ShellExecuteW 提权并重新运行脚本
-                ctypes.windll.shell32.ShellExecuteW(
+                # 注意：如果是运行 python 脚本，sys.executable 是 python.exe，argv[0] 是脚本路径
+                # 如果是打包后的 exe，sys.executable 是 exe 路径，argv[0] 也是 exe 路径
+                params = " ".join(sys.argv)
+                ret = ctypes.windll.shell32.ShellExecuteW(
                     None,  # hwnd
                     "runas",  # lpOperation
                     sys.executable,  # lpFile
-                    " ".join(sys.argv),  # lpParameters
+                    params,  # lpParameters
                     None,  # lpDirectory
                     1  # nShowCmd
                 )
+                if int(ret) > 32:
+                    sys.exit(0)  # 提权成功，退出当前非管理员进程
             except Exception as e:
                 print(f"自动提权失败: {e}")
                 print("请手动右键，选择“以管理员身份运行”本程序。")
                 input("按回车键退出...")
-                sys.exit(0)  # 退出当前的非管理员进程
+                sys.exit(0)
 
 
     root = ttk.Window(themename="litera")

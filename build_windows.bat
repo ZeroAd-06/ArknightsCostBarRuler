@@ -19,7 +19,22 @@ set "PY_EXE=%VENV_DIR%\Scripts\python.exe"
 set "PIP_EXE=%VENV_DIR%\Scripts\pip.exe"
 
 call "!PIP_EXE!" install -r "requirements.txt"
-call "!PIP_EXE!" install pyinstaller
+call "!PIP_EXE!" install pyinstaller maturin
+
+REM Build the Rust extension module first
+echo Building ruler_rust with maturin...
+cd ruler_rust
+call "!PY_EXE!" -m maturin build --release --interpreter "%PY_EXE%"
+if !ERRORLEVEL! neq 0 (
+    echo maturin build FAILED
+    exit /b !ERRORLEVEL!
+)
+cd /d "%ROOT%"
+
+REM Install the built wheel
+for %%w in (ruler_rust\target\wheels\*.whl) do (
+    call "!PIP_EXE!" install --force-reinstall "%%w"
+)
 
 call "!PY_EXE!" -m PyInstaller --clean --noconfirm --onedir --windowed --uac-admin ^
     --name ArknightsCostBarRuler ^
@@ -33,6 +48,7 @@ call "!PY_EXE!" -m PyInstaller --clean --noconfirm --onedir --windowed --uac-adm
     --hidden-import "controllers.mumu" ^
     --hidden-import "controllers.ldplayer" ^
     --hidden-import "controllers.minicap" ^
+    --hidden-import "ruler_rust" ^
     --exclude-module "numpy" --exclude-module "matplotlib" --exclude-module "scipy" ^
     --exclude-module "pandas" --exclude-module "torch" --exclude-module "tensorflow" ^
     "ruler\main.py"

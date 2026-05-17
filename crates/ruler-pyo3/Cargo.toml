@@ -1,0 +1,12 @@
+[package]
+name = "ruler-pyo3"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ruler_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+ruler-core = { path = "../ruler-core" }

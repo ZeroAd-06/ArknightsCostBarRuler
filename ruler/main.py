@@ -6,7 +6,14 @@ import sys
 import threading
 import time
 import os
+import json
 import ttkbootstrap as ttk
+
+try:
+    import ruler_rust
+    HAS_RUST = True
+except ImportError:
+    HAS_RUST = False
 
 from calibration_manager import (load_calibration_by_filename, calibrate, save_calibration_data,
                                        remove_calibration_file, get_calibration_basename,
@@ -35,9 +42,13 @@ def format_time_from_frames(total_frames: int) -> str:
 
 
 def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Queue, api_queue: queue.Queue):
-    """在工作线程中运行的分析循环。"""
+    """在工作线程中运行的分析循环。使用Rust加速路径（如果可用）。"""
     worker_logger = logging.getLogger("AnalysisWorker")
     worker_logger.info("分析工作线程已启动。")
+    if HAS_RUST:
+        worker_logger.info("ruler_rust模块已加载，将使用Rust加速路径。")
+    else:
+        worker_logger.warning("ruler_rust模块未找到，将使用纯Python路径（较慢）。")
 
     frame_display_mode = config.get('frame_display_mode', '0_to_n-1')
 
@@ -60,6 +71,16 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
     last_detection_time = time.time()
     RESET_TIMEOUT = 1.5
 
+    # Rust engine state
+    rust_engine = None
+    use_rust = False
+
+    def _get_calibration_json_string():
+        """将校准数据序列化为JSON字符串，供Rust引擎加载。"""
+        if calibration_data is None:
+            return None
+        return json.dumps(calibration_data)
+
     try:
         worker_logger.info("正在创建截图控制器...")
         controller = create_capture_controller(config)
@@ -71,6 +92,34 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
         worker_logger.info(f"获取到模拟器分辨率: {width}x{height}")
 
         ui_queue.put({"type": "geometry", "width": width, "height": height})
+
+        # Try to initialize Rust engine if available
+        if HAS_RUST:
+            try:
+                rust_engine = ruler_rust.RulerEngine()
+                capture_type = config.get("type", "mumu")
+                install_path = config.get("install_path")
+                instance_index = config.get("instance_index", 0)
+                device_id = config.get("device_id")
+                window_handle = config.get("window_handle")
+                window_title = config.get("window_title")
+                window_class = config.get("window_class")
+
+                rust_engine.connect(
+                    capture_type,
+                    install_path=install_path,
+                    instance_index=instance_index,
+                    device_id=device_id,
+                    window_handle=window_handle,
+                    window_title=window_title,
+                    window_class=window_class,
+                )
+                use_rust = True
+                worker_logger.info("Rust引擎连接成功！")
+            except Exception as e:
+                worker_logger.warning(f"Rust引擎初始化失败，回退到Python路径: {e}")
+                rust_engine = None
+                use_rust = False
 
         initial_profile = config.get("active_calibration_profile")
         if initial_profile and os.path.exists(os.path.join(CALIBRATION_DIR, initial_profile)):
@@ -85,8 +134,6 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
             worker_logger.debug("等待下一条指令...")
             command = command_queue.get()
             worker_logger.info(f"收到指令: {command}")
-
-            # [注意] 外层循环现在只处理“主要指令”
 
             if command["type"] in ["prepare_calibration", "start_calibration", "delete_profile"]:
                 worker_logger.debug("因校准或删除操作，重置所有计时器状态。")
@@ -166,6 +213,17 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                     last_known_total_frames = timer_offset_frames
                     lap_timer_active = False
 
+                    # Load calibration into Rust engine if available
+                    if use_rust and rust_engine is not None:
+                        try:
+                            cal_json = _get_calibration_json_string()
+                            if cal_json:
+                                rust_engine.load_calibration_json(cal_json)
+                                worker_logger.info("Rust引擎校准数据已加载。")
+                        except Exception as e:
+                            worker_logger.warning(f"Rust引擎加载校准数据失败: {e}")
+                            use_rust = False
+
                     initial_profile = calibration_data['profiles'][0]
                     total_f_initial = initial_profile.get('total_frames', 30)
                     display_total_initial = f"/{total_f_initial - 1}" if frame_display_mode == '0_to_n-1' else f"/{total_f_initial}"
@@ -182,11 +240,9 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                             worker_logger.info(f"分析循环中收到新指令: {cmd}")
 
                             cmd_type = cmd.get("type")
-                            # 定义不需要中断循环的“次要指令”
                             MINOR_COMMANDS = ["toggle_lap_timer", "set_display_mode", "adjust_timer", "reset_timer"]
 
                             if cmd_type in MINOR_COMMANDS:
-                                # 在循环内部处理次要指令
                                 if cmd_type == "toggle_lap_timer":
                                     lap_timer_active = not lap_timer_active
                                     if lap_timer_active:
@@ -206,64 +262,107 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
                                 elif cmd_type == "adjust_timer":
                                     adjustment = cmd.get("frames", 0)
                                     timer_offset_frames += adjustment
-                                    # 更新 last_known_total_frames 以立即反映变化
                                     last_known_total_frames += adjustment
                                     worker_logger.info(f"计时器调整: {adjustment} 帧。新偏移量: {timer_offset_frames}")
+                                    if use_rust and rust_engine is not None:
+                                        try:
+                                            rust_engine.adjust_timer(adjustment)
+                                        except Exception:
+                                            pass
 
                                 elif cmd_type == "reset_timer":
                                     worker_logger.info("全局计时器已重置。")
                                     timer_offset_frames, cycle_base_frames, cycle_counter = 0, 0, 0
                                     last_known_total_frames = 0
                                     lap_timer_active = False
+                                    if use_rust and rust_engine is not None:
+                                        try:
+                                            rust_engine.reset_timer()
+                                        except Exception:
+                                            pass
 
-                                continue  # 处理完次要指令后，继续内循环
+                                continue
 
-                            # 如果是其他“主要指令”，则放回队列并中断
                             worker_logger.info(f"指令 '{cmd_type}' 需要中断分析，正在退出循环。")
                             command_queue.put(cmd)
                             break
                         except queue.Empty:
                             pass
 
-                        frame = cap.capture_frame()
-                        frame_counter += 1
-                        roi = find_cost_bar_roi(width, height)
+                        # === HOT PATH: capture + analyze ===
+                        active_profile = calibration_data['profiles'][0]
+                        if use_rust and rust_engine is not None:
+                            # Rust accelerated path: single call, no PIL conversion
+                            result = rust_engine.capture_and_analyze()
+                            logical_frame = result.logical_frame
+                            total_frames_this_cycle = result.total_frames_in_cycle
+                            raw_pixel_width = result.raw_pixel_width
+                            elapsed = result.elapsed_frames
 
-                        num_profiles = len(calibration_data['profiles'])
-                        current_profile_index = cycle_counter % num_profiles
-                        active_profile = calibration_data['profiles'][current_profile_index]
+                            # Update cycle tracking from Rust engine's elapsed_frames
+                            if logical_frame is not None:
+                                last_detection_time = time.time()
+                                last_known_total_frames = elapsed
+                                previous_logical_frame = logical_frame
+                            else:
+                                previous_logical_frame = -1
+                                if time.time() - last_detection_time > RESET_TIMEOUT:
+                                    if cycle_counter or cycle_base_frames or timer_offset_frames:
+                                        worker_logger.warning("长时间未检测到费用条，重置所有计时器。")
+                                        cycle_counter, cycle_base_frames, timer_offset_frames = 0, 0, 0
+                                        last_known_total_frames = 0
+                                        lap_timer_active = False
+                                        if use_rust and rust_engine is not None:
+                                            try:
+                                                rust_engine.reset_timer()
+                                            except Exception:
+                                                pass
+                        else:
+                            # Python fallback path (original code)
+                            frame = cap.capture_frame()
+                            frame_counter += 1
+                            roi = find_cost_bar_roi(width, height)
 
-                        logical_frame = get_logical_frame_from_calibration(
-                            frame, roi, active_profile,
-                            dump_prefix=f"run_frame_{frame_counter}"
-                        )
+                            num_profiles = len(calibration_data['profiles'])
+                            current_profile_index = cycle_counter % num_profiles
+                            active_profile = calibration_data['profiles'][current_profile_index]
 
-                        if logical_frame is not None:
-                            last_detection_time = time.time()
+                            logical_frame = get_logical_frame_from_calibration(
+                                frame, roi, active_profile,
+                                dump_prefix=f"run_frame_{frame_counter}"
+                            )
                             total_frames_this_cycle = active_profile.get('total_frames', 30)
 
-                            if previous_logical_frame > total_frames_this_cycle * 0.75 and logical_frame < total_frames_this_cycle * 0.25:
-                                worker_logger.info(
-                                    f"费用条循环 {cycle_counter} 完成! (周期长度: {total_frames_this_cycle} 帧)")
-                                cycle_base_frames += total_frames_this_cycle
-                                cycle_counter += 1
+                            if logical_frame is not None:
+                                last_detection_time = time.time()
+                                if previous_logical_frame > total_frames_this_cycle * 0.75 and logical_frame < total_frames_this_cycle * 0.25:
+                                    worker_logger.info(
+                                        f"费用条循环 {cycle_counter} 完成! (周期长度: {total_frames_this_cycle} 帧)")
+                                    cycle_base_frames += total_frames_this_cycle
+                                    cycle_counter += 1
 
-                            current_total_frames = timer_offset_frames + cycle_base_frames + logical_frame
-                            last_known_total_frames = current_total_frames
-                            previous_logical_frame = logical_frame
-                        else:
-                            previous_logical_frame = -1
-                            if time.time() - last_detection_time > RESET_TIMEOUT:
-                                if cycle_counter or cycle_base_frames or timer_offset_frames:
-                                    worker_logger.warning("长时间未检测到费用条，重置所有计时器。")
-                                    cycle_counter, cycle_base_frames, timer_offset_frames = 0, 0, 0
-                                    last_known_total_frames = 0
-                                    lap_timer_active = False
+                                current_total_frames = timer_offset_frames + cycle_base_frames + logical_frame
+                                last_known_total_frames = current_total_frames
+                                previous_logical_frame = logical_frame
+                            else:
+                                previous_logical_frame = -1
+                                if time.time() - last_detection_time > RESET_TIMEOUT:
+                                    if cycle_counter or cycle_base_frames or timer_offset_frames:
+                                        worker_logger.warning("长时间未检测到费用条，重置所有计时器。")
+                                        cycle_counter, cycle_base_frames, timer_offset_frames = 0, 0, 0
+                                        last_known_total_frames = 0
+                                        lap_timer_active = False
 
+                        # === UI UPDATE ===
                         time_str = format_time_from_frames(last_known_total_frames)
                         lap_frames_to_display = last_known_total_frames - lap_start_frame if lap_timer_active else None
 
-                        total_f_active = active_profile.get('total_frames', 30)
+                        # For Rust path, total_frames comes from result; for Python, from active_profile
+                        if use_rust and rust_engine is not None:
+                            total_f_active = total_frames_this_cycle
+                        else:
+                            total_f_active = active_profile.get('total_frames', 30)
+
                         display_total_text = f"/{total_f_active - 1}" if frame_display_mode == '0_to_n-1' else f"/{total_f_active}"
                         display_frame_text = logical_frame + 1 if frame_display_mode == '1_to_n' and logical_frame is not None else (
                             logical_frame if logical_frame is not None else "--")
@@ -299,6 +398,11 @@ def analysis_worker(config: dict, ui_queue: queue.Queue, command_queue: queue.Qu
     except KeyboardInterrupt:
         worker_logger.info("工作线程被键盘中断。")
     finally:
+        if use_rust and rust_engine is not None:
+            try:
+                rust_engine.disconnect()
+            except Exception:
+                pass
         if controller:
             worker_logger.info("正在断开控制器连接...")
             controller.disconnect()

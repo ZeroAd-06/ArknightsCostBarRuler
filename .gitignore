@@ -68,3 +68,7 @@ api_test/
 
 # minicap binaries
 ruler/controllers/minicap/
+
+# --- Rust ---
+target/
+Cargo.lock

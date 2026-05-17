@@ -375,7 +375,7 @@ class OverlayWindow:
         except Exception as e:
             logger.exception("处理UI队列消息时发生未预料的错误。")
         finally:
-            if self.root and self.root.winfo_exists(): self.root.after(50, self._process_ui_queue)
+            if self.root and self.root.winfo_exists(): self.root.after(1, self._process_ui_queue)
 
     def _load_icons(self):
         logger.debug("正在加载所有图标资源...")

@@ -1,4 +1,0 @@
-Pillow>=9.0.0
-ttkbootstrap>=1.0.0
-pystray>=0.19.0
-websockets>=10.0

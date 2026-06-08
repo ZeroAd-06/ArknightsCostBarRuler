@@ -1,47 +1,10 @@
-# --- Python ---
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-.venv/
-workspace.xml
+# --- Rust build ---
+target/
 
-# --- PyInstaller ---
-#  Usually these files are written by a python script, so they may be masked
-#  by the dist/ and build/ directories.
-*.manifest
-*.spec
-
-# --- Installer logs ---
-pip-log.txt
-pip-delete-this-directory.txt
-
-# --- Unit test / coverage reports ---
-htmlcov/
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
+# --- Build artifacts ---
+*.exe
+*.pkg
+*.7z
 
 # --- IDEs ---
 .idea/
@@ -50,25 +13,12 @@ coverage.xml
 *.swp
 *.swo
 
-# --- Node.js ---
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# --- OS ---
+Thumbs.db
+.DS_Store
 
-# --- Project Specific ---
+# --- Project runtime ---
 config.json
 logs/
 calibration/
 calibration_data_*.json
-api_test/
-*.7z
-*.exe
-*.pkg
-
-# minicap binaries
-ruler/controllers/minicap/
-
-# --- Rust ---
-target/
-Cargo.lock

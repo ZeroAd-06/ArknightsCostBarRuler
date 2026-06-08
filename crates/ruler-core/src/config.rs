@@ -34,12 +34,31 @@ pub struct RulerConfig {
 impl RulerConfig {
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, RulerConfigError> {
         let path = path.as_ref();
-        let contents = fs::read_to_string(path)
-            .map_err(|source| RulerConfigError::Io { path: path.to_path_buf(), source })?;
+        let contents = fs::read_to_string(path).map_err(|source| RulerConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         serde_json::from_str(&contents).map_err(|source| RulerConfigError::Parse {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), RulerConfigError> {
+        let path = path.as_ref();
+        let contents =
+            serde_json::to_string_pretty(self).map_err(|source| RulerConfigError::Serialize {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        fs::write(path, contents).map_err(|source| RulerConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    pub fn normalized_frame_display_mode(&self) -> &str {
+        self.frame_display_mode.as_deref().unwrap_or("0_to_n-1")
     }
 
     pub fn to_capture_config(&self) -> Result<CaptureConfig, RulerConfigError> {
@@ -72,6 +91,10 @@ pub enum RulerConfigError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    Serialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     UnsupportedCaptureType(String),
 }
 
@@ -83,6 +106,13 @@ impl fmt::Display for RulerConfigError {
             }
             Self::Parse { path, source } => {
                 write!(f, "failed to parse config '{}': {source}", path.display())
+            }
+            Self::Serialize { path, source } => {
+                write!(
+                    f,
+                    "failed to serialize config '{}': {source}",
+                    path.display()
+                )
             }
             Self::UnsupportedCaptureType(value) => {
                 write!(f, "unsupported capture type '{value}' in config.json")

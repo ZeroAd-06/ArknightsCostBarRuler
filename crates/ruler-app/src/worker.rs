@@ -1,33 +1,33 @@
 use std::{
+    fmt,
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, TryRecvError},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ruler_core::{CaptureConfig, RulerConfig, RulerEngine};
+use ruler_core::{
+    analysis::{calibration::build_calibration_from_samples, scanner},
+    RulerConfig, RulerEngine,
+};
 
-#[derive(Clone, Debug, Default)]
-pub struct ApiStateSnapshot {
-    pub is_running: bool,
-    pub current_frame: Option<i32>,
-    pub total_frames_in_cycle: i32,
-    pub total_elapsed_frames: i32,
-    pub active_profile: Option<String>,
-}
+use crate::{
+    commands::UiCommand,
+    profiles::{calibration_basename, ProfileStore},
+    resources::ResourceLocator,
+    ui_state::{
+        format_time_from_frames, ApiStateSnapshot, FrameDisplayMode, OverlayMode, UiSnapshot,
+    },
+};
+
+const CALIBRATION_CYCLES: usize = 6;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkerTimingSnapshot {
     pub sample_index: u64,
-    pub capture_started_at: Option<Instant>,
-    pub capture_completed_at: Option<Instant>,
-    pub analysis_completed_at: Option<Instant>,
-    pub state_published_at: Option<Instant>,
-    pub capture_duration: Option<Duration>,
-    pub analyze_duration: Option<Duration>,
-    pub total_worker_duration: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -36,29 +36,12 @@ pub struct OverlayTimingSnapshot {
     pub last_painted_at: Option<Instant>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AppStateSnapshot {
-    pub status_text: String,
-    pub frame_text: String,
-    pub timer_text: String,
-    pub latency_text: String,
+    pub ui: UiSnapshot,
     pub api: ApiStateSnapshot,
     pub worker_timing: WorkerTimingSnapshot,
     pub overlay_timing: OverlayTimingSnapshot,
-}
-
-impl Default for AppStateSnapshot {
-    fn default() -> Self {
-        Self {
-            status_text: "status: booting".to_string(),
-            frame_text: "frame: --".to_string(),
-            timer_text: "timer: --:--.--".to_string(),
-            latency_text: "latency: awaiting runtime samples".to_string(),
-            api: ApiStateSnapshot::default(),
-            worker_timing: WorkerTimingSnapshot::default(),
-            overlay_timing: OverlayTimingSnapshot::default(),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -67,8 +50,8 @@ pub struct SharedAppState {
     overlay_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
-impl std::fmt::Debug for SharedAppState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SharedAppState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedAppState")
             .field("snapshot", &self.snapshot())
             .finish_non_exhaustive()
@@ -78,66 +61,71 @@ impl std::fmt::Debug for SharedAppState {
 impl SharedAppState {
     #[must_use]
     pub fn snapshot(&self) -> AppStateSnapshot {
-        self.inner.lock().expect("shared app state poisoned").clone()
-    }
-
-    pub fn update_text(&self, status_text: String, frame_text: String, timer_text: String) {
-        {
-            let mut state = self.inner.lock().expect("shared app state poisoned");
-            state.status_text = status_text;
-            state.frame_text = frame_text;
-            state.timer_text = timer_text;
-        }
-
-        self.notify_overlay();
+        self.inner
+            .lock()
+            .expect("shared app state poisoned")
+            .clone()
     }
 
     pub fn update_startup_status(&self, startup: &StartupStatus) {
         {
             let mut state = self.inner.lock().expect("shared app state poisoned");
-            state.status_text = format!("status: {}", startup.phase);
-            state.frame_text = startup.frame_text();
-            state.timer_text = startup.timer_text();
-            state.api = startup.api_snapshot();
+            state.ui.mode = if startup.loaded_config.is_some() {
+                OverlayMode::Booting
+            } else {
+                OverlayMode::Error
+            };
+            state.ui.message = format!(
+                "{}: {} ({})",
+                startup.phase, startup.detail, startup.config_path
+            );
+            state.ui.display_mode = startup
+                .loaded_config
+                .as_ref()
+                .map(|config| FrameDisplayMode::from_config(config.frame_display_mode.as_deref()))
+                .unwrap_or_default();
+            state.api.active_profile = startup.loaded_config.as_ref().and_then(|config| {
+                config
+                    .active_calibration_profile
+                    .as_deref()
+                    .map(calibration_basename)
+            });
         }
-
         self.notify_overlay();
     }
 
-    pub fn update_runtime_state(
-        &self,
-        status_text: String,
-        frame_text: String,
-        timer_text: String,
-        latency_text: String,
-        api: ApiStateSnapshot,
-        worker_timing: WorkerTimingSnapshot,
-    ) {
+    pub fn update_ui(&self, updater: impl FnOnce(&mut UiSnapshot, &mut ApiStateSnapshot)) {
         {
             let mut state = self.inner.lock().expect("shared app state poisoned");
-            state.status_text = status_text;
-            state.frame_text = frame_text;
-            state.timer_text = timer_text;
-            state.latency_text = latency_text;
-            state.api = api;
+            let AppStateSnapshot { ui, api, .. } = &mut *state;
+            updater(ui, api);
+        }
+        self.notify_overlay();
+    }
+
+    pub fn update_timing(&self, worker_timing: WorkerTimingSnapshot) {
+        {
+            let mut state = self.inner.lock().expect("shared app state poisoned");
             state.worker_timing = worker_timing;
         }
-
         self.notify_overlay();
+    }
+
+    pub fn request_exit(&self) {
+        self.update_ui(|ui, _| ui.should_exit = true);
     }
 
     pub fn record_overlay_paint(&self, sample_index: u64, painted_at: Instant) {
         let mut state = self.inner.lock().expect("shared app state poisoned");
         state.overlay_timing.last_painted_sample_index = Some(sample_index);
         state.overlay_timing.last_painted_at = Some(painted_at);
-
-        if state.worker_timing.sample_index == sample_index {
-            state.latency_text = format_latency_line(state.worker_timing, state.overlay_timing, painted_at);
-        }
     }
 
     pub fn set_overlay_waker(&self, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
-        let mut overlay_waker = self.overlay_waker.lock().expect("shared app state poisoned");
+        let mut overlay_waker = self
+            .overlay_waker
+            .lock()
+            .expect("shared app state poisoned");
         *overlay_waker = waker;
     }
 
@@ -167,7 +155,7 @@ impl StartupStatus {
     pub fn missing(config_path: String) -> Self {
         Self {
             phase: "config missing".to_string(),
-            detail: "config.json was not found; app is idle until the config file exists.".to_string(),
+            detail: "config.json was not found".to_string(),
             config_path,
             loaded_config: None,
         }
@@ -184,37 +172,19 @@ impl StartupStatus {
     }
 
     #[must_use]
-    pub fn engine_not_connected(config_path: String, loaded_config: RulerConfig, detail: String) -> Self {
+    pub fn ready(config_path: String, loaded_config: RulerConfig) -> Self {
         Self {
-            phase: "engine not connected".to_string(),
-            detail,
+            phase: "config loaded".to_string(),
+            detail: format!(
+                "config loaded for '{}' capture; active_calibration_profile={}",
+                loaded_config.capture_type,
+                loaded_config
+                    .active_calibration_profile
+                    .as_deref()
+                    .unwrap_or("--")
+            ),
             config_path,
             loaded_config: Some(loaded_config),
-        }
-    }
-
-    #[must_use]
-    pub fn frame_text(&self) -> String {
-        if let Some(config) = &self.loaded_config {
-            summarize_config(config)
-        } else {
-            format!("config: {}", self.config_path)
-        }
-    }
-
-    #[must_use]
-    pub fn timer_text(&self) -> String {
-        format!("startup: {}", self.detail)
-    }
-
-    #[must_use]
-    pub fn api_snapshot(&self) -> ApiStateSnapshot {
-        ApiStateSnapshot {
-            is_running: false,
-            current_frame: None,
-            total_frames_in_cycle: 0,
-            total_elapsed_frames: 0,
-            active_profile: self.loaded_config.as_ref().and_then(|config| config.active_calibration_profile.clone()),
         }
     }
 }
@@ -229,6 +199,8 @@ impl WorkerRuntime {
     pub fn spawn_from_startup(
         state: Arc<SharedAppState>,
         startup: StartupStatus,
+        resources: ResourceLocator,
+        commands: Receiver<UiCommand>,
         interval: Duration,
     ) -> Result<Self, crate::app::StartupError> {
         let running = Arc::new(AtomicBool::new(true));
@@ -236,7 +208,14 @@ impl WorkerRuntime {
         let handle = thread::Builder::new()
             .name("ruler-app-worker".to_string())
             .spawn(move || {
-                run_worker_loop(state, startup, worker_running, interval);
+                run_worker_loop(
+                    state,
+                    startup,
+                    resources,
+                    commands,
+                    worker_running,
+                    interval,
+                );
             })
             .map_err(|error| {
                 crate::app::StartupError::new(format!("failed to start worker thread: {error}"))
@@ -250,7 +229,7 @@ impl WorkerRuntime {
 
     #[must_use]
     pub fn startup_note(&self) -> &'static str {
-        "background worker is active and will attempt config-driven engine bootstrap"
+        "background worker is active and accepts UI commands"
     }
 }
 
@@ -264,156 +243,489 @@ impl Drop for WorkerRuntime {
     }
 }
 
-fn summarize_config(config: &RulerConfig) -> String {
-    match config.capture_type.as_str() {
-        "mumu" | "ldplayer" => format!(
-            "config: {} instance={} path={}",
-            config.capture_type,
-            config.instance_index.unwrap_or(0),
-            config.install_path.as_deref().unwrap_or("--")
-        ),
-        "window" => format!(
-            "config: window title={} handle={}",
-            config.window_title.as_deref().unwrap_or("--"),
-            config
-                .window_handle
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "--".to_string())
-        ),
-        other => format!("config: {other}"),
-    }
+struct WorkerContext {
+    config: RulerConfig,
+    config_path: std::path::PathBuf,
+    profiles: ProfileStore,
+    engine: RulerEngine,
+    connected: bool,
+    active_profile: Option<String>,
+    display_mode: FrameDisplayMode,
+    lap_start_frame: Option<i32>,
+    last_elapsed_frames: i32,
+    last_total_frames: i32,
+    sample_index: u64,
 }
 
 fn run_worker_loop(
     state: Arc<SharedAppState>,
     startup: StartupStatus,
+    resources: ResourceLocator,
+    commands: Receiver<UiCommand>,
     running: Arc<AtomicBool>,
     interval: Duration,
 ) {
     state.update_startup_status(&startup);
 
     let Some(config) = startup.loaded_config.clone() else {
-        wait_until_stopped(&running, interval);
+        wait_for_exit_commands(&state, &commands, &running, interval);
         return;
     };
 
-    let capture_config = match config.to_capture_config() {
-        Ok(config) => config,
-        Err(error) => {
-            state.update_text(
-                "status: config invalid".to_string(),
-                format!("config: {}", startup.config_path),
-                format!("startup: {error}"),
-            );
-            wait_until_stopped(&running, interval);
-            return;
-        }
+    let profiles = ProfileStore::new(&resources);
+    let mut context = WorkerContext {
+        display_mode: FrameDisplayMode::from_config(config.frame_display_mode.as_deref()),
+        active_profile: config.active_calibration_profile.clone(),
+        config,
+        config_path: resources.config_path(),
+        profiles,
+        engine: RulerEngine::new(),
+        connected: false,
+        lap_start_frame: None,
+        last_elapsed_frames: 0,
+        last_total_frames: 0,
+        sample_index: 0,
     };
 
-    let mut engine = RulerEngine::new();
-    let startup_status = match bootstrap_engine(&mut engine, &config, capture_config) {
-        Ok(status) => status,
-        Err(error) => {
-            state.update_text(
-                "status: engine bootstrap failed".to_string(),
-                summarize_config(&config),
-                format!("startup: {error}"),
-            );
-            wait_until_stopped(&running, interval);
-            return;
-        }
-    };
+    if let Err(error) = bootstrap_engine(&mut context, &state) {
+        publish_error(&state, &context, error);
+    }
 
-    state.update_runtime_state(
-        startup_status.0.clone(),
-        startup_status.1.clone(),
-        startup_status.2.clone(),
-        "latency: runtime connected; waiting for analyzed sample".to_string(),
-        ApiStateSnapshot {
-            is_running: false,
-            current_frame: None,
-            total_frames_in_cycle: 0,
-            total_elapsed_frames: 0,
-            active_profile: config.active_calibration_profile.clone(),
-        },
-        WorkerTimingSnapshot::default(),
-    );
-
-    let mut sample_index = 0_u64;
     let mut next_poll_at = Instant::now();
-
     while running.load(Ordering::Relaxed) {
-        let poll_started_at = Instant::now();
-
-        if startup_status.3 {
-            sample_index += 1;
-            let capture_started_at = poll_started_at;
-            match engine.capture_frame() {
-                Ok(frame_data) => {
-                    let capture_completed_at = Instant::now();
-                    match engine.analyze_captured_frame(&frame_data) {
-                        Ok(result) => {
-                            let analysis_completed_at = Instant::now();
-                            let published_at = analysis_completed_at;
-                            let worker_timing = WorkerTimingSnapshot {
-                                sample_index,
-                                capture_started_at: Some(capture_started_at),
-                                capture_completed_at: Some(capture_completed_at),
-                                analysis_completed_at: Some(analysis_completed_at),
-                                state_published_at: Some(published_at),
-                                capture_duration: Some(
-                                    capture_completed_at.saturating_duration_since(capture_started_at),
-                                ),
-                                analyze_duration: Some(
-                                    analysis_completed_at.saturating_duration_since(capture_completed_at),
-                                ),
-                                total_worker_duration: Some(
-                                    published_at.saturating_duration_since(capture_started_at),
-                                ),
-                            };
-                            let status = analyzed_status(&config, result, worker_timing);
-                            state.update_runtime_state(
-                                status.0.clone(),
-                                status.1.clone(),
-                                status.2.clone(),
-                                status.3.clone(),
-                                status.4.clone(),
-                                status.5,
-                            );
-                            log::debug!(
-                                "worker sample {} published: {}",
-                                status.5.sample_index,
-                                status.3
-                            );
-                        }
-                        Err(error) => {
-                            state.update_text(
-                                "status: analyze error".to_string(),
-                                summarize_config(&config),
-                                format!("startup: {error}"),
-                            );
-                            break;
-                        }
-                    }
-                }
-                Err(error) => {
-                    state.update_text(
-                        "status: capture error".to_string(),
-                        summarize_config(&config),
-                        format!("startup: {error}"),
-                    );
-                    break;
-                }
-            }
+        if !drain_commands(&state, &mut context, &commands, &running) {
+            break;
         }
 
-        next_poll_at = next_poll_at.max(poll_started_at) + interval;
+        if context.connected && context.active_profile.is_some() {
+            analyze_once(&state, &mut context);
+        }
+
+        next_poll_at = next_poll_at.max(Instant::now()) + interval;
         sleep_until(next_poll_at, &running);
     }
 }
 
-fn wait_until_stopped(running: &AtomicBool, interval: Duration) {
+fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Result<(), String> {
+    let capture_config = context
+        .config
+        .to_capture_config()
+        .map_err(|error| error.to_string())?;
+    let dims = context.engine.connect(capture_config)?;
+    context.connected = true;
+    state.update_ui(|ui, _| {
+        ui.capture_dimensions = Some(dims);
+    });
+
+    if let Some(profile) = context.active_profile.clone() {
+        load_profile(context, &profile)?;
+        publish_running_state(state, context, None);
+    } else {
+        publish_idle(state, context);
+    }
+
+    Ok(())
+}
+
+fn load_profile(context: &mut WorkerContext, filename: &str) -> Result<(), String> {
+    let calibration_path = context.profiles.calibration_path(filename);
+    context
+        .engine
+        .load_calibration(&calibration_path)
+        .map_err(|error| {
+            format!(
+                "failed to load calibration '{}': {error}",
+                calibration_path.display()
+            )
+        })?;
+    context.active_profile = Some(filename.to_string());
+    context.lap_start_frame = None;
+    context.last_elapsed_frames = 0;
+    Ok(())
+}
+
+fn drain_commands(
+    state: &SharedAppState,
+    context: &mut WorkerContext,
+    commands: &Receiver<UiCommand>,
+    running: &AtomicBool,
+) -> bool {
+    loop {
+        match commands.try_recv() {
+            Ok(command) => {
+                if !handle_command(state, context, command, running) {
+                    return false;
+                }
+            }
+            Err(TryRecvError::Empty) => return true,
+            Err(TryRecvError::Disconnected) => return false,
+        }
+    }
+}
+
+fn handle_command(
+    state: &SharedAppState,
+    context: &mut WorkerContext,
+    command: UiCommand,
+    running: &AtomicBool,
+) -> bool {
+    match command {
+        UiCommand::PrepareCalibration => {
+            context.active_profile = None;
+            context.config.active_calibration_profile = None;
+            context.lap_start_frame = None;
+            let _ = context.config.save_to_path(&context.config_path);
+            state.update_ui(|ui, api| {
+                ui.mode = OverlayMode::PreCalibration;
+                ui.message.clear();
+                ui.active_profile = None;
+                ui.total_frames_in_cycle = 0;
+                ui.profiles = context.profiles.list(None);
+                api.is_running = false;
+                api.current_frame = None;
+                api.active_profile = None;
+            });
+        }
+        UiCommand::StartCalibration => match run_calibration(state, context) {
+            Ok(()) => publish_running_state(state, context, None),
+            Err(error) => publish_error(state, context, format!("calibration failed: {error}")),
+        },
+        UiCommand::UseProfile { filename } => match load_profile(context, &filename) {
+            Ok(()) => {
+                context.config.active_calibration_profile = Some(filename);
+                let _ = context.config.save_to_path(&context.config_path);
+                publish_running_state(state, context, None);
+            }
+            Err(error) => publish_error(state, context, error),
+        },
+        UiCommand::RenameProfile { old, new_base } => {
+            match context.profiles.rename(&old, &new_base) {
+                Ok(new_filename) => {
+                    if context.active_profile.as_deref() == Some(old.as_str()) {
+                        context.active_profile = Some(new_filename.clone());
+                        context.config.active_calibration_profile = Some(new_filename);
+                        let _ = context.config.save_to_path(&context.config_path);
+                    }
+                    publish_current_state(state, context);
+                }
+                Err(error) => {
+                    publish_error(state, context, format!("failed to rename profile: {error}"))
+                }
+            }
+        }
+        UiCommand::DeleteProfile { filename } => {
+            if let Err(error) = context.profiles.delete(&filename) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    publish_error(state, context, format!("failed to delete profile: {error}"));
+                    return true;
+                }
+            }
+            if context.active_profile.as_deref() == Some(filename.as_str()) {
+                context.active_profile = None;
+                context.config.active_calibration_profile = None;
+                context.engine.reset_timer();
+                context.last_elapsed_frames = 0;
+                context.lap_start_frame = None;
+                let _ = context.config.save_to_path(&context.config_path);
+                publish_idle(state, context);
+            } else {
+                publish_current_state(state, context);
+            }
+        }
+        UiCommand::SetDisplayMode(mode) => {
+            context.display_mode = mode;
+            context.config.frame_display_mode = Some(mode.as_config().to_string());
+            let _ = context.config.save_to_path(&context.config_path);
+            publish_current_state(state, context);
+        }
+        UiCommand::AdjustTimer { frames } => {
+            context.engine.adjust_timer(frames);
+            context.last_elapsed_frames += frames;
+            publish_current_state(state, context);
+        }
+        UiCommand::ResetTimer => {
+            context.engine.reset_timer();
+            context.lap_start_frame = None;
+            context.last_elapsed_frames = 0;
+            publish_current_state(state, context);
+        }
+        UiCommand::ToggleLapTimer => {
+            context.lap_start_frame = if context.lap_start_frame.is_some() {
+                None
+            } else {
+                Some(context.last_elapsed_frames)
+            };
+            publish_current_state(state, context);
+        }
+        UiCommand::Exit => {
+            running.store(false, Ordering::Relaxed);
+            state.request_exit();
+            return false;
+        }
+    }
+
+    true
+}
+
+fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Result<(), String> {
+    if !context.connected {
+        return Err("capture backend is not connected".to_string());
+    }
+
+    context.engine.reset_timer();
+    context.lap_start_frame = None;
+    context.last_elapsed_frames = 0;
+    context.last_total_frames = 0;
+    state.update_ui(|ui, api| {
+        ui.mode = OverlayMode::Calibrating;
+        ui.progress_percent = 0;
+        ui.message.clear();
+        ui.display_frame = "--".to_string();
+        ui.display_total = "/--".to_string();
+        ui.time_str = "00:00:00".to_string();
+        ui.lap_frames = None;
+        api.is_running = false;
+        api.current_frame = None;
+        api.total_frames_in_cycle = 0;
+        api.total_elapsed_frames = 0;
+    });
+
+    let (cycle_samples, screen_width, screen_height) = collect_calibration_samples(state, context)?;
+    let calibration_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock error: {error}"))?
+        .as_secs_f64();
+    let calibration_data = build_calibration_from_samples(
+        &cycle_samples,
+        screen_width,
+        screen_height,
+        calibration_time,
+    )?;
+    let basename = format!("profile_{}", calibration_time.trunc() as u64);
+    let filename = context
+        .profiles
+        .save_calibration(&calibration_data, &basename)
+        .map_err(|error| format!("failed to save calibration: {error}"))?;
+
+    context.engine.reset_timer();
+    load_profile(context, &filename)?;
+    context.config.active_calibration_profile = Some(filename);
+    context
+        .config
+        .save_to_path(&context.config_path)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn collect_calibration_samples(
+    state: &SharedAppState,
+    context: &mut WorkerContext,
+) -> Result<(Vec<Vec<i32>>, u32, u32), String> {
+    let first_frame = context.engine.capture_frame()?;
+    let screen_width = first_frame.width;
+    let screen_height = first_frame.height;
+    let roi = context
+        .engine
+        .roi()
+        .ok_or_else(|| "capture ROI is not ready".to_string())?;
+    let total_bar_width = roi.1 - roi.0;
+    if total_bar_width <= 0 {
+        return Err("capture ROI has invalid width".to_string());
+    }
+
+    let mut cycle_samples = Vec::new();
+    let mut current_cycle_data = Vec::new();
+    let mut previous_cost_state_raw = None;
+    let mut is_collecting_cycle = false;
+    let mut frame = first_frame;
+
+    while cycle_samples.len() < CALIBRATION_CYCLES {
+        let current_cost_state_raw = scanner::get_raw_filled_pixel_width(
+            &frame.data,
+            frame.width,
+            frame.height,
+            frame.format,
+            roi,
+        );
+
+        if let Some(current) = current_cost_state_raw {
+            let fill_percentage = current as f64 / total_bar_width as f64;
+            let progress_percent = (((cycle_samples.len() as f64 + fill_percentage)
+                / CALIBRATION_CYCLES as f64)
+                * 100.0)
+                .clamp(0.0, 100.0)
+                .round() as u8;
+            state.update_ui(|ui, _| {
+                ui.mode = OverlayMode::Calibrating;
+                ui.progress_percent = progress_percent;
+                ui.message.clear();
+            });
+
+            if let Some(previous) = previous_cost_state_raw {
+                if (previous as f64) > total_bar_width as f64 * 0.9
+                    && (current as f64) < total_bar_width as f64 * 0.1
+                {
+                    is_collecting_cycle = true;
+                    if !current_cycle_data.is_empty() {
+                        cycle_samples.push(std::mem::take(&mut current_cycle_data));
+                    }
+                }
+            }
+
+            if is_collecting_cycle {
+                current_cycle_data.push(current);
+            }
+            previous_cost_state_raw = Some(current);
+        } else {
+            previous_cost_state_raw = None;
+        }
+
+        if cycle_samples.len() < CALIBRATION_CYCLES {
+            frame = context.engine.capture_frame()?;
+        }
+    }
+
+    state.update_ui(|ui, _| {
+        ui.mode = OverlayMode::Calibrating;
+        ui.progress_percent = 100;
+    });
+    Ok((cycle_samples, screen_width, screen_height))
+}
+
+fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
+    context.sample_index += 1;
+    match context.engine.capture_frame() {
+        Ok(frame_data) => match context.engine.analyze_captured_frame(&frame_data) {
+            Ok(result) => {
+                let worker_timing = WorkerTimingSnapshot {
+                    sample_index: context.sample_index,
+                };
+                context.last_total_frames = result.total_frames_in_cycle;
+                if result.logical_frame.is_some() {
+                    context.last_elapsed_frames = result.elapsed_frames;
+                }
+                let display_frame = context.display_mode.display_frame(result.logical_frame);
+                let display_total = context
+                    .display_mode
+                    .display_total(result.total_frames_in_cycle);
+                let lap_frames = context
+                    .lap_start_frame
+                    .map(|start| context.last_elapsed_frames - start);
+                let active_profile = context.active_profile.clone();
+                let active_basename = active_profile.as_deref().map(calibration_basename);
+                state.update_ui(|ui, api| {
+                    ui.mode = OverlayMode::Running;
+                    ui.message.clear();
+                    ui.display_mode = context.display_mode;
+                    ui.display_frame = display_frame;
+                    ui.display_total = display_total;
+                    ui.time_str = format_time_from_frames(context.last_elapsed_frames);
+                    ui.lap_frames = lap_frames;
+                    ui.total_frames_in_cycle = result.total_frames_in_cycle;
+                    ui.active_profile = active_profile.clone();
+                    ui.profiles = context.profiles.list(active_profile.as_deref());
+                    api.is_running = result.logical_frame.is_some();
+                    api.current_frame = result.logical_frame;
+                    api.total_frames_in_cycle = if result.logical_frame.is_some() {
+                        result.total_frames_in_cycle
+                    } else {
+                        0
+                    };
+                    api.total_elapsed_frames = context.last_elapsed_frames;
+                    api.active_profile = active_basename.clone();
+                });
+                state.update_timing(worker_timing);
+            }
+            Err(error) => publish_error(state, context, format!("analyze error: {error}")),
+        },
+        Err(error) => publish_error(state, context, format!("capture error: {error}")),
+    }
+}
+
+fn publish_current_state(state: &SharedAppState, context: &WorkerContext) {
+    if context.active_profile.is_some() {
+        publish_running_state(state, context, None);
+    } else {
+        publish_idle(state, context);
+    }
+}
+
+fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame: Option<i32>) {
+    let active_profile = context.active_profile.clone();
+    let total_frames = context.last_total_frames.max(0);
+    let lap_frames = context
+        .lap_start_frame
+        .map(|start| context.last_elapsed_frames - start);
+    state.update_ui(|ui, api| {
+        ui.mode = OverlayMode::Running;
+        ui.message.clear();
+        ui.display_mode = context.display_mode;
+        ui.display_frame = context.display_mode.display_frame(frame);
+        ui.display_total = if total_frames > 0 {
+            context.display_mode.display_total(total_frames)
+        } else {
+            "/--".to_string()
+        };
+        ui.time_str = format_time_from_frames(context.last_elapsed_frames);
+        ui.lap_frames = lap_frames;
+        ui.total_frames_in_cycle = total_frames;
+        ui.active_profile = active_profile.clone();
+        ui.profiles = context.profiles.list(active_profile.as_deref());
+        api.is_running = frame.is_some();
+        api.current_frame = frame;
+        api.total_frames_in_cycle = if frame.is_some() { total_frames } else { 0 };
+        api.total_elapsed_frames = context.last_elapsed_frames;
+        api.active_profile = active_profile.as_deref().map(calibration_basename);
+    });
+}
+
+fn publish_idle(state: &SharedAppState, context: &WorkerContext) {
+    state.update_ui(|ui, api| {
+        ui.mode = OverlayMode::Idle;
+        ui.message.clear();
+        ui.display_mode = context.display_mode;
+        ui.display_frame = "--".to_string();
+        ui.display_total = "/--".to_string();
+        ui.time_str = "00:00:00".to_string();
+        ui.lap_frames = None;
+        ui.total_frames_in_cycle = 0;
+        ui.active_profile = None;
+        ui.profiles = context.profiles.list(None);
+        api.is_running = false;
+        api.current_frame = None;
+        api.total_frames_in_cycle = 0;
+        api.total_elapsed_frames = 0;
+        api.active_profile = None;
+    });
+}
+
+fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String) {
+    log::error!("{error}");
+    state.update_ui(|ui, api| {
+        ui.mode = OverlayMode::Error;
+        ui.message = error;
+        ui.active_profile = context.active_profile.clone();
+        ui.profiles = context.profiles.list(context.active_profile.as_deref());
+        api.is_running = false;
+        api.current_frame = None;
+    });
+}
+
+fn wait_for_exit_commands(
+    state: &SharedAppState,
+    commands: &Receiver<UiCommand>,
+    running: &AtomicBool,
+    interval: Duration,
+) {
     while running.load(Ordering::Relaxed) {
+        match commands.try_recv() {
+            Ok(UiCommand::Exit) | Err(TryRecvError::Disconnected) => {
+                running.store(false, Ordering::Relaxed);
+                state.request_exit();
+                break;
+            }
+            Ok(_) | Err(TryRecvError::Empty) => {}
+        }
         sleep_until(Instant::now() + interval, running);
     }
 }
@@ -424,142 +736,6 @@ fn sleep_until(deadline: Instant, running: &AtomicBool) {
         if now >= deadline {
             break;
         }
-
         thread::sleep((deadline - now).min(Duration::from_millis(1)));
     }
-}
-
-fn bootstrap_engine(
-    engine: &mut RulerEngine,
-    config: &RulerConfig,
-    capture_config: CaptureConfig,
-) -> Result<(String, String, String, bool), String> {
-    let dims = engine.connect(capture_config)?;
-
-    if let Some(profile) = &config.active_calibration_profile {
-        let calibration_path = calibration_path(profile);
-        engine
-            .load_calibration(&calibration_path)
-            .map_err(|error| format!("failed to load calibration '{}': {error}", calibration_path.display()))?;
-
-        Ok((
-            format!("status: connected {}x{}", dims.0, dims.1),
-            summarize_config(config),
-            format!("startup: calibration loaded from {}", calibration_path.display()),
-            true,
-        ))
-    } else {
-        Ok((
-            format!("status: connected {}x{}", dims.0, dims.1),
-            summarize_config(config),
-            "startup: capture connected, but no active calibration profile is configured".to_string(),
-            false,
-        ))
-    }
-}
-
-fn analyzed_status(
-    config: &RulerConfig,
-    result: ruler_core::FrameResult,
-    worker_timing: WorkerTimingSnapshot,
-) -> (String, String, String, String, ApiStateSnapshot, WorkerTimingSnapshot) {
-    let frame_display = match result.logical_frame {
-        Some(frame) => format!(
-            "frame: {} / {} (raw={})",
-            frame,
-            result.total_frames_in_cycle,
-            result.raw_pixel_width
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "--".to_string())
-        ),
-        None => format!(
-            "frame: -- / {} (raw={})",
-            result.total_frames_in_cycle,
-            result.raw_pixel_width
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "--".to_string())
-        ),
-    };
-
-    (
-        "status: running".to_string(),
-        frame_display,
-        format!("timer: {} frames", result.elapsed_frames),
-        format_worker_latency_line(worker_timing),
-        ApiStateSnapshot {
-            is_running: result.logical_frame.is_some(),
-            current_frame: result.logical_frame,
-            total_frames_in_cycle: if result.logical_frame.is_some() {
-                result.total_frames_in_cycle
-            } else {
-                0
-            },
-            total_elapsed_frames: result.elapsed_frames,
-            active_profile: config.active_calibration_profile.clone(),
-        },
-        worker_timing,
-    )
-}
-
-fn format_worker_latency_line(worker_timing: WorkerTimingSnapshot) -> String {
-    let capture_text = format_duration_ms(worker_timing.capture_duration);
-    let analyze_text = format_duration_ms(worker_timing.analyze_duration);
-    let total_text = format_duration_ms(worker_timing.total_worker_duration);
-
-    format!(
-        "latency: worker sample={} capture={} analyze={} capture->publish={}",
-        worker_timing.sample_index, capture_text, analyze_text, total_text
-    )
-}
-
-fn format_latency_line(
-    worker_timing: WorkerTimingSnapshot,
-    overlay_timing: OverlayTimingSnapshot,
-    painted_at: Instant,
-) -> String {
-    let capture_text = format_duration_ms(worker_timing.capture_duration);
-    let analyze_text = format_duration_ms(worker_timing.analyze_duration);
-    let worker_total_text = format_duration_ms(worker_timing.total_worker_duration);
-    let publish_to_paint = worker_timing
-        .state_published_at
-        .map(|published_at| painted_at.saturating_duration_since(published_at));
-    let capture_to_paint = worker_timing
-        .capture_started_at
-        .map(|capture_started_at| painted_at.saturating_duration_since(capture_started_at));
-    let capture_complete_to_paint = worker_timing
-        .capture_completed_at
-        .map(|capture_completed_at| painted_at.saturating_duration_since(capture_completed_at));
-    let analysis_to_paint = worker_timing
-        .analysis_completed_at
-        .map(|analysis_completed_at| painted_at.saturating_duration_since(analysis_completed_at));
-
-    format!(
-        "latency: sample={} capture={} analyze={} capture->publish={} capture->paint={} capture_done->paint={} publish->paint={} analyze->paint={} painted_sample={}",
-        worker_timing.sample_index,
-        capture_text,
-        analyze_text,
-        worker_total_text,
-        format_duration_ms(capture_to_paint),
-        format_duration_ms(capture_complete_to_paint),
-        format_duration_ms(publish_to_paint),
-        format_duration_ms(analysis_to_paint),
-        overlay_timing
-            .last_painted_sample_index
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "--".to_string())
-    )
-}
-
-fn format_duration_ms(duration: Option<Duration>) -> String {
-    duration
-        .map(|value| format!("{:.1}ms", value.as_secs_f64() * 1000.0))
-        .unwrap_or_else(|| "n/a".to_string())
-}
-
-fn calibration_path(profile: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("calibration")
-        .join(profile)
 }

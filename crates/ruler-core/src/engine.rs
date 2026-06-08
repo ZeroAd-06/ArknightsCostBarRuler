@@ -93,7 +93,10 @@ impl RulerEngine {
         Ok(frame_data)
     }
 
-    pub fn analyze_captured_frame(&mut self, frame_data: &CapturedFrame) -> Result<FrameResult, String> {
+    pub fn analyze_captured_frame(
+        &mut self,
+        frame_data: &CapturedFrame,
+    ) -> Result<FrameResult, String> {
         self.analyze_frame(
             &frame_data.data,
             frame_data.width,

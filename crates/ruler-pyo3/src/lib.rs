@@ -1,6 +1,8 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use ruler_core::{CaptureConfig, CaptureType, FrameResult, PixelFormat, RulerEngine as CoreRulerEngine};
+use ruler_core::{
+    CaptureConfig, CaptureType, FrameResult, PixelFormat, RulerEngine as CoreRulerEngine,
+};
 
 #[pyclass]
 #[derive(Clone)]
@@ -55,7 +57,11 @@ impl RulerEngine {
             "mumu" => CaptureType::MuMu,
             "ldplayer" => CaptureType::LDPlayer,
             "window" | "windows" => CaptureType::Windows,
-            _ => return Err(PyValueError::new_err(format!("Unknown capture type: {capture_type}"))),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown capture type: {capture_type}"
+                )))
+            }
         };
 
         self.inner
@@ -72,7 +78,9 @@ impl RulerEngine {
     }
 
     fn load_calibration(&mut self, path: &str) -> PyResult<()> {
-        self.inner.load_calibration(path).map_err(PyRuntimeError::new_err)
+        self.inner
+            .load_calibration(path)
+            .map_err(PyRuntimeError::new_err)
     }
 
     fn load_calibration_json(&mut self, json: &str) -> PyResult<()> {

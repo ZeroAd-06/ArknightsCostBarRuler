@@ -19,7 +19,8 @@ pub struct LDPlayerVTable {
     pub cap: unsafe extern "C" fn(this: *mut LDPlayerObject) -> *mut u8,
 }
 
-type CreateScreenShotInstance = unsafe extern "C" fn(instance_index: u32, pid: u32) -> *mut LDPlayerObject;
+type CreateScreenShotInstance =
+    unsafe extern "C" fn(instance_index: u32, pid: u32) -> *mut LDPlayerObject;
 
 pub struct LDPlayerController {
     pub dll: Option<Library>,
@@ -89,7 +90,9 @@ impl LDPlayerController {
                 let status = parts.next()?;
                 (status == "device").then(|| id.to_string())
             })
-            .ok_or_else(|| "No available ADB device found for LDPlayer resolution query".to_string())?;
+            .ok_or_else(|| {
+                "No available ADB device found for LDPlayer resolution query".to_string()
+            })?;
         self.device_id = Some(device.clone());
         Ok(device)
     }
@@ -126,7 +129,10 @@ impl LDPlayerController {
     fn resolve_pid(&self) -> Result<u32, String> {
         let dnconsole = PathBuf::from(&self.install_path).join("dnconsole.exe");
         if !dnconsole.exists() {
-            return Err(format!("dnconsole.exe not found at '{}'", dnconsole.display()));
+            return Err(format!(
+                "dnconsole.exe not found at '{}'",
+                dnconsole.display()
+            ));
         }
 
         let program = dnconsole.to_string_lossy().into_owned();
@@ -147,7 +153,9 @@ impl LDPlayerController {
         ))
     }
 
-    unsafe fn create_instance_symbol(&self) -> Result<Symbol<'_, CreateScreenShotInstance>, String> {
+    unsafe fn create_instance_symbol(
+        &self,
+    ) -> Result<Symbol<'_, CreateScreenShotInstance>, String> {
         let dll = self
             .dll
             .as_ref()
@@ -164,7 +172,10 @@ impl CaptureBackend for LDPlayerController {
 
         let dll_path = PathBuf::from(&self.install_path).join("ldopengl64.dll");
         if !dll_path.exists() {
-            return Err(format!("ldopengl64.dll not found at '{}'", dll_path.display()));
+            return Err(format!(
+                "ldopengl64.dll not found at '{}'",
+                dll_path.display()
+            ));
         }
 
         let dll = unsafe { Library::new(&dll_path) }
@@ -184,11 +195,11 @@ impl CaptureBackend for LDPlayerController {
         }
 
         self.handle = handle;
-        let buffer_size = self
-            .width
-            .checked_mul(self.height)
-            .and_then(|px| px.checked_mul(3))
-            .ok_or_else(|| "LDPlayer buffer size overflow".to_string())? as usize;
+        let buffer_size =
+            self.width
+                .checked_mul(self.height)
+                .and_then(|px| px.checked_mul(3))
+                .ok_or_else(|| "LDPlayer buffer size overflow".to_string())? as usize;
         self.buffer.resize(buffer_size, 0);
         self.spare_buffer.resize(buffer_size, 0);
         Ok(())
@@ -215,11 +226,11 @@ impl CaptureBackend for LDPlayerController {
             return Err("LDPlayer cap() returned a null pointer".to_string());
         }
 
-        let buffer_size = self
-            .width
-            .checked_mul(self.height)
-            .and_then(|px| px.checked_mul(3))
-            .ok_or_else(|| "LDPlayer buffer size overflow".to_string())? as usize;
+        let buffer_size =
+            self.width
+                .checked_mul(self.height)
+                .and_then(|px| px.checked_mul(3))
+                .ok_or_else(|| "LDPlayer buffer size overflow".to_string())? as usize;
         if self.buffer.len() != buffer_size {
             self.buffer.resize(buffer_size, 0);
         }

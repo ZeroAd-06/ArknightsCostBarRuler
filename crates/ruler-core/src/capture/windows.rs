@@ -83,7 +83,8 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL 
     };
 
     let mut class_buffer = vec![0u16; 256];
-    let class_len = unsafe { GetClassNameW(hwnd, class_buffer.as_mut_ptr(), class_buffer.len() as i32) };
+    let class_len =
+        unsafe { GetClassNameW(hwnd, class_buffer.as_mut_ptr(), class_buffer.len() as i32) };
     let class_name = String::from_utf16_lossy(&class_buffer[..class_len.max(0) as usize]);
 
     let title_match = context
@@ -201,10 +202,7 @@ impl WindowsController {
                 let _ = DeleteDC(hdc_mem);
             }
             if let Some(hdc_window) = self.hdc_window.take() {
-                let _ = ReleaseDC(
-                    self.hwnd.unwrap_or(HWND(std::ptr::null_mut())),
-                    hdc_window,
-                );
+                let _ = ReleaseDC(self.hwnd.unwrap_or(HWND(std::ptr::null_mut())), hdc_window);
             }
         }
     }
@@ -314,7 +312,9 @@ impl CaptureBackend for WindowsController {
                 captured = true;
             }
 
-            if !captured && BitBlt(hdc_mem, 0, 0, width, height, hdc_window, 0, 0, SRCCOPY.0).as_bool() {
+            if !captured
+                && BitBlt(hdc_mem, 0, 0, width, height, hdc_window, 0, 0, SRCCOPY.0).as_bool()
+            {
                 captured = true;
             }
 
@@ -338,7 +338,9 @@ impl CaptureBackend for WindowsController {
             }
 
             if !captured && IsIconic(hwnd).as_bool() {
-                return Err("Target window is minimized and capture fallback chain failed".to_string());
+                return Err(
+                    "Target window is minimized and capture fallback chain failed".to_string(),
+                );
             }
             if !captured {
                 return Err("All Windows capture methods failed".to_string());

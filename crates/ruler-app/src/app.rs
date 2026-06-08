@@ -1,8 +1,6 @@
 use std::{
     fmt,
-    path::{Path, PathBuf},
-    sync::Arc,
-    thread,
+    sync::{mpsc, Arc},
     time::Duration,
 };
 
@@ -10,7 +8,11 @@ use ruler_core::RulerConfig;
 
 use crate::{
     api::ApiRuntime,
-    overlay::{OverlayRuntime, OverlaySpec},
+    config_wizard::run_config_wizard,
+    i18n::I18n,
+    icons::IconSet,
+    overlay::OverlayRuntime,
+    resources::ResourceLocator,
     tray::TrayRuntime,
     worker::{SharedAppState, StartupStatus, WorkerRuntime},
 };
@@ -25,15 +27,47 @@ pub struct RulerApp {
 
 impl RulerApp {
     pub fn build() -> Result<Self, StartupError> {
+        let resources = ResourceLocator::new();
+        let mut startup_status = determine_startup_status(&resources);
+        let preferred_locale = startup_status
+            .loaded_config
+            .as_ref()
+            .and_then(|config| config.language.as_deref());
+        let i18n = Arc::new(I18n::load(&resources, preferred_locale));
+
+        if startup_status.loaded_config.is_none() {
+            if let Some(config) = run_config_wizard(&resources, &i18n) {
+                config
+                    .save_to_path(resources.config_path())
+                    .map_err(|error| StartupError::new(error.to_string()))?;
+                startup_status =
+                    StartupStatus::ready(resources.config_path().display().to_string(), config);
+            }
+        }
+
         let state = Arc::new(SharedAppState::default());
-        let startup_status = determine_startup_status();
         state.update_startup_status(&startup_status);
-        let overlay = OverlayRuntime::new(OverlaySpec::default(), Arc::clone(&state));
-        let tray = TrayRuntime::new(Arc::clone(&state));
+
+        let icons = Arc::new(IconSet::load(&resources));
+        let (command_tx, command_rx) = mpsc::channel();
+        let overlay = OverlayRuntime::new(
+            Arc::clone(&state),
+            command_tx.clone(),
+            Arc::clone(&i18n),
+            Arc::clone(&icons),
+        );
+        let tray = TrayRuntime::new(
+            Arc::clone(&state),
+            command_tx.clone(),
+            Arc::clone(&i18n),
+            Arc::clone(&icons),
+        );
         let api = ApiRuntime::new(Arc::clone(&state));
         let worker = WorkerRuntime::spawn_from_startup(
             Arc::clone(&state),
             startup_status,
+            resources,
+            command_rx,
             Duration::from_millis(1),
         )?;
 
@@ -57,42 +91,30 @@ impl RulerApp {
 
         let startup_snapshot = state.snapshot();
         log::info!(
-            "ruler-app state pipeline ready with {} / {} / {} / {}",
-            startup_snapshot.status_text,
-            startup_snapshot.frame_text,
-            startup_snapshot.timer_text,
-            startup_snapshot.latency_text
+            "ruler-app UI pipeline ready: mode={:?}, message={}",
+            startup_snapshot.ui.mode,
+            startup_snapshot.ui.message
         );
         log::info!("startup plan: {}", overlay.startup_note());
         log::info!("startup plan: {}", tray.startup_note());
         log::info!("startup plan: {}", api.startup_note());
         log::info!("startup plan: {}", worker.startup_note());
 
-        for tick in 1..=2 {
-            thread::sleep(Duration::from_millis(350));
-            let snapshot = state.snapshot();
-            log::info!(
-                "state tick {tick}: {} / {} / {} / {}",
-                snapshot.status_text,
-                snapshot.frame_text,
-                snapshot.timer_text,
-                snapshot.latency_text
-            );
-        }
-
         #[cfg(windows)]
         {
-            log::info!("Windows-oriented bootstrap path selected");
+            log::info!("Windows-oriented UI path selected");
             let _tray = tray.run().map_err(StartupError::from)?;
             let result = overlay.run().map_err(StartupError::from);
             drop(worker);
+            drop(api);
             result
         }
 
         #[cfg(not(windows))]
         {
-            log::warn!("Non-Windows host detected; native overlay bootstrap is unavailable");
+            log::warn!("Non-Windows host detected; native overlay is unavailable");
             drop(worker);
+            drop(api);
             Ok(())
         }
     }
@@ -131,8 +153,8 @@ impl From<crate::tray::TrayError> for StartupError {
     }
 }
 
-fn determine_startup_status() -> StartupStatus {
-    let config_path = default_config_path();
+fn determine_startup_status(resources: &ResourceLocator) -> StartupStatus {
+    let config_path = resources.config_path();
     let config_path_text = config_path.display().to_string();
 
     if !config_path.exists() {
@@ -145,22 +167,7 @@ fn determine_startup_status() -> StartupStatus {
     };
 
     match config.to_capture_config() {
-        Ok(_) => StartupStatus::engine_not_connected(
-            config_path_text,
-            config.clone(),
-            format!(
-                "config loaded for '{}' capture; runtime has not connected the engine yet; active_calibration_profile={}",
-                config.capture_type,
-                config.active_calibration_profile.as_deref().unwrap_or("--")
-            ),
-        ),
+        Ok(_) => StartupStatus::ready(config_path_text, config),
         Err(error) => StartupStatus::invalid(config_path.display().to_string(), error.to_string()),
     }
-}
-
-fn default_config_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("config.json")
 }

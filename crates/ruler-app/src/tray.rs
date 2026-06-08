@@ -1,29 +1,47 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{mpsc::Sender, Arc},
+};
 
-use crate::worker::SharedAppState;
+use crate::{commands::UiCommand, i18n::I18n, icons::IconSet, worker::SharedAppState};
 
 #[derive(Debug)]
 pub struct TrayRuntime {
     state: Arc<SharedAppState>,
+    command_tx: Sender<UiCommand>,
+    i18n: Arc<I18n>,
+    icons: Arc<IconSet>,
 }
 
 impl TrayRuntime {
     #[must_use]
-    pub fn new(state: Arc<SharedAppState>) -> Self {
-        Self { state }
+    pub fn new(
+        state: Arc<SharedAppState>,
+        command_tx: Sender<UiCommand>,
+        i18n: Arc<I18n>,
+        icons: Arc<IconSet>,
+    ) -> Self {
+        Self {
+            state,
+            command_tx,
+            i18n,
+            icons,
+        }
     }
 
     #[must_use]
     pub fn startup_note(&self) -> String {
         let snapshot = self.state.snapshot();
-        format!(
-            "native tray runtime ready with menu state from {} / {} / {}",
-            snapshot.status_text, snapshot.frame_text, snapshot.timer_text
-        )
+        format!("native tray runtime ready with mode={:?}", snapshot.ui.mode)
     }
 
     pub fn run(&self) -> Result<TrayHandle, TrayError> {
-        platform::run(Arc::clone(&self.state))
+        platform::run(
+            Arc::clone(&self.state),
+            self.command_tx.clone(),
+            Arc::clone(&self.i18n),
+            Arc::clone(&self.icons),
+        )
     }
 }
 
@@ -67,9 +85,9 @@ impl std::error::Error for TrayError {}
 
 #[cfg(not(windows))]
 mod platform {
-    use std::sync::Arc;
+    use std::sync::{mpsc::Sender, Arc};
 
-    use crate::worker::SharedAppState;
+    use crate::{commands::UiCommand, i18n::I18n, icons::IconSet, worker::SharedAppState};
 
     use super::{TrayError, TrayHandle};
 
@@ -80,7 +98,12 @@ mod platform {
         pub fn shutdown(&mut self) {}
     }
 
-    pub fn run(_: Arc<SharedAppState>) -> Result<TrayHandle, TrayError> {
+    pub fn run(
+        _: Arc<SharedAppState>,
+        _: Sender<UiCommand>,
+        _: Arc<I18n>,
+        _: Arc<IconSet>,
+    ) -> Result<TrayHandle, TrayError> {
         Ok(TrayHandle::new(TrayHandleImpl))
     }
 }
@@ -88,37 +111,40 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use std::{
-        iter,
-        mem,
+        iter, mem,
         sync::{
-            mpsc::{self, Receiver, Sender},
+            atomic::{AtomicIsize, Ordering},
+            mpsc::{self, Sender},
             Arc,
         },
         thread::{self, JoinHandle},
     };
 
-    use crate::worker::SharedAppState;
+    use crate::{
+        commands::UiCommand,
+        i18n::I18n,
+        icons::{win32::create_icon, IconSet},
+        menu,
+        worker::SharedAppState,
+    };
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+            Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
             Graphics::Gdi::HBRUSH,
-            System::{LibraryLoader::GetModuleHandleW, Threading::ExitProcess},
+            System::LibraryLoader::GetModuleHandleW,
             UI::{
                 Shell::{
                     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
                     NIM_MODIFY, NOTIFYICONDATAW,
                 },
                 WindowsAndMessaging::{
-                    AppendMenuW, CreatePopupMenu, CreateWindowExW, CREATESTRUCTW,
-                    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos,
-                    GetMessageW, GetWindowLongPtrW, HMENU, IDI_APPLICATION, LoadIconW,
-                    MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
-                    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW,
-                    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu,
-                    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND,
-                    WM_DESTROY, WM_NCCREATE, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
-                    GWLP_USERDATA,
+                    CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GetMessageW,
+                    GetWindowLongPtrW, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
+                    SetWindowLongPtrW, TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HICON,
+                    HMENU, IDI_APPLICATION, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND,
+                    WM_DESTROY, WM_NCCREATE, WM_RBUTTONUP, WNDCLASSW, WS_EX_TOOLWINDOW,
+                    WS_OVERLAPPED,
                 },
             },
         },
@@ -127,10 +153,9 @@ mod platform {
     use super::{TrayError, TrayHandle};
 
     const WM_TRAYICON: u32 = WM_APP + 1;
-    const MENU_EXIT_ID: usize = 1001;
 
     pub struct TrayHandleImpl {
-        shutdown_tx: Option<Sender<()>>,
+        hwnd: Arc<AtomicIsize>,
         thread: Option<JoinHandle<()>>,
     }
 
@@ -142,10 +167,13 @@ mod platform {
 
     impl TrayHandleImpl {
         pub fn shutdown(&mut self) {
-            if let Some(shutdown_tx) = self.shutdown_tx.take() {
-                let _ = shutdown_tx.send(());
+            let raw_hwnd = self.hwnd.load(Ordering::Relaxed);
+            if raw_hwnd != 0 {
+                unsafe {
+                    let _ =
+                        PostMessageW(HWND(raw_hwnd as *mut _), WM_DESTROY, WPARAM(0), LPARAM(0));
+                }
             }
-
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
@@ -154,40 +182,57 @@ mod platform {
 
     struct WindowState {
         shared_state: Arc<SharedAppState>,
+        command_tx: Sender<UiCommand>,
+        i18n: Arc<I18n>,
         nid: NOTIFYICONDATAW,
+        custom_icon: Option<HICON>,
     }
 
-    pub fn run(state: Arc<SharedAppState>) -> Result<TrayHandle, TrayError> {
+    pub fn run(
+        state: Arc<SharedAppState>,
+        command_tx: Sender<UiCommand>,
+        i18n: Arc<I18n>,
+        icons: Arc<IconSet>,
+    ) -> Result<TrayHandle, TrayError> {
         let (ready_tx, ready_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let hwnd = Arc::new(AtomicIsize::new(0));
+        let hwnd_for_thread = Arc::clone(&hwnd);
 
         let thread = thread::Builder::new()
             .name("ruler-app-tray".to_string())
-            .spawn(move || tray_thread_entry(state, shutdown_rx, ready_tx))
+            .spawn(move || {
+                tray_thread_entry(state, command_tx, i18n, icons, hwnd_for_thread, ready_tx)
+            })
             .map_err(|error| TrayError::new(format!("failed to start tray thread: {error}")))?;
 
         ready_rx
             .recv()
-            .map_err(|error| TrayError::new(format!("failed to receive tray startup status: {error}")))?
+            .map_err(|error| {
+                TrayError::new(format!("failed to receive tray startup status: {error}"))
+            })?
             .map_err(TrayError::new)?;
 
         Ok(TrayHandle::new(TrayHandleImpl {
-            shutdown_tx: Some(shutdown_tx),
+            hwnd,
             thread: Some(thread),
         }))
     }
 
     fn tray_thread_entry(
         state: Arc<SharedAppState>,
-        shutdown_rx: Receiver<()>,
+        command_tx: Sender<UiCommand>,
+        i18n: Arc<I18n>,
+        icons: Arc<IconSet>,
+        hwnd_holder: Arc<AtomicIsize>,
         ready_tx: Sender<Result<(), String>>,
     ) {
-        let result = unsafe { create_tray_window(state) };
-
+        let result = unsafe { create_tray_window(state, command_tx, i18n, icons) };
         match result {
             Ok(hwnd) => {
+                hwnd_holder.store(hwnd.0 as isize, Ordering::Relaxed);
                 let _ = ready_tx.send(Ok(()));
-                run_message_loop(hwnd, shutdown_rx);
+                run_message_loop();
+                hwnd_holder.store(0, Ordering::Relaxed);
             }
             Err(error) => {
                 let _ = ready_tx.send(Err(error.to_string()));
@@ -195,20 +240,13 @@ mod platform {
         }
     }
 
-    fn run_message_loop(hwnd: HWND, shutdown_rx: Receiver<()>) {
+    fn run_message_loop() {
+        let mut message = MSG::default();
         loop {
-            if shutdown_rx.try_recv().is_ok() {
-                unsafe {
-                    let _ = PostMessageW(hwnd, WM_DESTROY, WPARAM(0), LPARAM(0));
-                }
-            }
-
-            let mut message = MSG::default();
             let status = unsafe { GetMessageW(&mut message, HWND::default(), 0, 0) }.0;
             if status <= 0 {
                 break;
             }
-
             unsafe {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -216,13 +254,23 @@ mod platform {
         }
     }
 
-    unsafe fn create_tray_window(shared_state: Arc<SharedAppState>) -> Result<HWND, TrayError> {
+    unsafe fn create_tray_window(
+        shared_state: Arc<SharedAppState>,
+        command_tx: Sender<UiCommand>,
+        i18n: Arc<I18n>,
+        icons: Arc<IconSet>,
+    ) -> Result<HWND, TrayError> {
         let instance = GetModuleHandleW(PCWSTR::null())
             .map_err(|error| TrayError::new(format!("GetModuleHandleW failed: {error}")))?;
 
         let class_name = wide("RulerTrayWindowClass");
-        let icon = LoadIconW(HINSTANCE::default(), IDI_APPLICATION)
-            .map_err(|error| TrayError::new(format!("LoadIconW failed: {error}")))?;
+        let custom_icon = icons.get("deco").and_then(|icon| create_icon(icon, 32));
+        let icon = if let Some(icon) = custom_icon {
+            icon
+        } else {
+            LoadIconW(HINSTANCE::default(), IDI_APPLICATION)
+                .map_err(|error| TrayError::new(format!("LoadIconW failed: {error}")))?
+        };
 
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
@@ -241,13 +289,19 @@ mod platform {
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_TRAYICON;
         nid.hIcon = icon;
-        nid.szTip = tooltip_text(&shared_state.snapshot().status_text);
+        nid.szTip = tooltip_text("明日方舟费用条尺子");
 
-        let state = Box::new(WindowState { shared_state, nid });
+        let state = Box::new(WindowState {
+            shared_state,
+            command_tx,
+            i18n,
+            nid,
+            custom_icon,
+        });
         let state_ptr = Box::into_raw(state);
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
             PCWSTR(class_name.as_ptr()),
             PCWSTR(class_name.as_ptr()),
             WINDOW_STYLE(WS_OVERLAPPED.0),
@@ -264,7 +318,9 @@ mod platform {
 
         if hwnd.0.is_null() {
             let _ = Box::from_raw(state_ptr);
-            return Err(TrayError::new("CreateWindowExW returned a null tray window"));
+            return Err(TrayError::new(
+                "CreateWindowExW returned a null tray window",
+            ));
         }
 
         Ok(hwnd)
@@ -289,13 +345,17 @@ mod platform {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     return LRESULT(0);
                 }
-
                 LRESULT(1)
             }
             WM_COMMAND => {
-                if (wparam.0 & 0xffff) == MENU_EXIT_ID {
-                    let _ = DestroyWindow(hwnd);
-                    ExitProcess(0);
+                if let Some(state) = window_state(hwnd) {
+                    menu::win32::handle_menu_command(
+                        hwnd,
+                        wparam.0 & 0xffff,
+                        &state.shared_state,
+                        &state.command_tx,
+                        &state.i18n,
+                    );
                 }
                 LRESULT(0)
             }
@@ -310,6 +370,9 @@ mod platform {
                 if !state_ptr.is_null() {
                     let state = Box::from_raw(state_ptr);
                     let _ = Shell_NotifyIconW(NIM_DELETE, &state.nid);
+                    if let Some(icon) = state.custom_icon {
+                        let _ = DestroyIcon(icon);
+                    }
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
                 PostQuitMessage(0);
@@ -320,55 +383,25 @@ mod platform {
     }
 
     unsafe fn show_tray_menu(hwnd: HWND) {
-        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
-        if state_ptr.is_null() {
-            return;
-        }
-
-        let state = &mut *state_ptr;
-        let snapshot = state.shared_state.snapshot();
-        state.nid.szTip = tooltip_text(&snapshot.status_text);
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &state.nid);
-
-        let Ok(menu) = CreatePopupMenu() else {
+        let Some(state) = window_state(hwnd) else {
             return;
         };
-
-        let status = wide(&truncate_menu_text(&snapshot.status_text));
-        let frame = wide(&truncate_menu_text(&snapshot.frame_text));
-        let timer = wide(&truncate_menu_text(&snapshot.timer_text));
-        let exit = wide("Exit");
-
-        let disabled = MF_STRING | MF_DISABLED | MF_GRAYED;
-        let _ = AppendMenuW(menu, disabled, 1, PCWSTR(status.as_ptr()));
-        let _ = AppendMenuW(menu, disabled, 2, PCWSTR(frame.as_ptr()));
-        let _ = AppendMenuW(menu, disabled, 3, PCWSTR(timer.as_ptr()));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, PCWSTR(exit.as_ptr()));
-
-        let mut cursor = POINT::default();
-        let _ = GetCursorPos(&mut cursor);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
-            cursor.x,
-            cursor.y,
-            0,
-            hwnd,
-            None,
-        );
-        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
+        let snapshot = state.shared_state.snapshot();
+        let mut nid = state.nid;
+        nid.szTip = tooltip_text(match snapshot.ui.mode {
+            crate::ui_state::OverlayMode::Running => "明日方舟费用条尺子",
+            _ => &snapshot.ui.message,
+        });
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        menu::win32::show_context_menu(hwnd, &state.shared_state, &state.i18n);
     }
 
-    fn truncate_menu_text(value: &str) -> String {
-        const LIMIT: usize = 64;
-        if value.chars().count() <= LIMIT {
-            value.to_string()
+    unsafe fn window_state<'a>(hwnd: HWND) -> Option<&'a WindowState> {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
+        if state_ptr.is_null() {
+            None
         } else {
-            let shortened: String = value.chars().take(LIMIT - 1).collect();
-            format!("{shortened}…")
+            Some(&*state_ptr)
         }
     }
 
@@ -379,6 +412,16 @@ mod platform {
             buf[index] = value;
         }
         buf
+    }
+
+    fn truncate_menu_text(value: &str) -> String {
+        const LIMIT: usize = 64;
+        if value.chars().count() <= LIMIT {
+            value.to_string()
+        } else {
+            let shortened: String = value.chars().take(LIMIT - 1).collect();
+            format!("{shortened}…")
+        }
     }
 
     fn wide(value: &str) -> Vec<u16> {

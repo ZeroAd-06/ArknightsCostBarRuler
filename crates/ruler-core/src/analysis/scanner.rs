@@ -1,6 +1,5 @@
 /// Zero-copy pixel scanner for cost bar analysis.
 /// Operates directly on raw RGBA/BGR buffers.
-
 use super::roi::Roi;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,11 +138,7 @@ pub fn get_raw_filled_pixel_width(
 mod tests {
     use super::*;
 
-    fn make_rgba_buffer(
-        width: u32,
-        height: u32,
-        fill_fn: &dyn Fn(u32, u32) -> [u8; 4],
-    ) -> Vec<u8> {
+    fn make_rgba_buffer(width: u32, height: u32, fill_fn: &dyn Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
         let mut buf = vec![0u8; (width * height * 4) as usize];
         for y in 0..height {
             for x in 0..width {

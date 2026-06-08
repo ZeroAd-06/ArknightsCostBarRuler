@@ -11,12 +11,7 @@ use std::{
 };
 
 use serde::Serialize;
-use tungstenite::{
-    accept,
-    error::Error as WebSocketError,
-    protocol::WebSocket,
-    Message,
-};
+use tungstenite::{accept, error::Error as WebSocketError, protocol::WebSocket, Message};
 
 use crate::worker::SharedAppState;
 
@@ -148,7 +143,9 @@ fn run_api_server(bind_address: String, state: Arc<SharedAppState>, running: Arc
                     },
                     Ok(ConnectionKind::HttpSnapshot) => {
                         if let Err(error) = respond_with_snapshot(&mut stream, &state) {
-                            log::debug!("failed to respond to local HTTP API client {peer_addr}: {error}");
+                            log::debug!(
+                                "failed to respond to local HTTP API client {peer_addr}: {error}"
+                            );
                         }
                     }
                     Err(error) => {
@@ -228,14 +225,18 @@ fn snapshot_json(state: &SharedAppState) -> String {
 }
 
 fn broadcast_snapshot(clients: &mut Vec<WebSocket<TcpStream>>, payload: &str) {
-    clients.retain_mut(|client| match client.send(Message::Text(payload.to_string().into())) {
-        Ok(()) => true,
-        Err(WebSocketError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => true,
-        Err(error) => {
-            log::debug!("dropping websocket API client after send failure: {error}");
-            false
-        }
-    });
+    clients.retain_mut(
+        |client| match client.send(Message::Text(payload.to_string().into())) {
+            Ok(()) => true,
+            Err(WebSocketError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                true
+            }
+            Err(error) => {
+                log::debug!("dropping websocket API client after send failure: {error}");
+                false
+            }
+        },
+    );
 }
 
 fn prune_closed_clients(clients: &mut Vec<WebSocket<TcpStream>>) {

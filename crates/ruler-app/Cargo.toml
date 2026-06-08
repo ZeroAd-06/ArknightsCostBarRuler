@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 ruler-core = { path = "../ruler-core" }
 serde = { version = "1", features = ["derive"] }
@@ -15,8 +16,12 @@ tungstenite = "0.24"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }

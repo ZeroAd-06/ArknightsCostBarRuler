@@ -1,0 +1,18 @@
+{
+  "capture_type": "mumu",
+  "config_path": "C:\\Users\\10067\\PycharmProjects\\ArknightsCostBarRuler\\crates\\ruler-core\\..\\..\\config.json",
+  "cycles_collected": 8,
+  "elapsed_seconds": 53.6706267,
+  "label": "80%",
+  "measured_capture_fps": 153.92031932431303,
+  "raw_samples": 8261,
+  "roi": [
+    1739,
+    1919,
+    814
+  ],
+  "screen_height": 1080,
+  "screen_width": 1920,
+  "started_unix": 1780955525,
+  "total_bar_width": 180
+}

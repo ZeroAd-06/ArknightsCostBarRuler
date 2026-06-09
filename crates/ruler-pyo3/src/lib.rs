@@ -15,6 +15,8 @@ pub struct PyFrameResult {
     pub raw_pixel_width: Option<i32>,
     #[pyo3(get)]
     pub elapsed_frames: i32,
+    #[pyo3(get)]
+    pub cost_is_negative: bool,
 }
 
 impl From<FrameResult> for PyFrameResult {
@@ -24,6 +26,7 @@ impl From<FrameResult> for PyFrameResult {
             total_frames_in_cycle: value.total_frames_in_cycle,
             raw_pixel_width: value.raw_pixel_width,
             elapsed_frames: value.elapsed_frames,
+            cost_is_negative: value.cost_is_negative,
         }
     }
 }

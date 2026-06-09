@@ -11,6 +11,7 @@ pub struct FrameResult {
     pub total_frames_in_cycle: i32,
     pub raw_pixel_width: Option<i32>,
     pub elapsed_frames: i32,
+    pub cost_is_negative: bool,
 }
 
 pub struct RulerEngine {
@@ -19,10 +20,28 @@ pub struct RulerEngine {
     roi: Option<Roi>,
     current_profile_index: usize,
     cycle_counter: usize,
-    cycle_base_frames: i32,
-    timer_offset_frames: i32,
-    previous_logical_frame: i32,
+    elapsed_frames: f64,
+    previous_phase: Option<PhaseSample>,
     last_known_total_frames: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PhaseSample {
+    phase: f64,
+    total_frames: i32,
+    cost_is_negative: bool,
+}
+
+impl PhaseSample {
+    fn effective_total_frames(self) -> i32 {
+        effective_total_frames(self.total_frames, self.cost_is_negative)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FrameLookup {
+    logical_frame: i32,
+    phase: f64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -31,6 +50,8 @@ pub struct EngineStatus {
     pub has_calibration: bool,
     pub roi_ready: bool,
 }
+
+const NEGATIVE_COST_INTERVAL_MULTIPLIER: i32 = 2;
 
 impl Default for RulerEngine {
     fn default() -> Self {
@@ -46,9 +67,8 @@ impl RulerEngine {
             roi: None,
             current_profile_index: 0,
             cycle_counter: 0,
-            cycle_base_frames: 0,
-            timer_offset_frames: 0,
-            previous_logical_frame: -1,
+            elapsed_frames: 0.0,
+            previous_phase: None,
             last_known_total_frames: 0,
         }
     }
@@ -136,26 +156,22 @@ impl RulerEngine {
     }
 
     pub fn reset_timer(&mut self) {
-        self.timer_offset_frames = 0;
-        self.cycle_base_frames = 0;
+        self.elapsed_frames = 0.0;
         self.cycle_counter = 0;
         self.last_known_total_frames = 0;
-        self.previous_logical_frame = -1;
+        self.previous_phase = None;
     }
 
     pub fn adjust_timer(&mut self, frames: i32) {
-        self.timer_offset_frames += frames;
-        self.last_known_total_frames += frames;
+        self.elapsed_frames += frames as f64;
+        self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
     }
 
     pub fn set_profile_index(&mut self, index: usize) {
         if let Some(cal) = &self.calibration {
             if index < cal.tables.len() {
-                let offset = self.cycle_base_frames;
-                self.timer_offset_frames += offset;
-                self.cycle_base_frames = 0;
                 self.cycle_counter = 0;
-                self.previous_logical_frame = -1;
+                self.previous_phase = None;
                 self.current_profile_index = index;
             }
         }
@@ -171,9 +187,8 @@ impl RulerEngine {
         self.calibration = Some(loaded);
         self.current_profile_index = 0;
         self.cycle_counter = 0;
-        self.cycle_base_frames = 0;
-        self.previous_logical_frame = -1;
-        self.last_known_total_frames = self.timer_offset_frames;
+        self.previous_phase = None;
+        self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
     }
 
     fn analyze_frame(
@@ -192,6 +207,7 @@ impl RulerEngine {
         })?;
 
         let pixel_width = scanner::get_raw_filled_pixel_width(buffer, width, height, format, roi);
+        let cost_is_negative = scanner::is_cost_negative(buffer, width, height, format);
 
         let num_profiles = calibration.tables.len();
         let base_profile = if num_profiles == 0 {
@@ -199,36 +215,120 @@ impl RulerEngine {
         } else {
             self.current_profile_index.min(num_profiles - 1)
         };
-        let profile_idx = if num_profiles == 0 {
-            0
-        } else {
-            (base_profile + self.cycle_counter) % num_profiles
-        };
-        let table = &calibration.tables[profile_idx];
 
-        let logical_frame = pixel_width.and_then(|pw| table.lookup(pw));
+        let (logical_frame, total_frames_in_cycle) = if num_profiles > 0 {
+            let mut profile_idx = (base_profile + self.cycle_counter) % num_profiles;
+            let mut table = &calibration.tables[profile_idx];
+            let mut frame_lookup =
+                pixel_width.and_then(|pw| lookup_bar_frame(table, pw, cost_is_negative));
 
-        if let Some(lf) = logical_frame {
-            let total_f = table.total_frames;
-            if self.previous_logical_frame > (total_f as f64 * 0.75) as i32
-                && lf < (total_f as f64 * 0.25) as i32
+            if let (Some(previous), Some(current), Some(pixel_width)) =
+                (self.previous_phase, frame_lookup, pixel_width)
             {
-                self.cycle_base_frames += total_f;
-                self.cycle_counter += 1;
+                if is_natural_cycle_wrap(previous, current.phase) {
+                    self.cycle_counter += 1;
+                    profile_idx = (base_profile + self.cycle_counter) % num_profiles;
+                    table = &calibration.tables[profile_idx];
+                    frame_lookup =
+                        lookup_bar_frame(table, pixel_width, cost_is_negative).or(frame_lookup);
+                }
             }
-            self.last_known_total_frames = self.timer_offset_frames + self.cycle_base_frames + lf;
-            self.previous_logical_frame = lf;
+
+            let total_frames = table.total_frames;
+            let current_phase = frame_lookup.map(|lookup| PhaseSample {
+                phase: lookup.phase,
+                total_frames,
+                cost_is_negative,
+            });
+
+            if let Some(current_phase) = current_phase {
+                if let Some(previous_phase) = self.previous_phase {
+                    let phase_delta = phase_delta(previous_phase, current_phase);
+                    self.elapsed_frames +=
+                        phase_delta * previous_phase.effective_total_frames() as f64;
+                    self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
+                }
+                self.previous_phase = Some(current_phase);
+            } else {
+                self.previous_phase = None;
+            }
+
+            (
+                frame_lookup.map(|lookup| lookup.logical_frame),
+                effective_total_frames(total_frames, cost_is_negative),
+            )
         } else {
-            self.previous_logical_frame = -1;
-        }
+            self.previous_phase = None;
+            (None, 0)
+        };
 
         Ok(FrameResult {
             logical_frame,
-            total_frames_in_cycle: table.total_frames,
+            total_frames_in_cycle,
             raw_pixel_width: pixel_width,
             elapsed_frames: self.last_known_total_frames,
+            cost_is_negative,
         })
     }
+}
+
+fn effective_total_frames(total_frames: i32, cost_is_negative: bool) -> i32 {
+    if cost_is_negative {
+        total_frames.saturating_mul(NEGATIVE_COST_INTERVAL_MULTIPLIER)
+    } else {
+        total_frames
+    }
+}
+
+fn lookup_bar_frame(
+    table: &crate::analysis::mapping::CalibrationTable,
+    pixel_width: i32,
+    cost_is_negative: bool,
+) -> Option<FrameLookup> {
+    let total_frames = table.total_frames;
+    if total_frames <= 0 {
+        return None;
+    }
+
+    if cost_is_negative {
+        let phase = table.lookup_phase(pixel_width)?;
+        let logical_frame = frame_from_phase(phase, effective_total_frames(total_frames, true));
+        Some(FrameLookup {
+            logical_frame,
+            phase,
+        })
+    } else {
+        let logical_frame = table.lookup(pixel_width)?;
+        Some(FrameLookup {
+            logical_frame,
+            phase: logical_frame as f64 / total_frames as f64,
+        })
+    }
+}
+
+fn frame_from_phase(phase: f64, total_frames: i32) -> i32 {
+    if total_frames <= 0 {
+        return 0;
+    }
+
+    let frame = (phase.clamp(0.0, 1.0) * total_frames as f64).round() as i32;
+    frame.clamp(0, total_frames - 1)
+}
+
+fn is_natural_cycle_wrap(previous: PhaseSample, current_phase: f64) -> bool {
+    previous.phase > 0.75 && current_phase < 0.25
+}
+
+fn phase_delta(previous: PhaseSample, current: PhaseSample) -> f64 {
+    let mut delta = current.phase - previous.phase;
+    if delta < -0.5 {
+        delta += 1.0;
+    }
+    delta.max(0.0)
+}
+
+fn rounded_frame_count(frames: f64) -> i32 {
+    frames.round() as i32
 }
 
 impl Drop for RulerEngine {
@@ -240,6 +340,10 @@ impl Drop for RulerEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SCREEN_WIDTH: u32 = 1280;
+    const TEST_SCREEN_HEIGHT: u32 = 720;
+    const TEST_ROI: Roi = (100, 140, 100);
 
     #[test]
     fn analyze_raw_buffer_tracks_frames() {
@@ -271,5 +375,209 @@ mod tests {
         assert_eq!(result.raw_pixel_width, Some(2));
         assert_eq!(result.logical_frame, Some(0));
         assert_eq!(result.elapsed_frames, 0);
+        assert!(!result.cost_is_negative);
+    }
+
+    #[test]
+    fn normal_cycle_elapsed_frames_match_existing_behavior() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        let result = analyze_width(&mut engine, 0, false);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 0);
+
+        let result = analyze_width(&mut engine, 15, false);
+        assert_eq!(result.logical_frame, Some(15));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 15);
+
+        let result = analyze_width(&mut engine, 29, false);
+        assert_eq!(result.logical_frame, Some(29));
+        assert_eq!(result.elapsed_frames, 29);
+
+        let result = analyze_width(&mut engine, 0, false);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 30);
+    }
+
+    #[test]
+    fn entering_negative_cost_at_same_phase_does_not_jump_elapsed_time() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        analyze_width(&mut engine, 15, false);
+        let result = analyze_width(&mut engine, 15, true);
+
+        assert_eq!(result.logical_frame, Some(30));
+        assert_eq!(result.total_frames_in_cycle, 60);
+        assert_eq!(result.elapsed_frames, 15);
+        assert!(result.cost_is_negative);
+    }
+
+    #[test]
+    fn full_negative_cost_cycle_counts_double_frames() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, true);
+        for width in 1..30 {
+            analyze_width(&mut engine, width, true);
+        }
+        let result = analyze_width(&mut engine, 0, false);
+
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 60);
+        assert!(!result.cost_is_negative);
+    }
+
+    #[test]
+    fn non_natural_negative_cost_exit_at_same_phase_does_not_jump_elapsed_time() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        analyze_width(&mut engine, 15, true);
+        let result = analyze_width(&mut engine, 15, false);
+
+        assert_eq!(result.logical_frame, Some(15));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 15);
+        assert!(!result.cost_is_negative);
+    }
+
+    #[test]
+    fn negative_cost_interpolates_widths_missing_from_positive_profile() {
+        let mut engine = RulerEngine::new();
+        engine
+            .load_calibration_json(
+                r#"{
+                    "profiles": [{
+                        "total_frames": 8,
+                        "pixel_map": {"0": 0, "3": 2, "5": 4, "7": 7}
+                    }]
+                }"#,
+            )
+            .unwrap();
+        engine.set_roi_value(TEST_ROI);
+
+        let result = analyze_width(&mut engine, 0, true);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 16);
+        assert_eq!(result.elapsed_frames, 0);
+
+        let result = analyze_width(&mut engine, 1, true);
+        assert_eq!(result.logical_frame, Some(1));
+        assert_eq!(result.total_frames_in_cycle, 16);
+        assert_eq!(result.elapsed_frames, 1);
+
+        let result = analyze_width(&mut engine, 4, true);
+        assert_eq!(result.logical_frame, Some(6));
+        assert_eq!(result.elapsed_frames, 6);
+
+        let result = analyze_width(&mut engine, 6, true);
+        assert_eq!(result.logical_frame, Some(11));
+        assert_eq!(result.elapsed_frames, 11);
+    }
+
+    #[test]
+    fn alternating_profiles_continue_and_negative_cost_doubles_current_effective_cycle() {
+        let mut engine = engine_with_profiles(&[38, 37]);
+
+        analyze_width(&mut engine, 0, false);
+        analyze_width(&mut engine, 37, false);
+        let result = analyze_width(&mut engine, 0, false);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 37);
+        assert_eq!(result.elapsed_frames, 38);
+
+        let result = analyze_width(&mut engine, 10, true);
+        assert_eq!(result.logical_frame, Some(20));
+        assert_eq!(result.total_frames_in_cycle, 74);
+        assert_eq!(result.elapsed_frames, 48);
+
+        let result = analyze_width(&mut engine, 11, true);
+        assert_eq!(result.logical_frame, Some(22));
+        assert_eq!(result.total_frames_in_cycle, 74);
+        assert_eq!(result.elapsed_frames, 50);
+    }
+
+    fn engine_with_profiles(total_frames: &[i32]) -> RulerEngine {
+        let mut engine = RulerEngine::new();
+        engine
+            .load_calibration_json(&calibration_json(total_frames))
+            .unwrap();
+        engine.set_roi_value(TEST_ROI);
+        engine
+    }
+
+    fn calibration_json(total_frames: &[i32]) -> String {
+        let profiles = total_frames
+            .iter()
+            .map(|total_frames| {
+                let pixel_map = (0..*total_frames)
+                    .map(|frame| format!(r#""{frame}": {frame}"#))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(r#"{{"total_frames": {total_frames}, "pixel_map": {{{pixel_map}}}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(r#"{{"profiles": [{profiles}]}}"#)
+    }
+
+    fn analyze_width(
+        engine: &mut RulerEngine,
+        raw_width: i32,
+        cost_is_negative: bool,
+    ) -> FrameResult {
+        let buffer = make_bgr_frame(raw_width, cost_is_negative);
+        engine
+            .analyze_raw_buffer(
+                &buffer,
+                TEST_SCREEN_WIDTH,
+                TEST_SCREEN_HEIGHT,
+                PixelFormat::Bgr,
+            )
+            .unwrap()
+    }
+
+    fn make_bgr_frame(raw_width: i32, cost_is_negative: bool) -> Vec<u8> {
+        let mut buffer = vec![30u8; (TEST_SCREEN_WIDTH * TEST_SCREEN_HEIGHT * 3) as usize];
+        let filled_width = raw_width.clamp(0, TEST_ROI.1 - TEST_ROI.0);
+        for x in TEST_ROI.0..(TEST_ROI.0 + filled_width) {
+            put_bgr_screen_pixel(
+                &mut buffer,
+                TEST_SCREEN_WIDTH,
+                TEST_SCREEN_HEIGHT,
+                x,
+                TEST_ROI.2,
+                [252, 252, 252],
+            );
+        }
+
+        if cost_is_negative {
+            for y in 514..517 {
+                for x in 1210..1231 {
+                    put_bgr_screen_pixel(
+                        &mut buffer,
+                        TEST_SCREEN_WIDTH,
+                        TEST_SCREEN_HEIGHT,
+                        x,
+                        y,
+                        [255, 255, 255],
+                    );
+                }
+            }
+        }
+
+        buffer
+    }
+
+    fn put_bgr_screen_pixel(buf: &mut [u8], width: u32, height: u32, x: i32, y: i32, rgb: [u8; 3]) {
+        let offset = ((height as i32 - 1 - y) as u32 * width * 3 + x as u32 * 3) as usize;
+        buf[offset] = rgb[2];
+        buf[offset + 1] = rgb[1];
+        buf[offset + 2] = rgb[0];
     }
 }

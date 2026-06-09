@@ -254,6 +254,7 @@ struct WorkerContext {
     lap_start_frame: Option<i32>,
     last_elapsed_frames: i32,
     last_total_frames: i32,
+    last_cost_is_negative: bool,
     sample_index: u64,
 }
 
@@ -284,6 +285,7 @@ fn run_worker_loop(
         lap_start_frame: None,
         last_elapsed_frames: 0,
         last_total_frames: 0,
+        last_cost_is_negative: false,
         sample_index: 0,
     };
 
@@ -341,6 +343,7 @@ fn load_profile(context: &mut WorkerContext, filename: &str) -> Result<(), Strin
     context.active_profile = Some(filename.to_string());
     context.lap_start_frame = None;
     context.last_elapsed_frames = 0;
+    context.last_cost_is_negative = false;
     Ok(())
 }
 
@@ -374,6 +377,7 @@ fn handle_command(
             context.active_profile = None;
             context.config.active_calibration_profile = None;
             context.lap_start_frame = None;
+            context.last_cost_is_negative = false;
             let _ = context.config.save_to_path(&context.config_path);
             state.update_ui(|ui, api| {
                 ui.mode = OverlayMode::PreCalibration;
@@ -426,6 +430,7 @@ fn handle_command(
                 context.engine.reset_timer();
                 context.last_elapsed_frames = 0;
                 context.lap_start_frame = None;
+                context.last_cost_is_negative = false;
                 let _ = context.config.save_to_path(&context.config_path);
                 publish_idle(state, context);
             } else {
@@ -476,6 +481,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
     context.lap_start_frame = None;
     context.last_elapsed_frames = 0;
     context.last_total_frames = 0;
+    context.last_cost_is_negative = false;
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Calibrating;
         ui.progress_percent = 0;
@@ -601,13 +607,16 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                     sample_index: context.sample_index,
                 };
                 context.last_total_frames = result.total_frames_in_cycle;
+                context.last_cost_is_negative = result.cost_is_negative;
                 if result.logical_frame.is_some() {
                     context.last_elapsed_frames = result.elapsed_frames;
                 }
                 let display_frame = context.display_mode.display_frame(result.logical_frame);
-                let display_total = context
-                    .display_mode
-                    .display_total(result.total_frames_in_cycle);
+                let display_total = display_total_with_cost_marker(
+                    context.display_mode,
+                    result.total_frames_in_cycle,
+                    result.cost_is_negative,
+                );
                 let lap_frames = context
                     .lap_start_frame
                     .map(|start| context.last_elapsed_frames - start);
@@ -662,7 +671,11 @@ fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame:
         ui.display_mode = context.display_mode;
         ui.display_frame = context.display_mode.display_frame(frame);
         ui.display_total = if total_frames > 0 {
-            context.display_mode.display_total(total_frames)
+            display_total_with_cost_marker(
+                context.display_mode,
+                total_frames,
+                context.last_cost_is_negative,
+            )
         } else {
             "/--".to_string()
         };
@@ -709,6 +722,18 @@ fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String)
         api.is_running = false;
         api.current_frame = None;
     });
+}
+
+fn display_total_with_cost_marker(
+    display_mode: FrameDisplayMode,
+    total_frames: i32,
+    cost_is_negative: bool,
+) -> String {
+    let mut display_total = display_mode.display_total(total_frames);
+    if cost_is_negative {
+        display_total.push('*');
+    }
+    display_total
 }
 
 fn wait_for_exit_commands(

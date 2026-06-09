@@ -10,7 +10,7 @@ use std::{
 };
 
 use ruler_core::{
-    analysis::{calibration::build_calibration_from_samples, scanner},
+    analysis::{calibration::infer_calibration_from_samples, scanner},
     RulerConfig, RulerEngine,
 };
 
@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-const CALIBRATION_CYCLES: usize = 6;
+const CALIBRATION_CYCLES: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkerTimingSnapshot {
@@ -495,7 +495,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock error: {error}"))?
         .as_secs_f64();
-    let calibration_data = build_calibration_from_samples(
+    let calibration_data = infer_calibration_from_samples(
         &cycle_samples,
         screen_width,
         screen_height,

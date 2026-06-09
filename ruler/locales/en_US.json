@@ -47,7 +47,7 @@
     "overlay.timer.fwd_1s": "> Forward 1 sec",
     "overlay.timer.fwd_frames": "> Forward {frames} frames",
     "overlay.msg.idle": "Right-click to\nSelect Profile",
-    "overlay.msg.pre_cal": "Select Operator\nClick Left",
+    "overlay.msg.pre_cal": "Enter Stage\nClick Left",
     "overlay.dialog.rename.title": "Rename",
     "overlay.dialog.rename.prompt": "Enter new name for '{old_basename}':",
     "overlay.dialog.delete.title": "Confirm Delete",

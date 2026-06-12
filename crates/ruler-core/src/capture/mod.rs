@@ -1,9 +1,11 @@
 use crate::analysis::scanner::PixelFormat;
 
+pub mod adb;
 pub mod ldplayer;
 pub mod mumu;
 pub mod windows;
 
+pub use adb::AdbController;
 pub use ldplayer::LDPlayerController;
 pub use mumu::MuMuController;
 pub use windows::WindowsController;
@@ -35,6 +37,7 @@ pub struct CaptureConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureType {
+    Adb,
     MuMu,
     LDPlayer,
     Windows,
@@ -42,6 +45,7 @@ pub enum CaptureType {
 
 pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, String> {
     match config.capture_type {
+        CaptureType::Adb => Ok(Box::new(AdbController::new(config.device_id))),
         CaptureType::MuMu => {
             let install_path = config
                 .install_path

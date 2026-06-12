@@ -2,8 +2,12 @@ use ruler_core::RulerConfig;
 
 use crate::{i18n::I18n, resources::ResourceLocator};
 
-pub fn run_config_wizard(_resources: &ResourceLocator, i18n: &I18n) -> Option<RulerConfig> {
-    platform::run_config_wizard(i18n)
+pub fn run_config_wizard(
+    _resources: &ResourceLocator,
+    i18n: &I18n,
+    previous_config: Option<&RulerConfig>,
+) -> Option<RulerConfig> {
+    platform::run_config_wizard(i18n, previous_config)
 }
 
 #[cfg(not(windows))]
@@ -12,128 +16,157 @@ mod platform {
 
     use crate::i18n::I18n;
 
-    pub fn run_config_wizard(_: &I18n) -> Option<RulerConfig> {
+    pub fn run_config_wizard(_: &I18n, _: Option<&RulerConfig>) -> Option<RulerConfig> {
         None
     }
 }
 
 #[cfg(windows)]
 mod platform {
-    use std::{ffi::c_void, iter};
+    use std::{
+        collections::{HashMap, VecDeque},
+        ffi::c_void,
+        iter,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc::{self, Receiver, Sender},
+            Arc,
+        },
+        thread,
+        time::Duration,
+    };
 
-    use ruler_core::RulerConfig;
+    use ruler_core::{
+        capture::{create_backend, CapturedFrame},
+        PixelFormat, RulerConfig,
+    };
     use windows::{
-        core::{PCWSTR, PWSTR},
+        core::PCWSTR,
         Win32::{
-            Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-            System::{Com::CoTaskMemFree, LibraryLoader::GetModuleHandleW},
+            Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+            Graphics::Gdi::{
+                BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
+                InvalidateRect, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor,
+                StretchDIBits, TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+                DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HGDIOBJ,
+                PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+            },
+            System::LibraryLoader::GetModuleHandleW,
             UI::{
-                Shell::{
-                    SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE,
-                    BIF_RETURNONLYFSDIRS, BROWSEINFOW,
-                },
+                Controls::{DRAWITEMSTRUCT, ODS_SELECTED},
                 WindowsAndMessaging::{
-                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
-                    GetClassNameW, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-                    GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, LoadIconW, MessageBoxW,
-                    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-                    ShowWindow, TranslateMessage, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON,
-                    CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
-                    ES_AUTOHSCROLL, GWLP_USERDATA, HMENU, IDCANCEL, IDI_APPLICATION, LBN_SELCHANGE,
-                    LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, MB_ICONERROR, MB_OK,
-                    MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
-                    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-                    WM_NCCREATE, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
-                    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+                    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
+                    KillTimer, LoadIconW, MessageBoxW, RegisterClassW, SendMessageW, SetTimer,
+                    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+                    BM_GETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, GWLP_USERDATA,
+                    HMENU, IDCANCEL, IDI_APPLICATION, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOTIFY,
+                    LBS_OWNERDRAWFIXED, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
+                    MB_ICONERROR, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER,
+                    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE,
+                    WM_DESTROY, WM_DRAWITEM, WM_NCCREATE, WM_PAINT, WM_TIMER, WNDCLASSW, WS_BORDER,
+                    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
+                    WS_VISIBLE, WS_VSCROLL,
                 },
             },
         },
     };
 
-    use crate::i18n::I18n;
+    use crate::{
+        i18n::I18n,
+        target_discovery::{
+            discover_targets, latency_class, LatencyClass, PreviewFrame, TargetCandidate,
+        },
+    };
 
-    const CLASS_NAME: &str = "RulerConfigWizardWindow";
-    const ID_LANGUAGE: i32 = 1000;
-    const ID_CAPTURE_TYPE: i32 = 1001;
-    const ID_PATH_LABEL: i32 = 1002;
-    const ID_PATH_EDIT: i32 = 1003;
-    const ID_BROWSE: i32 = 1004;
-    const ID_INSTANCE_LABEL: i32 = 1005;
-    const ID_INSTANCE_EDIT: i32 = 1006;
-    const ID_DEVICE_LABEL: i32 = 1007;
-    const ID_DEVICE_EDIT: i32 = 1008;
-    const ID_SCAN: i32 = 1009;
-    const ID_WINDOW_LIST: i32 = 1010;
-    const ID_SELECTED_LABEL: i32 = 1011;
-    const ID_SAVE: i32 = 1012;
-    const ID_DYNAMIC_GROUP: i32 = 1013;
-
-    #[derive(Clone, Debug)]
-    struct WindowCandidate {
-        hwnd: isize,
-        title: String,
-        class_name: String,
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum CaptureChoice {
-        Mumu,
-        LdPlayer,
-        Minicap,
-        Window,
-    }
+    const CLASS_NAME: &str = "RulerTargetSelectorWindow";
+    const ID_TARGET_LIST: i32 = 2001;
+    const ID_REFRESH: i32 = 2002;
+    const ID_AUTO_SELECT: i32 = 2003;
+    const ID_START: i32 = 2004;
+    const ID_STATUS: i32 = 2005;
+    const ID_TIMER_PROBE: usize = 1;
+    const ID_TIMER_REFRESH: usize = 2;
+    const PROBE_UI_INTERVAL_MS: u32 = 200;
+    const REFRESH_INTERVAL_MS: u32 = 7000;
+    const PROBE_LOOP_PAUSE_MS: u64 = 250;
+    const PROBE_RECONNECT_PAUSE_MS: u64 = 1000;
+    const LATENCY_SAMPLE_WINDOW: usize = 12;
+    const WINDOW_WIDTH: i32 = 840;
+    const WINDOW_HEIGHT: i32 = 560;
+    const PREVIEW_RECT: RECT = RECT {
+        left: 20,
+        top: 350,
+        right: 430,
+        bottom: 505,
+    };
 
     struct WizardState {
         i18n: I18n,
+        previous_config: Option<RulerConfig>,
         hwnd: HWND,
         result: Option<RulerConfig>,
         done: bool,
-        dynamic_group: HWND,
-        language_combo: HWND,
-        capture_combo: HWND,
-        path_label: HWND,
-        path_edit: HWND,
-        browse_button: HWND,
-        instance_label: HWND,
-        instance_edit: HWND,
-        device_label: HWND,
-        device_edit: HWND,
-        scan_button: HWND,
-        window_list: HWND,
-        selected_label: HWND,
-        save_button: HWND,
-        candidates: Vec<WindowCandidate>,
-        selected_window: Option<usize>,
+        header_label: HWND,
+        target_list: HWND,
+        status_label: HWND,
+        auto_checkbox: HWND,
+        start_button: HWND,
+        candidates: Vec<TargetCandidate>,
+        selected_index: Option<usize>,
+        probe_tx: Sender<ProbeMessage>,
+        probe_rx: Receiver<ProbeMessage>,
+        probe_generation: u64,
+        probe_stop_flags: Vec<Arc<AtomicBool>>,
+        latency_samples: HashMap<String, VecDeque<Duration>>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct ProbeMessage {
+        generation: u64,
+        fingerprint: String,
+        result: Result<(Duration, PreviewFrame), String>,
     }
 
     impl WizardState {
-        fn new(i18n: &I18n) -> Self {
+        fn new(i18n: &I18n, previous_config: Option<&RulerConfig>) -> Self {
+            let (probe_tx, probe_rx) = mpsc::channel();
             Self {
                 i18n: i18n.clone(),
+                previous_config: previous_config.cloned(),
                 hwnd: HWND::default(),
                 result: None,
                 done: false,
-                dynamic_group: HWND::default(),
-                language_combo: HWND::default(),
-                capture_combo: HWND::default(),
-                path_label: HWND::default(),
-                path_edit: HWND::default(),
-                browse_button: HWND::default(),
-                instance_label: HWND::default(),
-                instance_edit: HWND::default(),
-                device_label: HWND::default(),
-                device_edit: HWND::default(),
-                scan_button: HWND::default(),
-                window_list: HWND::default(),
-                selected_label: HWND::default(),
-                save_button: HWND::default(),
+                header_label: HWND::default(),
+                target_list: HWND::default(),
+                status_label: HWND::default(),
+                auto_checkbox: HWND::default(),
+                start_button: HWND::default(),
                 candidates: Vec::new(),
-                selected_window: None,
+                selected_index: None,
+                probe_tx,
+                probe_rx,
+                probe_generation: 0,
+                probe_stop_flags: Vec::new(),
+                latency_samples: HashMap::new(),
             }
+        }
+
+        fn selected_candidate(&self) -> Option<&TargetCandidate> {
+            self.selected_index
+                .and_then(|index| self.candidates.get(index))
+        }
+
+        fn selected_fingerprint(&self) -> Option<String> {
+            self.selected_candidate()
+                .map(|candidate| candidate.fingerprint.clone())
         }
     }
 
-    pub fn run_config_wizard(i18n: &I18n) -> Option<RulerConfig> {
+    pub fn run_config_wizard(
+        i18n: &I18n,
+        previous_config: Option<&RulerConfig>,
+    ) -> Option<RulerConfig> {
         unsafe {
             let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
                 return None;
@@ -149,7 +182,7 @@ mod platform {
             };
             let _ = RegisterClassW(&class);
 
-            let mut state = Box::new(WizardState::new(i18n));
+            let mut state = Box::new(WizardState::new(i18n, previous_config));
             let state_ptr = state.as_mut() as *mut WizardState;
             let title = wide(&i18n.tr("config.window.title"));
             let hwnd = CreateWindowExW(
@@ -159,8 +192,8 @@ mod platform {
                 WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0),
                 0,
                 0,
-                620,
-                420,
+                WINDOW_WIDTH,
+                WINDOW_HEIGHT,
                 HWND::default(),
                 HMENU::default(),
                 HINSTANCE(module.0),
@@ -171,7 +204,7 @@ mod platform {
                 return None;
             }
 
-            center_window(hwnd, 620, 420);
+            center_window(hwnd, WINDOW_WIDTH, WINDOW_HEIGHT);
             let _ = ShowWindow(hwnd, SW_SHOW);
 
             let mut message = MSG::default();
@@ -202,8 +235,9 @@ mod platform {
             WM_CREATE => {
                 if let Some(state) = state_mut(hwnd) {
                     create_controls(hwnd, state);
-                    update_dynamic_controls(state);
-                    scan_windows_into_state(state);
+                    refresh_candidates(state);
+                    let _ = SetTimer(hwnd, ID_TIMER_PROBE, PROBE_UI_INTERVAL_MS, None);
+                    let _ = SetTimer(hwnd, ID_TIMER_REFRESH, REFRESH_INTERVAL_MS, None);
                 }
                 LRESULT(0)
             }
@@ -212,18 +246,36 @@ mod platform {
                     let control_id = (wparam.0 & 0xffff) as i32;
                     let notification = ((wparam.0 >> 16) & 0xffff) as u32;
                     match control_id {
-                        ID_CAPTURE_TYPE if notification == CBN_SELCHANGE => {
-                            update_dynamic_controls(state);
+                        ID_TARGET_LIST if notification == LBN_SELCHANGE => {
+                            select_target_from_list(state);
                         }
-                        ID_SCAN => scan_windows_into_state(state),
-                        ID_WINDOW_LIST if notification == LBN_SELCHANGE => {
-                            select_window_from_list(state)
-                        }
-                        ID_BROWSE => browse_install_path(state),
-                        ID_SAVE => save_config(state),
+                        ID_REFRESH => refresh_candidates(state),
+                        ID_START => save_selected_target(state),
                         id if id == IDCANCEL.0 => close_without_result(state),
                         _ => {}
                     }
+                }
+                LRESULT(0)
+            }
+            WM_DRAWITEM => {
+                if let Some(state) = state_mut(hwnd) {
+                    draw_target_list_item(state, lparam);
+                }
+                LRESULT(1)
+            }
+            WM_TIMER => {
+                if let Some(state) = state_mut(hwnd) {
+                    if wparam.0 == ID_TIMER_PROBE {
+                        drain_probe_messages(state);
+                    } else if wparam.0 == ID_TIMER_REFRESH {
+                        refresh_candidates(state);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_PAINT => {
+                if let Some(state) = state_mut(hwnd) {
+                    paint_preview(hwnd, state);
                 }
                 LRESULT(0)
             }
@@ -236,7 +288,10 @@ mod platform {
                 LRESULT(0)
             }
             WM_DESTROY => {
+                let _ = KillTimer(hwnd, ID_TIMER_PROBE);
+                let _ = KillTimer(hwnd, ID_TIMER_REFRESH);
                 if let Some(state) = state_mut(hwnd) {
+                    stop_probe_workers(state);
                     state.done = true;
                 }
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -247,191 +302,84 @@ mod platform {
     }
 
     unsafe fn create_controls(hwnd: HWND, state: &mut WizardState) {
-        create_static(hwnd, 20, 18, 560, 24, &state.i18n.tr("config.header"));
-        create_static(hwnd, 20, 54, 150, 22, &state.i18n.tr("config.language"));
-        state.language_combo = create_control(
-            hwnd,
-            "COMBOBOX",
-            "",
-            ID_LANGUAGE,
-            180,
-            50,
-            180,
-            120,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | CBS_DROPDOWNLIST as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        add_combo_item(state.language_combo, "zh_CN");
-        add_combo_item(state.language_combo, "en_US");
-        let language_index = if state.i18n.locale() == "en_US" { 1 } else { 0 };
-        let _ = SendMessageW(
-            state.language_combo,
-            CB_SETCURSEL,
-            WPARAM(language_index),
-            LPARAM(0),
-        );
-
-        create_static(
+        state.header_label = create_static(
             hwnd,
             20,
-            88,
-            150,
-            22,
-            &state.i18n.tr("config.emulator_type"),
-        );
-        state.capture_combo = create_control(
-            hwnd,
-            "COMBOBOX",
-            "",
-            ID_CAPTURE_TYPE,
-            180,
-            84,
-            280,
-            140,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | CBS_DROPDOWNLIST as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        add_combo_item(state.capture_combo, &state.i18n.tr("config.type.mumu"));
-        add_combo_item(state.capture_combo, &state.i18n.tr("config.type.ldplayer"));
-        add_combo_item(state.capture_combo, &state.i18n.tr("config.type.minicap"));
-        add_combo_item(state.capture_combo, &state.i18n.tr("config.type.window"));
-        let _ = SendMessageW(state.capture_combo, CB_SETCURSEL, WPARAM(0), LPARAM(0));
-
-        state.dynamic_group = create_control(
-            hwnd,
-            "BUTTON",
-            &state.i18n.tr("config.mumu.frame.title"),
-            ID_DYNAMIC_GROUP,
-            20,
-            124,
-            570,
-            190,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | BS_GROUPBOX as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        state.path_label = create_static_id(
-            hwnd,
-            ID_PATH_LABEL,
-            40,
-            154,
-            120,
-            22,
-            &state.i18n.tr("config.label.path"),
-        );
-        state.path_edit = create_control(
-            hwnd,
-            "EDIT",
-            "",
-            ID_PATH_EDIT,
-            170,
-            150,
-            300,
+            18,
+            700,
             24,
-            WINDOW_STYLE(
-                WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | WS_BORDER.0,
-            ),
-            WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0),
+            &state.i18n.tr("config.selector.header"),
         );
-        state.browse_button = create_control(
-            hwnd,
-            "BUTTON",
-            &state.i18n.tr("config.btn.browse"),
-            ID_BROWSE,
-            480,
-            149,
-            90,
-            26,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        state.instance_label = create_static_id(
-            hwnd,
-            ID_INSTANCE_LABEL,
-            40,
-            190,
-            120,
-            22,
-            &state.i18n.tr("config.label.instance"),
-        );
-        state.instance_edit = create_control(
-            hwnd,
-            "EDIT",
-            "0",
-            ID_INSTANCE_EDIT,
-            170,
-            186,
-            90,
-            24,
-            WINDOW_STYLE(
-                WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | WS_BORDER.0,
-            ),
-            WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0),
-        );
-        state.device_label = create_static_id(
-            hwnd,
-            ID_DEVICE_LABEL,
-            40,
-            226,
-            240,
-            22,
-            &state.i18n.tr("config.label.adb_id_optional"),
-        );
-        state.device_edit = create_control(
-            hwnd,
-            "EDIT",
-            "",
-            ID_DEVICE_EDIT,
-            280,
-            222,
-            290,
-            24,
-            WINDOW_STYLE(
-                WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | WS_BORDER.0,
-            ),
-            WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0),
-        );
-        state.scan_button = create_control(
-            hwnd,
-            "BUTTON",
-            &state.i18n.tr("config.window.btn.scan"),
-            ID_SCAN,
-            40,
-            154,
-            130,
-            28,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        state.window_list = create_control(
+        state.target_list = create_control(
             hwnd,
             "LISTBOX",
             "",
-            ID_WINDOW_LIST,
-            40,
-            190,
-            530,
-            84,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0 | WS_VSCROLL.0),
+            ID_TARGET_LIST,
+            20,
+            50,
+            790,
+            280,
+            WINDOW_STYLE(
+                WS_CHILD.0
+                    | WS_VISIBLE.0
+                    | WS_TABSTOP.0
+                    | WS_BORDER.0
+                    | WS_VSCROLL.0
+                    | LBS_NOTIFY as u32
+                    | LBS_OWNERDRAWFIXED as u32
+                    | LBS_HASSTRINGS as u32,
+            ),
             WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0),
         );
-        state.selected_label = create_static_id(
+        create_static(
             hwnd,
-            ID_SELECTED_LABEL,
-            40,
-            282,
-            530,
+            PREVIEW_RECT.left,
+            PREVIEW_RECT.top - 24,
+            180,
             22,
-            &state.i18n.tr("config.window.scan.none"),
+            &state.i18n.tr("config.selector.preview"),
         );
-
-        state.save_button = create_control(
+        state.status_label = create_static_id(
+            hwnd,
+            ID_STATUS,
+            450,
+            352,
+            360,
+            78,
+            &state.i18n.tr("config.selector.scanning"),
+        );
+        state.auto_checkbox = create_control(
+            hwnd,
+            "BUTTON",
+            &state.i18n.tr("config.selector.auto_next"),
+            ID_AUTO_SELECT,
+            450,
+            435,
+            360,
+            26,
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32),
+            WINDOW_EX_STYLE::default(),
+        );
+        create_control(
+            hwnd,
+            "BUTTON",
+            &state.i18n.tr("config.selector.refresh"),
+            ID_REFRESH,
+            520,
+            475,
+            100,
+            34,
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
+            WINDOW_EX_STYLE::default(),
+        );
+        state.start_button = create_control(
             hwnd,
             "BUTTON",
             &state.i18n.tr("config.btn.save_start"),
-            ID_SAVE,
-            350,
-            335,
-            140,
+            ID_START,
+            640,
+            475,
+            120,
             34,
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32),
             WINDOW_EX_STYLE::default(),
@@ -441,61 +389,70 @@ mod platform {
             "BUTTON",
             "Cancel",
             IDCANCEL.0,
-            500,
-            335,
-            90,
+            770,
+            475,
+            60,
             34,
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
             WINDOW_EX_STYLE::default(),
         );
     }
 
-    unsafe fn update_dynamic_controls(state: &mut WizardState) {
-        let choice = capture_choice(state);
-        let title = match choice {
-            CaptureChoice::Mumu => state.i18n.tr("config.mumu.frame.title"),
-            CaptureChoice::LdPlayer => state.i18n.tr("config.ldplayer.frame.title"),
-            CaptureChoice::Minicap => state.i18n.tr("config.minicap.frame.title"),
-            CaptureChoice::Window => state.i18n.tr("config.window.frame.title"),
-        };
-        set_text(state.dynamic_group, &title);
+    unsafe fn refresh_candidates(state: &mut WizardState) {
+        let preferred_fingerprint = state.selected_fingerprint().or_else(|| {
+            state
+                .previous_config
+                .as_ref()
+                .and_then(|config| config.target_fingerprint.clone())
+        });
+        let previous_probe_state = state
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.fingerprint.clone(),
+                    (
+                        candidate.latency,
+                        candidate.latency_class,
+                        candidate.preview.clone(),
+                        candidate.error.clone(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
 
-        let path_visible = matches!(choice, CaptureChoice::Mumu | CaptureChoice::LdPlayer);
-        let instance_visible = path_visible;
-        let device_visible = !matches!(choice, CaptureChoice::Window);
-        let window_visible = matches!(choice, CaptureChoice::Window);
-
-        show_many(
-            &[state.path_label, state.path_edit, state.browse_button],
-            path_visible,
+        stop_probe_workers(state);
+        state.probe_generation = state.probe_generation.wrapping_add(1);
+        set_text(
+            state.status_label,
+            &state.i18n.tr("config.selector.scanning"),
         );
-        show_many(
-            &[state.instance_label, state.instance_edit],
-            instance_visible,
-        );
-        show_many(&[state.device_label, state.device_edit], device_visible);
-        show_many(
-            &[state.scan_button, state.window_list, state.selected_label],
-            window_visible,
-        );
+        let _ = SendMessageW(state.target_list, LB_RESETCONTENT, WPARAM(0), LPARAM(0));
 
-        let device_label = if matches!(choice, CaptureChoice::Minicap) {
-            state.i18n.tr("config.label.adb_id_auto")
-        } else {
-            state.i18n.tr("config.label.adb_id_optional")
-        };
-        set_text(state.device_label, &device_label);
-    }
+        state.candidates = discover_targets(state.previous_config.as_ref());
+        for candidate in &mut state.candidates {
+            if let Some((latency, latency_class, preview, error)) =
+                previous_probe_state.get(&candidate.fingerprint)
+            {
+                candidate.latency = *latency;
+                candidate.latency_class = *latency_class;
+                candidate.preview = preview.clone();
+                candidate.error = error.clone();
+            }
+        }
+        let active_fingerprints = state
+            .candidates
+            .iter()
+            .map(|candidate| candidate.fingerprint.clone())
+            .collect::<std::collections::HashSet<_>>();
+        state
+            .latency_samples
+            .retain(|fingerprint, _| active_fingerprints.contains(fingerprint));
 
-    unsafe fn scan_windows_into_state(state: &mut WizardState) {
-        state.candidates = scan_windows();
-        state.selected_window = None;
-        let _ = SendMessageW(state.window_list, LB_RESETCONTENT, WPARAM(0), LPARAM(0));
         for candidate in &state.candidates {
-            let label = format!("{} [{}]", candidate.title, candidate.class_name);
-            let label = wide(&label);
+            let label = wide(&candidate.list_label());
             let _ = SendMessageW(
-                state.window_list,
+                state.target_list,
                 LB_ADDSTRING,
                 WPARAM(0),
                 LPARAM(label.as_ptr() as isize),
@@ -503,241 +460,529 @@ mod platform {
         }
 
         if state.candidates.is_empty() {
+            state.selected_index = None;
             set_text(
-                state.selected_label,
-                &state.i18n.tr("config.window.scan.none"),
+                state.status_label,
+                &state.i18n.tr("config.selector.no_targets"),
             );
-        } else {
-            let _ = SendMessageW(state.window_list, LB_SETCURSEL, WPARAM(0), LPARAM(0));
-            state.selected_window = Some(0);
-            let message = state.i18n.tr_with(
-                "config.window.scan.found",
-                &[("count", state.candidates.len().to_string())],
-            );
-            set_text(state.selected_label, &message);
-        }
-    }
-
-    unsafe fn select_window_from_list(state: &mut WizardState) {
-        let selected = SendMessageW(state.window_list, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
-        if selected < 0 {
-            state.selected_window = None;
+            update_header_status(state);
+            let _ = InvalidateRect(state.hwnd, Some(&PREVIEW_RECT), BOOL(1));
             return;
         }
-        let index = selected as usize;
-        state.selected_window = Some(index);
-        if let Some(candidate) = state.candidates.get(index) {
-            let message = state.i18n.tr_with(
-                "config.window.selected",
-                &[("title", candidate.title.clone())],
+
+        let selected =
+            preferred_selection_index(&state.candidates, preferred_fingerprint.as_deref())
+                .unwrap_or(0);
+        let _ = SendMessageW(state.target_list, LB_SETCURSEL, WPARAM(selected), LPARAM(0));
+        state.selected_index = Some(selected);
+        start_probe_workers(state);
+        update_selected_status(state);
+    }
+
+    unsafe fn select_target_from_list(state: &mut WizardState) {
+        drain_probe_messages(state);
+        let selected = SendMessageW(state.target_list, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+        state.selected_index = (selected >= 0).then_some(selected as usize);
+        update_selected_status(state);
+    }
+
+    fn preferred_selection_index(
+        candidates: &[TargetCandidate],
+        preferred_fingerprint: Option<&str>,
+    ) -> Option<usize> {
+        preferred_fingerprint
+            .and_then(|fingerprint| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.fingerprint == fingerprint)
+            })
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.error.is_none())
+            })
+            .or_else(|| (!candidates.is_empty()).then_some(0))
+    }
+
+    unsafe fn drain_probe_messages(state: &mut WizardState) {
+        let mut list_updated = false;
+        let mut selected_updated = false;
+        while let Ok(message) = state.probe_rx.try_recv() {
+            if message.generation != state.probe_generation {
+                continue;
+            }
+            let Some(index) = state
+                .candidates
+                .iter()
+                .position(|candidate| candidate.fingerprint == message.fingerprint)
+            else {
+                continue;
+            };
+
+            match message.result {
+                Ok((latency, preview)) => {
+                    let average = record_latency_sample(state, &message.fingerprint, latency);
+                    if let Some(candidate) = state.candidates.get_mut(index) {
+                        candidate.latency = Some(average);
+                        candidate.latency_class = latency_class(average);
+                        candidate.preview = Some(preview);
+                        candidate.error = None;
+                    }
+                }
+                Err(error) => {
+                    if let Some(candidate) = state.candidates.get_mut(index) {
+                        candidate.error = Some(error);
+                        candidate.latency_class = LatencyClass::Unknown;
+                    }
+                }
+            }
+            list_updated = true;
+            selected_updated |= state.selected_index == Some(index);
+        }
+
+        if list_updated {
+            let _ = InvalidateRect(state.target_list, None, BOOL(1));
+        }
+        if selected_updated {
+            update_selected_status(state);
+        } else if list_updated {
+            update_header_status(state);
+        }
+    }
+
+    fn record_latency_sample(
+        state: &mut WizardState,
+        fingerprint: &str,
+        sample: Duration,
+    ) -> Duration {
+        let samples = state
+            .latency_samples
+            .entry(fingerprint.to_string())
+            .or_default();
+        samples.push_back(sample);
+        while samples.len() > LATENCY_SAMPLE_WINDOW {
+            let _ = samples.pop_front();
+        }
+        average_duration(samples)
+    }
+
+    fn average_duration(samples: &VecDeque<Duration>) -> Duration {
+        if samples.is_empty() {
+            return Duration::ZERO;
+        }
+        let sum = samples
+            .iter()
+            .fold(0u128, |sum, sample| sum + sample.as_nanos());
+        let average = sum / samples.len() as u128;
+        Duration::from_nanos(average.min(u64::MAX as u128) as u64)
+    }
+
+    fn start_probe_workers(state: &mut WizardState) {
+        for candidate in &state.candidates {
+            let stop = Arc::new(AtomicBool::new(false));
+            spawn_probe_worker(
+                candidate.fingerprint.clone(),
+                candidate.config.clone(),
+                state.probe_generation,
+                state.probe_tx.clone(),
+                Arc::clone(&stop),
             );
-            set_text(state.selected_label, &message);
+            state.probe_stop_flags.push(stop);
         }
     }
 
-    unsafe fn browse_install_path(state: &mut WizardState) {
-        let title_key = match capture_choice(state) {
-            CaptureChoice::LdPlayer => "config.browse.title.ldplayer",
-            _ => "config.browse.title.mumu",
-        };
-        if let Some(path) = browse_folder(state.hwnd, &state.i18n.tr(title_key)) {
-            set_text(state.path_edit, &path);
+    fn stop_probe_workers(state: &mut WizardState) {
+        for stop in &state.probe_stop_flags {
+            stop.store(true, Ordering::Relaxed);
+        }
+        state.probe_stop_flags.clear();
+    }
+
+    fn spawn_probe_worker(
+        fingerprint: String,
+        config: RulerConfig,
+        generation: u64,
+        tx: Sender<ProbeMessage>,
+        stop: Arc<AtomicBool>,
+    ) {
+        let name = format!("ruler-target-probe-{fingerprint}");
+        let _ = thread::Builder::new().name(name).spawn(move || {
+            run_probe_worker(fingerprint, config, generation, tx, stop);
+        });
+    }
+
+    fn run_probe_worker(
+        fingerprint: String,
+        config: RulerConfig,
+        generation: u64,
+        tx: Sender<ProbeMessage>,
+        stop: Arc<AtomicBool>,
+    ) {
+        while !stop.load(Ordering::Relaxed) {
+            let capture_config = match config.to_capture_config() {
+                Ok(config) => config,
+                Err(error) => {
+                    send_probe_error(&tx, generation, &fingerprint, error.to_string());
+                    return;
+                }
+            };
+            let mut backend = match create_backend(capture_config) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    send_probe_error(&tx, generation, &fingerprint, error);
+                    thread::sleep(Duration::from_millis(PROBE_RECONNECT_PAUSE_MS));
+                    continue;
+                }
+            };
+            if let Err(error) = backend.connect() {
+                send_probe_error(&tx, generation, &fingerprint, error);
+                backend.disconnect();
+                thread::sleep(Duration::from_millis(PROBE_RECONNECT_PAUSE_MS));
+                continue;
+            }
+
+            while !stop.load(Ordering::Relaxed) {
+                let start = std::time::Instant::now();
+                match backend.capture_frame() {
+                    Ok(frame) => {
+                        let latency = start.elapsed();
+                        let preview = preview_from_captured_frame(frame);
+                        if tx
+                            .send(ProbeMessage {
+                                generation,
+                                fingerprint: fingerprint.clone(),
+                                result: Ok((latency, preview)),
+                            })
+                            .is_err()
+                        {
+                            backend.disconnect();
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        send_probe_error(&tx, generation, &fingerprint, error);
+                        break;
+                    }
+                }
+                thread::sleep(Duration::from_millis(PROBE_LOOP_PAUSE_MS));
+            }
+            backend.disconnect();
         }
     }
 
-    unsafe fn save_config(state: &mut WizardState) {
-        let choice = capture_choice(state);
-        let path = edit_text(state.path_edit).trim().to_string();
-        if matches!(choice, CaptureChoice::Mumu | CaptureChoice::LdPlayer) && path.is_empty() {
-            let (title_key, message_key) = if matches!(choice, CaptureChoice::Mumu) {
-                (
-                    "config.error.mumu_path_empty.title",
-                    "config.error.mumu_path_empty",
+    fn send_probe_error(
+        tx: &Sender<ProbeMessage>,
+        generation: u64,
+        fingerprint: &str,
+        error: String,
+    ) {
+        let _ = tx.send(ProbeMessage {
+            generation,
+            fingerprint: fingerprint.to_string(),
+            result: Err(error),
+        });
+    }
+
+    fn preview_from_captured_frame(frame: CapturedFrame) -> PreviewFrame {
+        PreviewFrame {
+            data: frame.data,
+            width: frame.width,
+            height: frame.height,
+            format: frame.format,
+        }
+    }
+
+    unsafe fn update_selected_status(state: &mut WizardState) {
+        update_header_status(state);
+        if let Some(candidate) = state.selected_candidate() {
+            let status = if let Some(error) = &candidate.error {
+                state.i18n.tr_with(
+                    "config.selector.selected_error",
+                    &[("error", error.clone())],
                 )
             } else {
-                (
-                    "config.error.ld_path_empty.title",
-                    "config.error.ld_path_empty",
+                state.i18n.tr_with(
+                    "config.selector.selected_ok",
+                    &[
+                        ("name", candidate.name.clone()),
+                        ("latency", candidate.latency_text()),
+                    ],
                 )
             };
+            set_text(state.status_label, &status);
+        } else {
+            set_text(
+                state.status_label,
+                &state.i18n.tr("config.selector.no_selection"),
+            );
+        }
+        let _ = InvalidateRect(state.hwnd, Some(&PREVIEW_RECT), BOOL(1));
+    }
+
+    unsafe fn update_header_status(state: &mut WizardState) {
+        let text = state
+            .selected_candidate()
+            .and_then(|candidate| candidate.latency.map(|_| candidate.latency_text()))
+            .map(|latency| {
+                state.i18n.tr_with(
+                    "config.selector.header_with_latency",
+                    &[("latency", latency)],
+                )
+            })
+            .unwrap_or_else(|| state.i18n.tr("config.selector.header"));
+        set_text(state.header_label, &text);
+    }
+
+    unsafe fn draw_target_list_item(state: &WizardState, lparam: LPARAM) {
+        let draw = &*(lparam.0 as *const DRAWITEMSTRUCT);
+        if draw.itemID == u32::MAX {
+            return;
+        }
+        let Some(candidate) = state.candidates.get(draw.itemID as usize) else {
+            return;
+        };
+
+        let selected = (draw.itemState.0 & ODS_SELECTED.0) != 0;
+        let background = if selected {
+            COLORREF(0x00E8F2FF)
+        } else {
+            COLORREF(0x00FFFFFF)
+        };
+        let brush = CreateSolidBrush(background);
+        if !brush.0.is_null() {
+            let _ = FillRect(draw.hDC, &draw.rcItem, brush);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+        }
+
+        let mut text_rect = draw.rcItem;
+        text_rect.left += 8;
+        text_rect.right -= 8;
+        let _ = SetBkMode(draw.hDC, TRANSPARENT);
+        let _ = SetTextColor(draw.hDC, latency_text_color(candidate));
+        let mut text = candidate.list_label().encode_utf16().collect::<Vec<_>>();
+        let _ = DrawTextW(
+            draw.hDC,
+            &mut text,
+            &mut text_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+
+    fn latency_text_color(candidate: &TargetCandidate) -> COLORREF {
+        if candidate.error.is_some() {
+            return COLORREF(0x003030D8);
+        }
+        match candidate.latency_class {
+            LatencyClass::PaleGreen => COLORREF(0x0060A060),
+            LatencyClass::Green => COLORREF(0x00208020),
+            LatencyClass::Yellow => COLORREF(0x0000A0B8),
+            LatencyClass::Orange => COLORREF(0x000070D8),
+            LatencyClass::Red => COLORREF(0x002020D8),
+            LatencyClass::Unknown => COLORREF(0x00505050),
+        }
+    }
+
+    unsafe fn save_selected_target(state: &mut WizardState) {
+        let Some(candidate) = state.selected_candidate() else {
             show_error(
                 state.hwnd,
-                &state.i18n.tr(title_key),
-                &state.i18n.tr(message_key),
+                &state.i18n.tr("config.selector.error.no_target.title"),
+                &state.i18n.tr("config.selector.error.no_target"),
+            );
+            return;
+        };
+        if let Some(error) = &candidate.error {
+            show_error(
+                state.hwnd,
+                &state.i18n.tr("config.selector.error.unavailable.title"),
+                &state.i18n.tr_with(
+                    "config.selector.error.unavailable",
+                    &[("error", error.clone())],
+                ),
+            );
+            return;
+        }
+        if candidate.preview.is_none() {
+            show_error(
+                state.hwnd,
+                &state.i18n.tr("config.selector.error.unavailable.title"),
+                &state.i18n.tr_with(
+                    "config.selector.error.unavailable",
+                    &[(
+                        "error",
+                        state.i18n.tr("config.selector.error.waiting_probe"),
+                    )],
+                ),
             );
             return;
         }
 
-        let selected_window = if matches!(choice, CaptureChoice::Window) {
-            if state.candidates.is_empty() {
-                scan_windows_into_state(state);
-            }
-            let index = state.selected_window;
-            let Some(index) = index else {
-                show_error(
-                    state.hwnd,
-                    &state
-                        .i18n
-                        .tr("config.window.error.no_window_selected.title"),
-                    &state.i18n.tr("config.window.error.no_window_selected"),
-                );
-                return;
-            };
-            Some(state.candidates[index].clone())
-        } else {
-            None
-        };
+        let mut config = candidate.config.clone();
+        config.language = state
+            .previous_config
+            .as_ref()
+            .and_then(|previous| previous.language.clone())
+            .or_else(|| Some(state.i18n.locale().to_string()));
+        config.auto_select_target =
+            SendMessageW(state.auto_checkbox, BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1;
+        config.target_fingerprint = Some(candidate.fingerprint.clone());
 
-        let capture_type = match choice {
-            CaptureChoice::Mumu => "mumu",
-            CaptureChoice::LdPlayer => "ldplayer",
-            CaptureChoice::Minicap => "minicap",
-            CaptureChoice::Window => "window",
-        };
-        let language = if combo_index(state.language_combo) == 1 {
-            "en_US"
-        } else {
-            "zh_CN"
-        };
-        let instance_index = edit_text(state.instance_edit)
-            .trim()
-            .parse::<u32>()
-            .unwrap_or(0);
-        let device_id = empty_to_none(edit_text(state.device_edit));
-
-        state.result = Some(RulerConfig {
-            capture_type: capture_type.to_string(),
-            install_path: if path.is_empty() { None } else { Some(path) },
-            instance_index: if matches!(choice, CaptureChoice::Mumu | CaptureChoice::LdPlayer) {
-                Some(instance_index)
-            } else {
-                None
-            },
-            device_id,
-            window_handle: selected_window.as_ref().map(|candidate| candidate.hwnd),
-            window_title: selected_window
-                .as_ref()
-                .map(|candidate| candidate.title.clone()),
-            window_class: selected_window
-                .as_ref()
-                .map(|candidate| candidate.class_name.clone()),
-            active_calibration_profile: None,
-            frame_display_mode: Some("0_to_n-1".to_string()),
-            language: Some(language.to_string()),
-        });
+        state.result = Some(config);
         state.done = true;
         let _ = DestroyWindow(state.hwnd);
+    }
+
+    unsafe fn paint_preview(hwnd: HWND, state: &WizardState) {
+        let mut paint = PAINTSTRUCT::default();
+        let hdc = BeginPaint(hwnd, &mut paint);
+        if !hdc.0.is_null() {
+            draw_preview(
+                hdc,
+                state
+                    .selected_candidate()
+                    .and_then(|candidate| candidate.preview.as_ref()),
+            );
+        }
+        let _ = EndPaint(hwnd, &paint);
+    }
+
+    unsafe fn draw_preview(hdc: HDC, frame: Option<&PreviewFrame>) {
+        let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
+        if !brush.0.is_null() {
+            let _ = FillRect(hdc, &PREVIEW_RECT, brush);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+        }
+
+        let Some(frame) = frame else {
+            draw_preview_placeholder(hdc, "No preview");
+            return;
+        };
+        if frame.width == 0 || frame.height == 0 {
+            draw_preview_placeholder(hdc, "No preview");
+            return;
+        }
+        let Ok(buffer) = preview_bgr24_top_down(frame) else {
+            draw_preview_placeholder(hdc, "Preview error");
+            return;
+        };
+
+        let mut bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: frame.width as i32,
+                biHeight: -(frame.height as i32),
+                biPlanes: 1,
+                biBitCount: 24,
+                biCompression: BI_RGB.0,
+                biSizeImage: buffer.len() as u32,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [Default::default(); 1],
+        };
+
+        let target_width = PREVIEW_RECT.right - PREVIEW_RECT.left;
+        let target_height = PREVIEW_RECT.bottom - PREVIEW_RECT.top;
+        let source_ratio = frame.width as f64 / frame.height as f64;
+        let target_ratio = target_width as f64 / target_height as f64;
+        let (draw_width, draw_height) = if source_ratio >= target_ratio {
+            (
+                target_width,
+                (target_width as f64 / source_ratio).round() as i32,
+            )
+        } else {
+            (
+                (target_height as f64 * source_ratio).round() as i32,
+                target_height,
+            )
+        };
+        let x = PREVIEW_RECT.left + (target_width - draw_width) / 2;
+        let y = PREVIEW_RECT.top + (target_height - draw_height) / 2;
+
+        // The preview always downscales the captured frame. A fresh paint DC defaults to
+        // BLACKONWHITE (STRETCH_ANDSCANS), which bitwise-ANDs discarded pixels into the
+        // survivors, collapsing light areas to black with banded artifacts. HALFTONE
+        // downsamples cleanly; it requires a SetBrushOrgEx call afterward.
+        let _ = SetStretchBltMode(hdc, HALFTONE);
+        let _ = SetBrushOrgEx(hdc, 0, 0, None);
+
+        let _ = StretchDIBits(
+            hdc,
+            x,
+            y,
+            draw_width,
+            draw_height,
+            0,
+            0,
+            frame.width as i32,
+            frame.height as i32,
+            Some(buffer.as_ptr() as *const c_void),
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+    }
+
+    unsafe fn draw_preview_placeholder(hdc: HDC, text: &str) {
+        let text = wide(text);
+        let _ = TextOutW(
+            hdc,
+            PREVIEW_RECT.left + 12,
+            PREVIEW_RECT.top + 58,
+            &text[..text.len() - 1],
+        );
+    }
+
+    fn preview_bgr24_top_down(frame: &PreviewFrame) -> Result<Vec<u8>, String> {
+        let source_stride = frame
+            .width
+            .checked_mul(match frame.format {
+                PixelFormat::Rgba => 4,
+                PixelFormat::Bgr => 3,
+            })
+            .ok_or_else(|| "preview source stride overflow".to_string())?
+            as usize;
+        let packed_stride = frame
+            .width
+            .checked_mul(3)
+            .ok_or_else(|| "preview stride overflow".to_string())? as usize;
+        let stride = (packed_stride + 3) & !3;
+        let mut output = vec![0u8; stride * frame.height as usize];
+        for y in 0..frame.height as usize {
+            let src_y = frame.height as usize - 1 - y;
+            for x in 0..frame.width as usize {
+                let dst = y * stride + x * 3;
+                match frame.format {
+                    PixelFormat::Rgba => {
+                        let src = src_y * source_stride + x * 4;
+                        if src + 3 >= frame.data.len() {
+                            return Err("preview RGBA buffer is too short".to_string());
+                        }
+                        output[dst] = frame.data[src + 2];
+                        output[dst + 1] = frame.data[src + 1];
+                        output[dst + 2] = frame.data[src];
+                    }
+                    PixelFormat::Bgr => {
+                        let src = src_y * source_stride + x * 3;
+                        if src + 2 >= frame.data.len() {
+                            return Err("preview BGR buffer is too short".to_string());
+                        }
+                        output[dst] = frame.data[src];
+                        output[dst + 1] = frame.data[src + 1];
+                        output[dst + 2] = frame.data[src + 2];
+                    }
+                }
+            }
+        }
+        Ok(output)
     }
 
     unsafe fn close_without_result(state: &mut WizardState) {
         state.result = None;
         state.done = true;
         let _ = DestroyWindow(state.hwnd);
-    }
-
-    unsafe fn capture_choice(state: &WizardState) -> CaptureChoice {
-        match combo_index(state.capture_combo) {
-            1 => CaptureChoice::LdPlayer,
-            2 => CaptureChoice::Minicap,
-            3 => CaptureChoice::Window,
-            _ => CaptureChoice::Mumu,
-        }
-    }
-
-    unsafe fn combo_index(hwnd: HWND) -> usize {
-        let value = SendMessageW(hwnd, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
-        if value < 0 {
-            0
-        } else {
-            value as usize
-        }
-    }
-
-    unsafe fn scan_windows() -> Vec<WindowCandidate> {
-        let mut windows = Vec::new();
-        let _ = EnumWindows(
-            Some(enum_window_proc),
-            LPARAM((&mut windows as *mut Vec<WindowCandidate>) as isize),
-        );
-        windows.sort_by_key(window_priority);
-        windows
-    }
-
-    unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        if !IsWindowVisible(hwnd).as_bool() {
-            return BOOL(1);
-        }
-        let title = window_text(hwnd);
-        if title.trim().is_empty() {
-            return BOOL(1);
-        }
-        let class_name = window_class(hwnd);
-        let windows = &mut *(lparam.0 as *mut Vec<WindowCandidate>);
-        windows.push(WindowCandidate {
-            hwnd: hwnd.0 as isize,
-            title,
-            class_name,
-        });
-        BOOL(1)
-    }
-
-    fn window_priority(candidate: &WindowCandidate) -> (u8, String) {
-        let title = candidate.title.to_ascii_lowercase();
-        let class_name = candidate.class_name.to_ascii_lowercase();
-        let priority = if candidate.title == "明日方舟" {
-            0
-        } else if candidate.title.contains("明日方舟") {
-            1
-        } else if title.contains("arknights") {
-            2
-        } else if candidate.title.contains("方舟") {
-            3
-        } else if class_name == "unitywndclass" || class_name == "unityhwndclass" {
-            4
-        } else {
-            5
-        };
-        (priority, candidate.title.clone())
-    }
-
-    unsafe fn window_text(hwnd: HWND) -> String {
-        let len = GetWindowTextLengthW(hwnd);
-        if len <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; len as usize + 1];
-        let count = GetWindowTextW(hwnd, &mut buf);
-        String::from_utf16_lossy(&buf[..count as usize])
-    }
-
-    unsafe fn window_class(hwnd: HWND) -> String {
-        let mut buf = [0u16; 256];
-        let count = GetClassNameW(hwnd, &mut buf);
-        String::from_utf16_lossy(&buf[..count as usize])
-    }
-
-    unsafe fn browse_folder(owner: HWND, title: &str) -> Option<String> {
-        let title = wide(title);
-        let mut display_name = [0u16; 260];
-        let browse_info = BROWSEINFOW {
-            hwndOwner: owner,
-            pszDisplayName: PWSTR(display_name.as_mut_ptr()),
-            lpszTitle: PCWSTR(title.as_ptr()),
-            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-            ..Default::default()
-        };
-        let pidl = SHBrowseForFolderW(&browse_info);
-        if pidl.is_null() {
-            return None;
-        }
-
-        let mut path = [0u16; 260];
-        let ok = SHGetPathFromIDListW(pidl, &mut path).as_bool();
-        CoTaskMemFree(Some(pidl as *const c_void));
-        if !ok {
-            return None;
-        }
-        Some(trim_nul(&path))
     }
 
     unsafe fn create_static(
@@ -808,16 +1053,6 @@ mod platform {
         .unwrap_or_default()
     }
 
-    unsafe fn add_combo_item(combo: HWND, text: &str) {
-        let text = wide(text);
-        let _ = SendMessageW(
-            combo,
-            CB_ADDSTRING,
-            WPARAM(0),
-            LPARAM(text.as_ptr() as isize),
-        );
-    }
-
     unsafe fn center_window(hwnd: HWND, width: i32, height: i32) {
         let screen_width = GetSystemMetrics(SM_CXSCREEN);
         let screen_height = GetSystemMetrics(SM_CYSCREEN);
@@ -829,19 +1064,6 @@ mod platform {
     unsafe fn set_text(hwnd: HWND, text: &str) {
         let text = wide(text);
         let _ = SetWindowTextW(hwnd, PCWSTR(text.as_ptr()));
-    }
-
-    unsafe fn show_many(windows: &[HWND], visible: bool) {
-        for hwnd in windows {
-            let _ = ShowWindow(*hwnd, if visible { SW_SHOW } else { SW_HIDE });
-        }
-    }
-
-    unsafe fn edit_text(hwnd: HWND) -> String {
-        let len = GetWindowTextLengthW(hwnd);
-        let mut buf = vec![0u16; len.max(0) as usize + 1];
-        let count = GetWindowTextW(hwnd, &mut buf);
-        String::from_utf16_lossy(&buf[..count as usize])
     }
 
     unsafe fn show_error(hwnd: HWND, title: &str, message: &str) {
@@ -864,15 +1086,6 @@ mod platform {
         }
     }
 
-    fn empty_to_none(value: String) -> Option<String> {
-        let value = value.trim().to_string();
-        if value.is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    }
-
     fn child_id(id: i32) -> HMENU {
         if id == 0 {
             HMENU::default()
@@ -881,15 +1094,140 @@ mod platform {
         }
     }
 
-    fn trim_nul(buf: &[u16]) -> String {
-        let end = buf
-            .iter()
-            .position(|value| *value == 0)
-            .unwrap_or(buf.len());
-        String::from_utf16_lossy(&buf[..end])
-    }
-
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(iter::once(0)).collect()
+    }
+
+    #[allow(dead_code)]
+    unsafe fn edit_text(hwnd: HWND) -> String {
+        let len = GetWindowTextLengthW(hwnd);
+        let mut buf = vec![0u16; len.max(0) as usize + 1];
+        let count = GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..count as usize])
+    }
+
+    #[allow(dead_code)]
+    fn latency_color_class(class: LatencyClass) -> &'static str {
+        match class {
+            LatencyClass::PaleGreen => "pale-green",
+            LatencyClass::Green => "green",
+            LatencyClass::Yellow => "yellow",
+            LatencyClass::Orange => "orange",
+            LatencyClass::Red => "red",
+            LatencyClass::Unknown => "unknown",
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn preferred_selection_keeps_existing_fingerprint_after_refresh() {
+            let candidates = vec![
+                candidate("adb:first", None),
+                candidate("mumu:selected", None),
+                candidate("ld:last", None),
+            ];
+
+            assert_eq!(
+                preferred_selection_index(&candidates, Some("mumu:selected")),
+                Some(1)
+            );
+        }
+
+        #[test]
+        fn preferred_selection_falls_back_to_first_usable_candidate() {
+            let candidates = vec![
+                candidate("bad", Some("offline")),
+                candidate("good", None),
+                candidate("later", None),
+            ];
+
+            assert_eq!(
+                preferred_selection_index(&candidates, Some("missing")),
+                Some(1)
+            );
+        }
+
+        #[test]
+        fn average_duration_uses_all_window_samples() {
+            let samples = VecDeque::from([
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                Duration::from_millis(30),
+            ]);
+
+            assert_eq!(average_duration(&samples), Duration::from_millis(20));
+        }
+
+        #[test]
+        fn preview_rgba_bottom_up_to_bgr24_top_down_keeps_channels() {
+            let frame = PreviewFrame {
+                width: 2,
+                height: 2,
+                format: PixelFormat::Rgba,
+                data: vec![
+                    255, 0, 0, 255, 0, 255, 0, 255, //
+                    0, 0, 255, 255, 255, 255, 255, 255,
+                ],
+            };
+
+            assert_eq!(
+                preview_bgr24_top_down(&frame).unwrap(),
+                vec![
+                    255, 0, 0, 255, 255, 255, 0, 0, //
+                    0, 0, 255, 0, 255, 0, 0, 0,
+                ]
+            );
+        }
+
+        #[test]
+        fn preview_bgr_bottom_up_to_bgr24_top_down_keeps_channels() {
+            let frame = PreviewFrame {
+                width: 2,
+                height: 2,
+                format: PixelFormat::Bgr,
+                data: vec![
+                    0, 0, 255, 0, 255, 0, //
+                    255, 0, 0, 255, 255, 255,
+                ],
+            };
+
+            assert_eq!(
+                preview_bgr24_top_down(&frame).unwrap(),
+                vec![
+                    255, 0, 0, 255, 255, 255, 0, 0, //
+                    0, 0, 255, 0, 255, 0, 0, 0,
+                ]
+            );
+        }
+
+        fn candidate(fingerprint: &str, error: Option<&str>) -> TargetCandidate {
+            TargetCandidate {
+                kind: crate::target_discovery::TargetKind::Adb,
+                fingerprint: fingerprint.to_string(),
+                name: fingerprint.to_string(),
+                detail: String::new(),
+                config: RulerConfig {
+                    capture_type: "adb".to_string(),
+                    install_path: None,
+                    instance_index: None,
+                    device_id: Some(fingerprint.to_string()),
+                    window_handle: None,
+                    window_title: None,
+                    window_class: None,
+                    active_calibration_profile: None,
+                    frame_display_mode: Some("0_to_n-1".to_string()),
+                    language: Some("zh_CN".to_string()),
+                    auto_select_target: false,
+                    target_fingerprint: Some(fingerprint.to_string()),
+                },
+                latency: None,
+                latency_class: LatencyClass::Unknown,
+                preview: None,
+                error: error.map(str::to_string),
+            }
+        }
     }
 }

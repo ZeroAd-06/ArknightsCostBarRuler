@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 libloading = "0.8"
 windows = { version = "0.58", features = [
     "Win32_Foundation",

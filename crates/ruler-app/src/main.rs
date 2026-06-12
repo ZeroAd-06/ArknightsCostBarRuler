@@ -10,6 +10,7 @@ mod menu;
 mod overlay;
 mod profiles;
 mod resources;
+mod target_discovery;
 mod tray;
 mod ui_state;
 mod worker;
@@ -18,6 +19,9 @@ use app::RulerApp;
 
 fn main() {
     enable_dpi_awareness();
+    if relaunch_as_admin_if_needed() {
+        return;
+    }
     init_logging();
 
     if let Err(error) = run() {
@@ -46,6 +50,89 @@ fn enable_dpi_awareness() {
 
 #[cfg(not(windows))]
 fn enable_dpi_awareness() {}
+
+#[cfg(windows)]
+fn relaunch_as_admin_if_needed() -> bool {
+    use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND};
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn IsUserAnAdmin() -> BOOL;
+        fn ShellExecuteW(
+            hwnd: HWND,
+            lpoperation: *const u16,
+            lpfile: *const u16,
+            lpparameters: *const u16,
+            lpdirectory: *const u16,
+            nshowcmd: i32,
+        ) -> HINSTANCE;
+    }
+
+    unsafe {
+        if IsUserAnAdmin().as_bool() {
+            return false;
+        }
+    }
+
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let exe_wide = wide_os(exe.as_os_str());
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| quote_arg(&arg.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let args_wide = wide(&args);
+    let runas = wide("runas");
+    let result = unsafe {
+        ShellExecuteW(
+            HWND::default(),
+            runas.as_ptr(),
+            exe_wide.as_ptr(),
+            if args.is_empty() {
+                std::ptr::null()
+            } else {
+                args_wide.as_ptr()
+            },
+            std::ptr::null(),
+            1,
+        )
+    };
+    let code = result.0 as isize;
+    if code > 32 {
+        true
+    } else {
+        eprintln!("failed to relaunch as administrator: ShellExecuteW returned {code}");
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn relaunch_as_admin_if_needed() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn quote_arg(value: &str) -> String {
+    if value.is_empty() || value.chars().any(|ch| ch.is_whitespace() || ch == '"') {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(windows)]
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn wide_os(value: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
 
 fn run() -> Result<(), app::StartupError> {
     log::info!("bootstrapping ruler-app for Windows runtime");

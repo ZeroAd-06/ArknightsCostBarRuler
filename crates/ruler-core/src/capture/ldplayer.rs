@@ -52,7 +52,9 @@ impl LDPlayerController {
     }
 
     fn run_command(&self, program: &str, args: &[&str]) -> Result<String, String> {
-        let output = Command::new(program)
+        let mut command = Command::new(program);
+        configure_hidden_command(&mut command);
+        let output = command
             .args(args)
             .stdin(Stdio::null())
             .stderr(Stdio::piped())
@@ -162,6 +164,16 @@ impl LDPlayerController {
             .ok_or_else(|| "LDPlayer DLL not loaded".to_string())?;
         dll.get::<CreateScreenShotInstance>(b"CreateScreenShotInstance\0")
             .map_err(|e| format!("Failed to load CreateScreenShotInstance: {e}"))
+    }
+}
+
+fn configure_hidden_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 

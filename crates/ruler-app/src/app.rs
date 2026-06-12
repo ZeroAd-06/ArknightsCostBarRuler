@@ -13,6 +13,7 @@ use crate::{
     icons::IconSet,
     overlay::OverlayRuntime,
     resources::ResourceLocator,
+    target_discovery::{discover_targets, probe_candidate_once},
     tray::TrayRuntime,
     worker::{SharedAppState, StartupStatus, WorkerRuntime},
 };
@@ -28,22 +29,14 @@ pub struct RulerApp {
 impl RulerApp {
     pub fn build() -> Result<Self, StartupError> {
         let resources = ResourceLocator::new();
-        let mut startup_status = determine_startup_status(&resources);
-        let preferred_locale = startup_status
+        let initial_status = determine_startup_status(&resources);
+        let preferred_locale = initial_status
             .loaded_config
             .as_ref()
             .and_then(|config| config.language.as_deref());
         let i18n = Arc::new(I18n::load(&resources, preferred_locale));
 
-        if startup_status.loaded_config.is_none() {
-            if let Some(config) = run_config_wizard(&resources, &i18n) {
-                config
-                    .save_to_path(resources.config_path())
-                    .map_err(|error| StartupError::new(error.to_string()))?;
-                startup_status =
-                    StartupStatus::ready(resources.config_path().display().to_string(), config);
-            }
-        }
+        let startup_status = resolve_startup_config(&resources, &i18n, initial_status)?;
 
         let state = Arc::new(SharedAppState::default());
         state.update_startup_status(&startup_status);
@@ -170,4 +163,84 @@ fn determine_startup_status(resources: &ResourceLocator) -> StartupStatus {
         Ok(_) => StartupStatus::ready(config_path_text, config),
         Err(error) => StartupStatus::invalid(config_path.display().to_string(), error.to_string()),
     }
+}
+
+fn resolve_startup_config(
+    resources: &ResourceLocator,
+    i18n: &I18n,
+    initial_status: StartupStatus,
+) -> Result<StartupStatus, StartupError> {
+    let config_path_text = resources.config_path().display().to_string();
+    let previous_config = initial_status.loaded_config.clone();
+
+    if let Some(config) = previous_config.as_ref() {
+        if config.auto_select_target {
+            match try_auto_select_config(config) {
+                Ok(Some(config)) => {
+                    config
+                        .save_to_path(resources.config_path())
+                        .map_err(|error| StartupError::new(error.to_string()))?;
+                    return Ok(StartupStatus::ready(config_path_text, config));
+                }
+                Ok(None) => {
+                    log::warn!("auto target selection did not find a usable matching target");
+                }
+                Err(error) => {
+                    log::warn!("auto target selection failed: {error}");
+                }
+            }
+        }
+    }
+
+    if let Some(config) = run_config_wizard(resources, i18n, previous_config.as_ref()) {
+        config
+            .save_to_path(resources.config_path())
+            .map_err(|error| StartupError::new(error.to_string()))?;
+        return Ok(StartupStatus::ready(config_path_text, config));
+    }
+
+    Ok(StartupStatus::invalid(
+        config_path_text,
+        format!(
+            "{}: {}",
+            initial_status.phase,
+            i18n.tr("config.selector.cancelled")
+        ),
+    ))
+}
+
+fn try_auto_select_config(config: &RulerConfig) -> Result<Option<RulerConfig>, String> {
+    let fingerprint = config.target_fingerprint.as_deref().ok_or_else(|| {
+        "auto_select_target is true but target_fingerprint is missing".to_string()
+    })?;
+    let candidates = discover_targets(Some(config));
+    let Some(candidate) = candidates
+        .into_iter()
+        .find(|candidate| candidate.fingerprint == fingerprint)
+    else {
+        return Ok(None);
+    };
+    let probe = probe_candidate_once(&candidate);
+    if let Some(error) = probe.error {
+        return Err(error);
+    }
+    if probe.preview.is_none() {
+        return Err("matching target did not produce a screenshot preview".to_string());
+    }
+    if let Some(latency) = probe.latency {
+        log::info!(
+            "auto target screenshot probe ok: fingerprint={}, average_seed_ms={:.1}, class={:?}",
+            probe.fingerprint,
+            latency.as_secs_f64() * 1000.0,
+            probe.latency_class
+        );
+    }
+
+    let mut selected = candidate.config;
+    selected.auto_select_target = true;
+    selected.target_fingerprint = Some(fingerprint.to_string());
+    selected.active_calibration_profile = config.active_calibration_profile.clone();
+    selected.frame_display_mode = config.frame_display_mode.clone();
+    selected.language = config.language.clone();
+    Ok(Some(selected))
 }

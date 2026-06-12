@@ -29,6 +29,10 @@ pub struct RulerConfig {
     pub frame_display_mode: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub auto_select_target: bool,
+    #[serde(default)]
+    pub target_fingerprint: Option<String>,
 }
 
 impl RulerConfig {
@@ -63,6 +67,7 @@ impl RulerConfig {
 
     pub fn to_capture_config(&self) -> Result<CaptureConfig, RulerConfigError> {
         let capture_type = match self.capture_type.as_str() {
+            "adb" | "minicap" => CaptureType::Adb,
             "mumu" => CaptureType::MuMu,
             "ldplayer" => CaptureType::LDPlayer,
             "window" => CaptureType::Windows,

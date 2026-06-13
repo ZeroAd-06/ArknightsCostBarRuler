@@ -75,6 +75,7 @@ pub mod win32 {
 
     use super::PngImage;
 
+    #[allow(dead_code)]
     pub unsafe fn draw_scaled(hdc: HDC, image: &PngImage, rect: RECT, alpha: u8) {
         if rect.right <= rect.left || rect.bottom <= rect.top {
             return;

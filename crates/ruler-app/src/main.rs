@@ -12,6 +12,7 @@ mod profiles;
 mod resources;
 mod target_discovery;
 mod tray;
+mod ui;
 mod ui_state;
 mod worker;
 

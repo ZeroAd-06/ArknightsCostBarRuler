@@ -40,7 +40,7 @@ impl OverlayRuntime {
     pub fn startup_note(&self) -> String {
         let snapshot = self.state.snapshot();
         format!(
-            "native overlay runtime registered with mode={:?}",
+            "slint overlay runtime registered with mode={:?}",
             snapshot.ui.mode
         )
     }
@@ -99,7 +99,10 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use std::{
+        cell::Cell,
+        ffi::c_void,
         iter,
+        rc::Rc,
         sync::{
             atomic::{AtomicIsize, Ordering},
             mpsc::Sender,
@@ -109,74 +112,147 @@ mod platform {
     };
 
     use ruler_core::analysis::roi::find_cost_bar_roi;
+    use slint::{
+        platform::{
+            software_renderer::{
+                MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, SoftwareRenderer,
+                TargetPixel,
+            },
+            Platform, PointerEventButton, WindowAdapter, WindowEvent,
+        },
+        ComponentHandle, LogicalPosition, PhysicalSize, PlatformError,
+    };
 
     use super::OverlayError;
     use crate::{
         commands::UiCommand,
         i18n::I18n,
-        icons::{win32::draw_scaled, IconSet},
+        icons::IconSet,
         menu,
+        ui::{Hud, HudMode},
         ui_state::OverlayMode,
         worker::SharedAppState,
     };
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+            Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
             Graphics::Gdi::{
-                BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-                FillRect, GetStockObject, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
-                DRAW_TEXT_FORMAT, DT_CENTER, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-                DT_WORDBREAK, HBRUSH, HDC, HGDIOBJ, PAINTSTRUCT, TRANSPARENT, WHITE_BRUSH,
+                CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+                SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+                BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
             },
             System::LibraryLoader::GetModuleHandleW,
             UI::{
-                Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
+                Controls::WM_MOUSELEAVE,
+                Input::KeyboardAndMouse::{
+                    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+                },
                 WindowsAndMessaging::{
                     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-                    GetClientRect, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-                    GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
-                    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-                    ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-                    GWLP_USERDATA, HMENU, IDC_ARROW, LWA_ALPHA, MSG, SM_CXSCREEN, SM_CYSCREEN,
-                    SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-                    WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                    WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-                    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+                    GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+                    LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW, SetTimer,
+                    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
+                    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, MSG,
+                    SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA,
+                    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN,
+                    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+                    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
         },
     };
 
-    const OVERLAY_ALPHA: u8 = 191;
     const OVERLAY_TIMER_ID: usize = 1;
     const OVERLAY_TIMER_INTERVAL_MS: u32 = 16;
     const WM_OVERLAY_WAKE: u32 = WM_APP + 2;
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum HitTarget {
-        None,
-        StartButton,
-        Timer,
+    // Fixed logical design size of `hud.slint`. Physical size = logical * scale.
+    const LOGICAL_W: f32 = 232.0;
+    const LOGICAL_H: f32 = 56.0;
+
+    /// Premultiplied BGRA pixel, the exact layout `UpdateLayeredWindow` expects
+    /// for a per-pixel-alpha layered window (32bpp top-down DIB, AC_SRC_ALPHA).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PreBgra {
+        b: u8,
+        g: u8,
+        r: u8,
+        a: u8,
+    }
+
+    impl TargetPixel for PreBgra {
+        fn blend(&mut self, color: PremultipliedRgbaColor) {
+            let inv = (u8::MAX - color.alpha) as u16;
+            self.r = (self.r as u16 * inv / 255) as u8 + color.red;
+            self.g = (self.g as u16 * inv / 255) as u8 + color.green;
+            self.b = (self.b as u16 * inv / 255) as u8 + color.blue;
+            self.a = (self.a as u16 * inv / 255) as u8 + color.alpha;
+        }
+
+        fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
+            Self {
+                b: blue,
+                g: green,
+                r: red,
+                a: 255,
+            }
+        }
+
+        // Uncovered / transparent areas of the (transparent) Slint window.
+        fn background() -> Self {
+            Self {
+                b: 0,
+                g: 0,
+                r: 0,
+                a: 0,
+            }
+        }
+    }
+
+    struct RulerPlatform {
+        window: Rc<MinimalSoftwareWindow>,
+        start: Instant,
+    }
+
+    impl Platform for RulerPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+            Ok(self.window.clone())
+        }
+
+        fn duration_since_start(&self) -> core::time::Duration {
+            self.start.elapsed()
+        }
     }
 
     struct WindowState {
+        hud: Hud,
+        window: Rc<MinimalSoftwareWindow>,
         state: Arc<SharedAppState>,
         command_tx: Sender<UiCommand>,
         i18n: Arc<I18n>,
-        icons: Arc<IconSet>,
-        background_brush: HBRUSH,
+        // software framebuffer backed by a DIB section (no copy on present)
+        mem_dc: HDC,
+        dib: HBITMAP,
+        bits: *mut PreBgra,
+        buf_w: usize,
+        buf_h: usize,
+        scale: f32,
+        // pointer / drag bookkeeping
         mouse_down: bool,
         moved: bool,
-        hit_target: HitTarget,
+        drag_on_bg: Rc<Cell<bool>>,
         drag_origin: POINT,
         window_origin: POINT,
+        tracking_leave: bool,
     }
 
     impl Drop for WindowState {
         fn drop(&mut self) {
             unsafe {
-                let _ = DeleteObject(self.background_brush);
+                let _ = DeleteObject(HGDIOBJ(self.dib.0));
+                let _ = DeleteDC(self.mem_dc);
             }
         }
     }
@@ -185,18 +261,47 @@ mod platform {
         shared_state: Arc<SharedAppState>,
         command_tx: Sender<UiCommand>,
         i18n: Arc<I18n>,
-        icons: Arc<IconSet>,
+        _icons: Arc<IconSet>,
     ) -> Result<(), OverlayError> {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(RulerPlatform {
+            window: window.clone(),
+            start: Instant::now(),
+        }))
+        .map_err(|error| OverlayError::new(format!("set_platform failed: {error:?}")))?;
+
+        let hud = Hud::new()
+            .map_err(|error| OverlayError::new(format!("failed to build HUD component: {error}")))?;
+
+        let (left, top, width, height, scale) = initial_geometry();
+
+        // Drive layout at the fixed logical design size via the scale factor.
+        window
+            .window()
+            .try_dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            })
+            .map_err(|error| OverlayError::new(format!("scale dispatch failed: {error}")))?;
+        window.set_size(PhysicalSize::new(width as u32, height as u32));
+
+        let drag_on_bg = Rc::new(Cell::new(false));
+        let hwnd_cell = Rc::new(Cell::new(0isize));
+        wire_callbacks(
+            &hud,
+            &shared_state,
+            &command_tx,
+            &drag_on_bg,
+            &hwnd_cell,
+        );
+
+        hud.show()
+            .map_err(|error| OverlayError::new(format!("failed to show HUD: {error}")))?;
+
         unsafe {
             let instance = GetModuleHandleW(PCWSTR::null())
                 .map_err(|error| OverlayError::new(format!("GetModuleHandleW failed: {error}")))?;
-
             let class_name = wide("RulerOverlayWindowClass");
             let title = wide("Arknights Cost Bar Ruler");
-            let background_brush = CreateSolidBrush(COLORREF(0x003a3a3a));
-            if background_brush.0.is_null() {
-                return Err(OverlayError::new("CreateSolidBrush failed"));
-            }
 
             let class = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,
@@ -205,39 +310,46 @@ mod platform {
                 lpszClassName: PCWSTR(class_name.as_ptr()),
                 hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW)
                     .map_err(|error| OverlayError::new(format!("LoadCursorW failed: {error}")))?,
-                hbrBackground: HBRUSH(GetStockObject(WHITE_BRUSH).0),
                 ..Default::default()
             };
-
             let atom = RegisterClassW(&class);
             if atom == 0 {
                 return Err(OverlayError::new("RegisterClassW failed"));
             }
 
-            let geometry = initial_geometry();
-            let state = Box::new(WindowState {
+            let (mem_dc, dib, bits) = create_dib(width, height)
+                .ok_or_else(|| OverlayError::new("failed to create framebuffer DIB"))?;
+
+            let window_state = Box::new(WindowState {
+                hud,
+                window: window.clone(),
                 state: Arc::clone(&shared_state),
                 command_tx,
                 i18n,
-                icons,
-                background_brush,
+                mem_dc,
+                dib,
+                bits,
+                buf_w: width as usize,
+                buf_h: height as usize,
+                scale,
                 mouse_down: false,
                 moved: false,
-                hit_target: HitTarget::None,
+                drag_on_bg,
                 drag_origin: POINT::default(),
                 window_origin: POINT::default(),
+                tracking_leave: false,
             });
-            let state_ptr = Box::into_raw(state);
+            let state_ptr = Box::into_raw(window_state);
 
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(WS_EX_TOPMOST.0 | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0),
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(title.as_ptr()),
                 WINDOW_STYLE(WS_POPUP.0 | WS_VISIBLE.0),
-                geometry.left,
-                geometry.top,
-                geometry.right - geometry.left,
-                geometry.bottom - geometry.top,
+                left,
+                top,
+                width,
+                height,
                 HWND::default(),
                 HMENU::default(),
                 HINSTANCE(instance.0),
@@ -247,12 +359,9 @@ mod platform {
 
             if hwnd.0.is_null() {
                 let _ = Box::from_raw(state_ptr);
-                return Err(OverlayError::new("CreateWindowExW failed"));
+                return Err(OverlayError::new("CreateWindowExW returned null"));
             }
-
-            SetLayeredWindowAttributes(hwnd, COLORREF(0), OVERLAY_ALPHA, LWA_ALPHA).map_err(
-                |error| OverlayError::new(format!("SetLayeredWindowAttributes failed: {error}")),
-            )?;
+            hwnd_cell.set(hwnd.0 as isize);
 
             let overlay_hwnd = Arc::new(AtomicIsize::new(hwnd.0 as isize));
             let overlay_waker_hwnd = Arc::clone(&overlay_hwnd);
@@ -291,6 +400,57 @@ mod platform {
         }
     }
 
+    fn wire_callbacks(
+        hud: &Hud,
+        state: &Arc<SharedAppState>,
+        command_tx: &Sender<UiCommand>,
+        drag_on_bg: &Rc<Cell<bool>>,
+        _hwnd_cell: &Rc<Cell<isize>>,
+    ) {
+        hud.on_start_clicked({
+            let tx = command_tx.clone();
+            move || {
+                let _ = tx.send(UiCommand::StartCalibration);
+            }
+        });
+        hud.on_reset_clicked({
+            let tx = command_tx.clone();
+            move || {
+                let _ = tx.send(UiCommand::ResetTimer);
+            }
+        });
+        hud.on_lap_clicked({
+            let tx = command_tx.clone();
+            move || {
+                let _ = tx.send(UiCommand::ToggleLapTimer);
+            }
+        });
+        hud.on_back_cycle({
+            let tx = command_tx.clone();
+            let state = Arc::clone(state);
+            move || {
+                let frames = state.snapshot().ui.total_frames_in_cycle;
+                let _ = tx.send(UiCommand::AdjustTimer { frames: -frames });
+            }
+        });
+        hud.on_fwd_cycle({
+            let tx = command_tx.clone();
+            let state = Arc::clone(state);
+            move || {
+                let frames = state.snapshot().ui.total_frames_in_cycle;
+                let _ = tx.send(UiCommand::AdjustTimer { frames });
+            }
+        });
+        hud.on_bg_pressed({
+            let drag_on_bg = Rc::clone(drag_on_bg);
+            move || drag_on_bg.set(true)
+        });
+        hud.on_bg_released({
+            let drag_on_bg = Rc::clone(drag_on_bg);
+            move || drag_on_bg.set(false)
+        });
+    }
+
     unsafe extern "system" fn window_proc(
         hwnd: HWND,
         message: u32,
@@ -305,14 +465,18 @@ mod platform {
                 LRESULT(1)
             }
             WM_PAINT => {
-                paint_window(hwnd);
+                // Painting is driven by the timer via UpdateLayeredWindow; just validate.
+                let mut paint = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
+                let hdc = windows::Win32::Graphics::Gdi::BeginPaint(hwnd, &mut paint);
+                let _ = hdc;
+                let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &paint);
                 LRESULT(0)
             }
             WM_OVERLAY_WAKE | WM_TIMER => {
                 if should_exit(hwnd) {
                     let _ = DestroyWindow(hwnd);
                 } else {
-                    let _ = InvalidateRect(hwnd, None, false);
+                    tick(hwnd);
                 }
                 LRESULT(0)
             }
@@ -321,7 +485,17 @@ mod platform {
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                handle_mouse_move(hwnd);
+                handle_mouse_move(hwnd, lparam);
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                if let Some(state) = window_state_mut(hwnd) {
+                    state.tracking_leave = false;
+                    let _ = state
+                        .window
+                        .window()
+                        .try_dispatch_event(WindowEvent::PointerExited);
+                }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -360,268 +534,67 @@ mod platform {
         }
     }
 
-    unsafe fn paint_window(hwnd: HWND) {
+    unsafe fn tick(hwnd: HWND) {
+        slint::platform::update_timers_and_animations();
         let Some(state) = window_state(hwnd) else {
             return;
         };
-
-        let mut paint = PAINTSTRUCT::default();
-        let hdc = BeginPaint(hwnd, &mut paint);
-        let mut client_rect = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client_rect);
-
-        FillRect(hdc, &client_rect, state.background_brush);
-        draw_overlay(hdc, &client_rect, state);
-        state.state.record_overlay_paint(
-            state.state.snapshot().worker_timing.sample_index,
-            Instant::now(),
-        );
-
-        let _ = EndPaint(hwnd, &paint);
-    }
-
-    unsafe fn draw_overlay(hdc: HDC, rect: &RECT, state: &WindowState) {
-        SetBkMode(hdc, TRANSPARENT);
         let snapshot = state.state.snapshot();
-        let layout = Layout::new(*rect, state.i18n.locale());
+        sync_properties(state, &snapshot.ui);
 
-        match snapshot.ui.mode {
-            OverlayMode::Idle => {
-                draw_main_icon(hdc, &state.icons, "deco", layout.icon_rect);
-                draw_center_text(
-                    hdc,
-                    layout.right_rect,
-                    &state.i18n.tr("overlay.msg.idle"),
-                    layout.medium_font,
-                    false,
-                );
-            }
-            OverlayMode::PreCalibration => {
-                draw_main_icon(hdc, &state.icons, "start", layout.icon_rect);
-                draw_center_text(
-                    hdc,
-                    layout.right_rect,
-                    &state.i18n.tr("overlay.msg.pre_cal"),
-                    layout.medium_font,
-                    false,
-                );
-            }
-            OverlayMode::Calibrating => {
-                draw_main_icon(hdc, &state.icons, "wait", layout.icon_rect);
-                draw_center_text(
-                    hdc,
-                    layout.right_rect,
-                    &format!("{}%", snapshot.ui.progress_percent),
-                    layout.large_font,
-                    false,
-                );
-            }
-            OverlayMode::Running => {
-                draw_main_icon(hdc, &state.icons, "deco", layout.icon_rect);
-                draw_right_text(
-                    hdc,
-                    layout.frame_rect,
-                    &snapshot.ui.display_frame,
-                    layout.large_font,
-                    true,
-                    COLORREF(0x00ffffff),
-                );
-                draw_right_text(
-                    hdc,
-                    layout.total_rect,
-                    &snapshot.ui.display_total,
-                    layout.medium_font,
-                    false,
-                    COLORREF(0x00999999),
-                );
-                draw_timer(
-                    hdc,
-                    &state.icons,
-                    &layout.timer_rect,
-                    &snapshot.ui.time_str,
-                    layout.small_font,
-                );
-                if let Some(lap_frames) = snapshot.ui.lap_frames {
-                    draw_lap(
-                        hdc,
-                        &state.icons,
-                        &layout.lap_rect,
-                        &lap_frames.to_string(),
-                        layout.small_font,
-                    );
-                }
-            }
-            OverlayMode::Error => {
-                draw_main_icon(hdc, &state.icons, "deco", layout.icon_rect);
-                let message = format!("错误:\n{}", truncate(&snapshot.ui.message, 50));
-                draw_center_text(
-                    hdc,
-                    layout.right_rect,
-                    &message,
-                    layout.small_font.max(14),
-                    false,
-                );
-            }
-            OverlayMode::Booting => {
-                draw_main_icon(hdc, &state.icons, "deco", layout.icon_rect);
-                draw_center_text(
-                    hdc,
-                    layout.right_rect,
-                    &snapshot.ui.message,
-                    layout.small_font.max(14),
-                    false,
-                );
-            }
+        let w = state.buf_w;
+        let h = state.buf_h;
+        let bits = state.bits;
+        let drawn = state.window.draw_if_needed(|renderer: &SoftwareRenderer| {
+            let buffer = unsafe { std::slice::from_raw_parts_mut(bits, w * h) };
+            renderer.render(buffer, w);
+        });
+        if drawn {
+            present_layered(hwnd, state.mem_dc, w as i32, h as i32);
+            state
+                .state
+                .record_overlay_paint(snapshot.worker_timing.sample_index, Instant::now());
         }
     }
 
-    unsafe fn draw_main_icon(hdc: HDC, icons: &IconSet, name: &str, rect: RECT) {
-        if let Some(icon) = icons.get(name) {
-            draw_scaled(hdc, icon, rect, 255);
-        }
-    }
+    fn sync_properties(state: &WindowState, ui: &crate::ui_state::UiSnapshot) {
+        let hud = &state.hud;
 
-    unsafe fn draw_timer(hdc: HDC, icons: &IconSet, rect: &RECT, text: &str, font_height: i32) {
-        let icon_size = (rect.bottom - rect.top).max(1);
-        let icon_rect = RECT {
-            left: rect.left,
-            top: rect.top,
-            right: rect.left + icon_size,
-            bottom: rect.bottom,
+        hud.set_mode(map_mode(&ui.mode));
+        hud.set_time_str(ui.time_str.as_str().into());
+        hud.set_frame_str(ui.display_frame.as_str().into());
+
+        let negative = ui.display_total.ends_with('*');
+        let total_clean = ui.display_total.trim_end_matches('*');
+        hud.set_total_str(total_clean.into());
+        hud.set_cost_negative(negative);
+
+        let lap = ui
+            .lap_frames
+            .map(|frames| frames.to_string())
+            .unwrap_or_default();
+        hud.set_lap_str(lap.into());
+
+        hud.set_progress(f32::from(ui.progress_percent));
+        hud.set_progress_str(format!("{}%", ui.progress_percent).into());
+
+        let message = match ui.mode {
+            OverlayMode::Idle => state.i18n.tr("overlay.msg.idle"),
+            OverlayMode::PreCalibration => state.i18n.tr("overlay.msg.pre_cal"),
+            OverlayMode::Error | OverlayMode::Booting => ui.message.clone(),
+            _ => String::new(),
         };
-        if let Some(icon) = icons.get("timer") {
-            draw_scaled(hdc, icon, icon_rect, 255);
-        }
-        let text_rect = RECT {
-            left: rect.left + icon_size + 2,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-        };
-        draw_left_text(
-            hdc,
-            text_rect,
-            text,
-            font_height,
-            false,
-            COLORREF(0x00999999),
-        );
+        hud.set_message(message.into());
     }
 
-    unsafe fn draw_lap(hdc: HDC, icons: &IconSet, rect: &RECT, text: &str, font_height: i32) {
-        let icon_size = (rect.bottom - rect.top).max(1);
-        let icon_rect = RECT {
-            left: rect.left,
-            top: rect.top,
-            right: rect.left + icon_size,
-            bottom: rect.bottom,
-        };
-        if let Some(icon) = icons.get("wait") {
-            draw_scaled(hdc, icon, icon_rect, 255);
-        }
-        let text_rect = RECT {
-            left: rect.left + icon_size + 2,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-        };
-        draw_left_text(
-            hdc,
-            text_rect,
-            text,
-            font_height,
-            false,
-            COLORREF(0x00999999),
-        );
-    }
-
-    unsafe fn draw_center_text(hdc: HDC, rect: RECT, text: &str, font_height: i32, bold: bool) {
-        draw_text(
-            hdc,
-            rect,
-            text,
-            font_height,
-            bold,
-            COLORREF(0x00ffffff),
-            DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOPREFIX,
-        );
-    }
-
-    unsafe fn draw_left_text(
-        hdc: HDC,
-        rect: RECT,
-        text: &str,
-        font_height: i32,
-        bold: bool,
-        color: COLORREF,
-    ) {
-        draw_text(
-            hdc,
-            rect,
-            text,
-            font_height,
-            bold,
-            color,
-            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-    }
-
-    unsafe fn draw_right_text(
-        hdc: HDC,
-        rect: RECT,
-        text: &str,
-        font_height: i32,
-        bold: bool,
-        color: COLORREF,
-    ) {
-        draw_text(
-            hdc,
-            rect,
-            text,
-            font_height,
-            bold,
-            color,
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-    }
-
-    unsafe fn draw_text(
-        hdc: HDC,
-        mut rect: RECT,
-        text: &str,
-        font_height: i32,
-        bold: bool,
-        color: COLORREF,
-        flags: DRAW_TEXT_FORMAT,
-    ) {
-        SetTextColor(hdc, color);
-        let face = wide("Segoe UI");
-        let font = CreateFontW(
-            -font_height,
-            0,
-            0,
-            0,
-            if bold { 700 } else { 400 },
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            PCWSTR(face.as_ptr()),
-        );
-        let old_font = if font.0.is_null() {
-            HGDIOBJ::default()
-        } else {
-            SelectObject(hdc, HGDIOBJ(font.0))
-        };
-        let mut text = wide(text);
-        DrawTextW(hdc, text.as_mut_slice(), &mut rect, flags);
-        if !font.0.is_null() {
-            let _ = SelectObject(hdc, old_font);
-            let _ = DeleteObject(font);
+    fn map_mode(mode: &OverlayMode) -> HudMode {
+        match mode {
+            OverlayMode::Booting => HudMode::Booting,
+            OverlayMode::Idle => HudMode::Idle,
+            OverlayMode::PreCalibration => HudMode::Precal,
+            OverlayMode::Calibrating => HudMode::Calibrating,
+            OverlayMode::Running => HudMode::Running,
+            OverlayMode::Error => HudMode::Error,
         }
     }
 
@@ -633,92 +606,170 @@ mod platform {
         let _ = GetCursorPos(&mut cursor);
         let mut window_rect = RECT::default();
         let _ = GetWindowRect(hwnd, &mut window_rect);
-        let mut client_rect = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client_rect);
-        let point = POINT {
-            x: get_x_lparam(lparam),
-            y: get_y_lparam(lparam),
-        };
+
         state.mouse_down = true;
         state.moved = false;
-        state.hit_target = hit_test(
-            &state.state.snapshot().ui.mode,
-            &Layout::new(client_rect, "zh_CN"),
-            point,
-        );
+        state.drag_on_bg.set(false);
         state.drag_origin = cursor;
         state.window_origin = POINT {
             x: window_rect.left,
             y: window_rect.top,
         };
         let _ = SetCapture(hwnd);
+
+        let position = logical_pos(lparam, state.scale);
+        let _ = state
+            .window
+            .window()
+            .try_dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
     }
 
-    unsafe fn handle_mouse_move(hwnd: HWND) {
+    unsafe fn handle_mouse_move(hwnd: HWND, lparam: LPARAM) {
         let Some(state) = window_state_mut(hwnd) else {
             return;
         };
-        if !state.mouse_down {
-            return;
+
+        if !state.tracking_leave {
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            if TrackMouseEvent(&mut tme).is_ok() {
+                state.tracking_leave = true;
+            }
         }
-        let mut cursor = POINT::default();
-        let _ = GetCursorPos(&mut cursor);
-        let dx = cursor.x - state.drag_origin.x;
-        let dy = cursor.y - state.drag_origin.y;
-        if dx.abs() > 2 || dy.abs() > 2 {
-            state.moved = true;
+
+        if state.mouse_down {
+            let mut cursor = POINT::default();
+            let _ = GetCursorPos(&mut cursor);
+            let dx = cursor.x - state.drag_origin.x;
+            let dy = cursor.y - state.drag_origin.y;
+            if dx.abs() > 2 || dy.abs() > 2 {
+                state.moved = true;
+            }
+            if state.moved && state.drag_on_bg.get() {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND::default(),
+                    state.window_origin.x + dx,
+                    state.window_origin.y + dy,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER,
+                );
+                return;
+            }
         }
-        if state.moved {
-            let _ = SetWindowPos(
-                hwnd,
-                HWND::default(),
-                state.window_origin.x + dx,
-                state.window_origin.y + dy,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER,
-            );
-        }
+
+        let position = logical_pos(lparam, state.scale);
+        let _ = state
+            .window
+            .window()
+            .try_dispatch_event(WindowEvent::PointerMoved { position });
     }
 
     unsafe fn handle_left_up(hwnd: HWND) {
         let Some(state) = window_state_mut(hwnd) else {
             return;
         };
-        let hit_target = state.hit_target;
         let moved = state.moved;
+        let dragged_bg = state.drag_on_bg.get();
         state.mouse_down = false;
         state.moved = false;
-        state.hit_target = HitTarget::None;
+        state.drag_on_bg.set(false);
         let _ = ReleaseCapture();
 
-        if moved {
-            return;
-        }
+        let mut cursor = POINT::default();
+        let _ = GetCursorPos(&mut cursor);
+        let mut client = cursor;
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
+        let position = LogicalPosition::new(client.x as f32 / state.scale, client.y as f32 / state.scale);
 
-        match hit_target {
-            HitTarget::StartButton => {
-                let _ = state.command_tx.send(UiCommand::StartCalibration);
-            }
-            HitTarget::Timer => {
-                let _ = state.command_tx.send(UiCommand::ToggleLapTimer);
-            }
-            HitTarget::None => {}
+        if moved && dragged_bg {
+            // Drag finished — cancel Slint's press grab so it is not read as a click.
+            let _ = state
+                .window
+                .window()
+                .try_dispatch_event(WindowEvent::PointerExited);
+        } else {
+            let _ = state
+                .window
+                .window()
+                .try_dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
         }
     }
 
-    fn hit_test(mode: &OverlayMode, layout: &Layout, point: POINT) -> HitTarget {
-        if matches!(mode, OverlayMode::PreCalibration) && contains(layout.left_rect, point) {
-            return HitTarget::StartButton;
-        }
-        if matches!(mode, OverlayMode::Running) && contains(layout.timer_hit_rect, point) {
-            return HitTarget::Timer;
-        }
-        HitTarget::None
+    fn logical_pos(lparam: LPARAM, scale: f32) -> LogicalPosition {
+        let x = (lparam.0 as u32 & 0xffff) as i16 as f32;
+        let y = ((lparam.0 as u32 >> 16) & 0xffff) as i16 as f32;
+        LogicalPosition::new(x / scale, y / scale)
     }
 
-    fn contains(rect: RECT, point: POINT) -> bool {
-        point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+    unsafe fn create_dib(width: i32, height: i32) -> Option<(HDC, HBITMAP, *mut PreBgra)> {
+        let screen = GetDC(HWND::default());
+        let mem_dc = CreateCompatibleDC(screen);
+        let _ = ReleaseDC(HWND::default(), screen);
+        if mem_dc.0.is_null() {
+            return None;
+        }
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // top-down to match Slint's row order
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(dib) = CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(mem_dc);
+            return None;
+        };
+        if dib.0.is_null() || bits.is_null() {
+            let _ = DeleteDC(mem_dc);
+            return None;
+        }
+        SelectObject(mem_dc, HGDIOBJ(dib.0));
+        Some((mem_dc, dib, bits.cast::<PreBgra>()))
+    }
+
+    unsafe fn present_layered(hwnd: HWND, mem_dc: HDC, width: i32, height: i32) {
+        let screen = GetDC(HWND::default());
+        let size = SIZE {
+            cx: width,
+            cy: height,
+        };
+        let src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let _ = UpdateLayeredWindow(
+            hwnd,
+            screen,
+            None,
+            Some(&size as *const SIZE),
+            mem_dc,
+            Some(&src as *const POINT),
+            COLORREF(0),
+            Some(&blend as *const BLENDFUNCTION),
+            ULW_ALPHA,
+        );
+        let _ = ReleaseDC(HWND::default(), screen);
     }
 
     unsafe fn should_exit(hwnd: HWND) -> bool {
@@ -745,125 +796,22 @@ mod platform {
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct Layout {
-        left_rect: RECT,
-        right_rect: RECT,
-        icon_rect: RECT,
-        frame_rect: RECT,
-        total_rect: RECT,
-        timer_rect: RECT,
-        timer_hit_rect: RECT,
-        lap_rect: RECT,
-        large_font: i32,
-        medium_font: i32,
-        small_font: i32,
-    }
-
-    impl Layout {
-        fn new(client: RECT, locale: &str) -> Self {
-            let width = client.right - client.left;
-            let height = client.bottom - client.top;
-            let left_width = width * 33 / 100;
-            let right_rect = RECT {
-                left: left_width,
-                top: 0,
-                right: width,
-                bottom: height,
-            };
-            let left_rect = RECT {
-                left: 0,
-                top: 0,
-                right: left_width,
-                bottom: height,
-            };
-            let icon_size = left_width.min(height).max(1);
-            let icon_rect = RECT {
-                left: (left_width - icon_size) / 2,
-                top: (height - icon_size) / 2,
-                right: (left_width + icon_size) / 2,
-                bottom: (height + icon_size) / 2,
-            };
-            let padding = (height / 100).max(2);
-            let offset_x = width * 20 / 100;
-            let small_font = (height * 18 / 100).max(10);
-            let medium_font = if locale == "en_US" {
-                (height * 18 / 100).max(12)
-            } else {
-                (height * 22 / 100).max(12)
-            };
-            let large_font = (height * 55 / 100).max(20);
-            let timer_height = small_font + 4;
-            let timer_rect = RECT {
-                left: padding,
-                top: height - timer_height - padding,
-                right: left_width + width / 5,
-                bottom: height - padding,
-            };
-            let lap_rect = RECT {
-                left: padding,
-                top: padding,
-                right: left_width + width / 5,
-                bottom: padding + timer_height,
-            };
-            Self {
-                left_rect,
-                right_rect,
-                icon_rect,
-                frame_rect: RECT {
-                    left: left_width,
-                    top: height * 18 / 100,
-                    right: width - offset_x,
-                    bottom: height * 65 / 100,
-                },
-                total_rect: RECT {
-                    left: left_width,
-                    top: height - medium_font - padding * 2,
-                    right: width - padding,
-                    bottom: height - padding,
-                },
-                timer_hit_rect: timer_rect,
-                timer_rect,
-                lap_rect,
-                large_font,
-                medium_font,
-                small_font,
-            }
-        }
-    }
-
-    fn initial_geometry() -> RECT {
+    /// Returns `(left, top, width, height, scale)` in physical pixels.
+    /// Height is aligned to the legacy overlay footprint; the bar's width then
+    /// follows the fixed logical aspect ratio.
+    fn initial_geometry() -> (i32, i32, i32, i32, f32) {
         unsafe {
             let screen_width = GetSystemMetrics(SM_CXSCREEN);
             let screen_height = GetSystemMetrics(SM_CYSCREEN);
             let (roi_x1, roi_x2, _) = find_cost_bar_roi(screen_width, screen_height);
             let cost_bar_pixel_length = (roi_x2 - roi_x1).abs().max(180);
-            let width = cost_bar_pixel_length * 5 / 6;
-            let height = width * 27 / 50;
-            let left = screen_width - width - 50;
-            let top = screen_height - height - 100;
-            RECT {
-                left,
-                top,
-                right: left + width,
-                bottom: top + height,
-            }
-        }
-    }
-
-    fn get_x_lparam(lparam: LPARAM) -> i32 {
-        (lparam.0 as u32 & 0xffff) as i16 as i32
-    }
-
-    fn get_y_lparam(lparam: LPARAM) -> i32 {
-        ((lparam.0 as u32 >> 16) & 0xffff) as i16 as i32
-    }
-
-    fn truncate(value: &str, max_chars: usize) -> String {
-        if value.chars().count() <= max_chars {
-            value.to_string()
-        } else {
-            format!("{}...", value.chars().take(max_chars).collect::<String>())
+            let legacy_height = (cost_bar_pixel_length * 5 / 6) * 27 / 50;
+            let scale = (legacy_height as f32 / LOGICAL_H).clamp(1.0, 4.0);
+            let width = (LOGICAL_W * scale).round() as i32;
+            let height = (LOGICAL_H * scale).round() as i32;
+            let left = (screen_width - width - 50).max(0);
+            let top = (screen_height - height - 100).max(0);
+            (left, top, width, height, scale)
         }
     }
 

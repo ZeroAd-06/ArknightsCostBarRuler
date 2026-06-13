@@ -10,7 +10,15 @@ log = "0.4"
 ruler-core = { path = "../ruler-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+slint = { version = "1.16", default-features = false, features = [
+    "compat-1-2",
+    "std",
+    "renderer-software",
+] }
 tungstenite = "0.24"
+
+[build-dependencies]
+slint-build = "1.16"
 
 [target.'cfg(windows)'.dependencies]
 netstat2 = "0.11.2"

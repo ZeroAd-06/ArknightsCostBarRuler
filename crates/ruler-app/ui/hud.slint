@@ -1,0 +1,248 @@
+// Arknights Cost Bar Ruler — HUD overlay
+// Cold / sharp / minimal. Timer is the hero; cost frame is a quiet secondary cluster.
+// Rendered by the software renderer into a per-pixel-alpha layered window.
+// All user-facing strings are localized in Rust and pushed in as properties.
+
+export enum HudMode {
+    booting,
+    idle,
+    precal,
+    calibrating,
+    running,
+    error,
+}
+
+// --- design tokens -------------------------------------------------------
+global Palette {
+    out property <color> panel: #0a0e12e0;          // near-black, ~88% opaque
+    out property <color> hairline: #46c4ff8c;        // cyan hairline ~55%
+    out property <color> accent: #36c5f0;            // running cyan
+    out property <color> amber: #ffb020;             // warning / negative cost / lap
+    out property <color> text-primary: #eef6fb;
+    out property <color> text-secondary: #7d93a6;
+    out property <color> text-faint: #54677a;
+}
+
+// --- small control button (hover-revealed row) ---------------------------
+component CtrlBtn inherits Rectangle {
+    in property <string> label;
+    in property <bool> strong: false;
+    callback clicked;
+    width: 26px;
+    height: 18px;
+    border-width: 1px;
+    border-color: ta.has-hover ? Palette.accent : #ffffff14;
+    background: ta.has-hover ? #ffffff1a : #ffffff08;
+    animate background, border-color { duration: 110ms; }
+    Text {
+        text: root.label;
+        color: root.strong ? Palette.amber : (ta.has-hover ? Palette.text-primary : Palette.text-secondary);
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Hud inherits Window {
+    // ---- inputs (driven from Rust each tick) ----
+    in property <HudMode> mode: HudMode.booting;
+    in property <string> time-str: "00:00:00";
+    in property <string> frame-str: "--";
+    in property <string> total-str: "/--";
+    in property <string> lap-str: "";
+    in property <bool> cost-negative: false;
+    in property <float> progress: 0;          // 0..100 during calibration
+    in property <string> progress-str: "0%";
+    in property <string> message: "";
+
+    // ---- outputs ----
+    callback start-clicked();
+    callback reset-clicked();
+    callback lap-clicked();
+    callback back-cycle();
+    callback fwd-cycle();
+    callback bg-pressed();
+    callback bg-released();
+
+    background: transparent;
+    // default logical design size; Rust drives the real size via scale factor
+    preferred-width: 232px;
+    preferred-height: 56px;
+
+    property <bool> running: root.mode == HudMode.running;
+    property <bool> show-controls: hover.has-hover && root.running;
+
+    // ---- panel ----
+    Rectangle {
+        background: Palette.panel;
+        border-width: 1px;
+        border-color: root.mode == HudMode.error ? Palette.amber : Palette.hairline;
+        animate border-color { duration: 200ms; }
+    }
+
+    // top accent hairline — state colored
+    Rectangle {
+        x: 0; y: 0;
+        width: 100%;
+        height: 2px;
+        background: root.mode == HudMode.error ? Palette.amber
+            : (root.running ? Palette.accent : Palette.text-faint);
+        opacity: 0.9;
+        animate background { duration: 200ms; }
+    }
+
+    // ===== RUNNING: timer hero + secondary cluster =====
+    running-layer := Rectangle {
+        opacity: root.running ? 1 : 0;
+        animate opacity { duration: 160ms; }
+        visible: running-layer.opacity > 0.01;
+
+        // hero timer
+        Text {
+            x: 14px;
+            y: 0;
+            height: 100%;
+            text: root.time-str;
+            color: Palette.text-primary;
+            font-size: 30px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+        }
+
+        // secondary cluster (cost frame + lap), right aligned
+        VerticalLayout {
+            x: parent.width - 78px;
+            width: 70px;
+            y: 0;
+            height: 100%;
+            padding-top: 7px;
+            padding-bottom: 7px;
+            alignment: center;
+            spacing: 1px;
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: 0px;
+                Text {
+                    text: root.frame-str;
+                    color: Palette.text-primary;
+                    font-size: 17px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.total-str;
+                    color: root.cost-negative ? Palette.amber : Palette.text-secondary;
+                    font-size: 12px;
+                    font-weight: 500;
+                    vertical-alignment: bottom;
+                }
+            }
+            Text {
+                visible: root.lap-str != "";
+                text: "+" + root.lap-str;
+                color: Palette.amber;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: right;
+            }
+        }
+    }
+
+    // ===== CALIBRATING: thin progress line + percent =====
+    cal-layer := Rectangle {
+        opacity: root.mode == HudMode.calibrating ? 1 : 0;
+        animate opacity { duration: 160ms; }
+        visible: cal-layer.opacity > 0.01;
+
+        Text {
+            text: root.progress-str;
+            color: Palette.accent;
+            font-size: 20px;
+            font-weight: 600;
+            x: 14px;
+            y: 0;
+            height: 100%;
+            vertical-alignment: center;
+        }
+        // progress track
+        Rectangle {
+            x: 0;
+            y: parent.height - 3px;
+            width: 100%;
+            height: 3px;
+            background: #ffffff10;
+            Rectangle {
+                x: 0; y: 0;
+                height: 100%;
+                width: parent.width * (root.progress / 100);
+                background: Palette.accent;
+                animate width { duration: 120ms; }
+            }
+        }
+    }
+
+    // ===== IDLE / PRECAL / ERROR / BOOTING: message =====
+    msg-layer := Rectangle {
+        opacity: (root.running || root.mode == HudMode.calibrating) ? 0 : 1;
+        animate opacity { duration: 160ms; }
+        visible: msg-layer.opacity > 0.01;
+
+        Text {
+            x: 12px;
+            width: parent.width - 24px;
+            height: 100%;
+            text: root.message;
+            color: root.mode == HudMode.error ? Palette.amber : Palette.text-secondary;
+            font-size: 13px;
+            font-weight: 500;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // ===== background interaction (drag + CTA) with control row as child =====
+    // As a TouchArea, hover-state propagates to children, so moving onto a
+    // control button keeps `hover.has-hover` true (no reveal/hide flicker).
+    hover := TouchArea {
+        clicked => {
+            if (root.mode == HudMode.precal) {
+                root.start-clicked();
+            }
+        }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down) {
+                root.bg-pressed();
+            }
+            if (ev.kind == PointerEventKind.up) {
+                root.bg-released();
+            }
+        }
+
+        // hover-revealed control row (running only)
+        Rectangle {
+            x: parent.width - 130px;
+            y: parent.height - 24px;
+            width: 124px;
+            height: 20px;
+            opacity: root.show-controls ? 1 : 0;
+            visible: self.opacity > 0.01;
+            animate opacity { duration: 140ms; }
+
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: end;
+                CtrlBtn { label: "−c"; clicked => { root.back-cycle(); } }
+                CtrlBtn { label: "RST"; clicked => { root.reset-clicked(); } }
+                CtrlBtn { label: "LAP"; strong: root.lap-str != ""; clicked => { root.lap-clicked(); } }
+                CtrlBtn { label: "+c"; clicked => { root.fwd-cycle(); } }
+            }
+        }
+    }
+}

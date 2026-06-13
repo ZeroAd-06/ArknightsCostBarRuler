@@ -387,7 +387,7 @@ mod platform {
         create_control(
             hwnd,
             "BUTTON",
-            "Cancel",
+            &state.i18n.tr("config.btn.cancel"),
             IDCANCEL.0,
             770,
             475,
@@ -764,7 +764,7 @@ mod platform {
             draw.hDC,
             &mut text,
             &mut text_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER,
         );
     }
 
@@ -841,12 +841,13 @@ mod platform {
                 state
                     .selected_candidate()
                     .and_then(|candidate| candidate.preview.as_ref()),
+                &state.i18n,
             );
         }
         let _ = EndPaint(hwnd, &paint);
     }
 
-    unsafe fn draw_preview(hdc: HDC, frame: Option<&PreviewFrame>) {
+    unsafe fn draw_preview(hdc: HDC, frame: Option<&PreviewFrame>, i18n: &I18n) {
         let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
         if !brush.0.is_null() {
             let _ = FillRect(hdc, &PREVIEW_RECT, brush);
@@ -854,15 +855,15 @@ mod platform {
         }
 
         let Some(frame) = frame else {
-            draw_preview_placeholder(hdc, "No preview");
+            draw_preview_placeholder(hdc, &i18n.tr("config.window.preview.unavailable"));
             return;
         };
         if frame.width == 0 || frame.height == 0 {
-            draw_preview_placeholder(hdc, "No preview");
+            draw_preview_placeholder(hdc, &i18n.tr("config.window.preview.unavailable"));
             return;
         }
         let Ok(buffer) = preview_bgr24_top_down(frame) else {
-            draw_preview_placeholder(hdc, "Preview error");
+            draw_preview_placeholder(hdc, &i18n.tr("config.window.preview.error"));
             return;
         };
 
@@ -947,7 +948,8 @@ mod platform {
         let packed_stride = frame
             .width
             .checked_mul(3)
-            .ok_or_else(|| "preview stride overflow".to_string())? as usize;
+            .ok_or_else(|| "preview stride overflow".to_string())?
+            as usize;
         let stride = (packed_stride + 3) & !3;
         let mut output = vec![0u8; stride * frame.height as usize];
         for y in 0..frame.height as usize {

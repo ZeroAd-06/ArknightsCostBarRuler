@@ -17,7 +17,13 @@ netstat2 = "0.11.2"
 sysinfo = "0.38.4"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_UI_HiDpi",
     "Win32_UI_Controls",
     "Win32_System_Com",

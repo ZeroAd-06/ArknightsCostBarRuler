@@ -32,7 +32,7 @@ mod platform {
             mpsc::{self, Receiver, Sender},
             Arc,
         },
-        thread,
+        thread::{self, JoinHandle},
         time::Duration,
     };
 
@@ -117,7 +117,7 @@ mod platform {
         probe_tx: Sender<ProbeMessage>,
         probe_rx: Receiver<ProbeMessage>,
         probe_generation: u64,
-        probe_stop_flags: Vec<Arc<AtomicBool>>,
+        probe_workers: Vec<ProbeWorker>,
         latency_samples: HashMap<String, VecDeque<Duration>>,
     }
 
@@ -126,6 +126,11 @@ mod platform {
         generation: u64,
         fingerprint: String,
         result: Result<(Duration, PreviewFrame), String>,
+    }
+
+    struct ProbeWorker {
+        stop: Arc<AtomicBool>,
+        handle: Option<JoinHandle<()>>,
     }
 
     impl WizardState {
@@ -147,7 +152,7 @@ mod platform {
                 probe_tx,
                 probe_rx,
                 probe_generation: 0,
-                probe_stop_flags: Vec::new(),
+                probe_workers: Vec::new(),
                 latency_samples: HashMap::new(),
             }
         }
@@ -160,6 +165,12 @@ mod platform {
         fn selected_fingerprint(&self) -> Option<String> {
             self.selected_candidate()
                 .map(|candidate| candidate.fingerprint.clone())
+        }
+    }
+
+    impl Drop for WizardState {
+        fn drop(&mut self) {
+            stop_probe_workers(self);
         }
     }
 
@@ -578,24 +589,36 @@ mod platform {
     }
 
     fn start_probe_workers(state: &mut WizardState) {
-        for candidate in &state.candidates {
+        let probes = state
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.fingerprint.clone(), candidate.config.clone()))
+            .collect::<Vec<_>>();
+
+        for (fingerprint, config) in probes {
             let stop = Arc::new(AtomicBool::new(false));
-            spawn_probe_worker(
-                candidate.fingerprint.clone(),
-                candidate.config.clone(),
+            match spawn_probe_worker(
+                fingerprint.clone(),
+                config,
                 state.probe_generation,
                 state.probe_tx.clone(),
                 Arc::clone(&stop),
-            );
-            state.probe_stop_flags.push(stop);
+            ) {
+                Ok(handle) => {
+                    state.probe_workers.push(ProbeWorker {
+                        stop,
+                        handle: Some(handle),
+                    });
+                }
+                Err(error) => {
+                    send_probe_error(&state.probe_tx, state.probe_generation, &fingerprint, error);
+                }
+            }
         }
     }
 
     fn stop_probe_workers(state: &mut WizardState) {
-        for stop in &state.probe_stop_flags {
-            stop.store(true, Ordering::Relaxed);
-        }
-        state.probe_stop_flags.clear();
+        stop_probe_worker_list(&mut state.probe_workers);
     }
 
     fn spawn_probe_worker(
@@ -604,11 +627,25 @@ mod platform {
         generation: u64,
         tx: Sender<ProbeMessage>,
         stop: Arc<AtomicBool>,
-    ) {
+    ) -> Result<JoinHandle<()>, String> {
         let name = format!("ruler-target-probe-{fingerprint}");
-        let _ = thread::Builder::new().name(name).spawn(move || {
-            run_probe_worker(fingerprint, config, generation, tx, stop);
-        });
+        thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                run_probe_worker(fingerprint, config, generation, tx, stop);
+            })
+            .map_err(|error| format!("failed to start probe worker: {error}"))
+    }
+
+    fn stop_probe_worker_list(workers: &mut Vec<ProbeWorker>) {
+        for worker in workers.iter() {
+            worker.stop.store(true, Ordering::Relaxed);
+        }
+        for mut worker in workers.drain(..) {
+            if let Some(handle) = worker.handle.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     fn run_probe_worker(
@@ -828,6 +865,7 @@ mod platform {
         config.target_fingerprint = Some(candidate.fingerprint.clone());
 
         state.result = Some(config);
+        stop_probe_workers(state);
         state.done = true;
         let _ = DestroyWindow(state.hwnd);
     }
@@ -982,6 +1020,7 @@ mod platform {
     }
 
     unsafe fn close_without_result(state: &mut WizardState) {
+        stop_probe_workers(state);
         state.result = None;
         state.done = true;
         let _ = DestroyWindow(state.hwnd);
@@ -1161,6 +1200,29 @@ mod platform {
             ]);
 
             assert_eq!(average_duration(&samples), Duration::from_millis(20));
+        }
+
+        #[test]
+        fn stop_probe_worker_list_sets_stop_flag_and_joins() {
+            let stop = Arc::new(AtomicBool::new(false));
+            let observed_stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = Arc::clone(&stop);
+            let worker_observed_stop = Arc::clone(&observed_stop);
+            let handle = thread::spawn(move || {
+                while !worker_stop.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                worker_observed_stop.store(true, Ordering::Relaxed);
+            });
+            let mut workers = vec![ProbeWorker {
+                stop,
+                handle: Some(handle),
+            }];
+
+            stop_probe_worker_list(&mut workers);
+
+            assert!(workers.is_empty());
+            assert!(observed_stop.load(Ordering::Relaxed));
         }
 
         #[test]

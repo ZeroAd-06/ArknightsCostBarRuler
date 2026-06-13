@@ -1,8 +1,8 @@
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use libloading::Library;
-use windows::core::HSTRING;
 
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame};
@@ -143,6 +143,21 @@ impl MuMuController {
     ];
 }
 
+fn mumu_ipc_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn ipc_guard() -> MutexGuard<'static, ()> {
+    mumu_ipc_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 // Dummy stubs for pre-connect initialization (never called in practice).
 // Must be extern "C" to match the CachedSymbols fn pointer types.
 unsafe extern "C" fn unsafe_fn_stub(_: *const u16, _: i32) -> i32 {
@@ -167,15 +182,18 @@ impl CaptureBackend for MuMuController {
     fn connect(&mut self) -> Result<(), String> {
         let (dll_path, resolved_root) = Self::find_dll(&self.install_path)?;
         self.install_path = resolved_root.to_string_lossy().into_owned();
+        let instance_index = i32::try_from(self.instance_index)
+            .map_err(|_| format!("MuMu instance index {} is too large", self.instance_index))?;
 
         let dll = unsafe { Library::new(&dll_path) }
             .map_err(|e| format!("Failed to load MuMu DLL '{}': {e}", dll_path.display()))?;
 
         let symbols = unsafe { Self::resolve_symbols(&dll)? };
 
-        let root_wide = HSTRING::from(self.install_path.clone());
+        let root_wide = wide_null(&self.install_path);
 
-        let handle = unsafe { (symbols.connect)(root_wide.as_ptr(), self.instance_index as i32) };
+        let _ipc = ipc_guard();
+        let handle = unsafe { (symbols.connect)(root_wide.as_ptr(), instance_index) };
         if handle == 0 {
             return Err(format!(
                 "Failed to connect to MuMu instance {}",
@@ -216,10 +234,12 @@ impl CaptureBackend for MuMuController {
         if ret != 0 {
             // Attempt disconnect before returning error
             unsafe { (symbols.disconnect)(handle) };
+            self.handle = 0;
             return Err(format!("Failed to query MuMu display dimensions: {ret}"));
         }
         if width <= 0 || height <= 0 {
             unsafe { (symbols.disconnect)(handle) };
+            self.handle = 0;
             return Err(format!(
                 "MuMu returned invalid dimensions: {width}x{height}"
             ));
@@ -250,13 +270,20 @@ impl CaptureBackend for MuMuController {
         }
 
         // Call cached function pointer directly — zero dlsym overhead.
-        let mut width = self.width as i32;
-        let mut height = self.height as i32;
+        let mut width = i32::try_from(self.width)
+            .map_err(|_| format!("MuMu frame width {} is too large", self.width))?;
+        let mut height = i32::try_from(self.height)
+            .map_err(|_| format!("MuMu frame height {} is too large", self.height))?;
+        let display_id = u32::try_from(self.display_id)
+            .map_err(|_| "MuMu display id is not initialized".to_string())?;
+        let buffer_size = i32::try_from(self.buffer.len())
+            .map_err(|_| "MuMu capture buffer is too large".to_string())?;
+        let _ipc = ipc_guard();
         let ret = unsafe {
             (self.symbols.capture_display)(
                 self.handle,
-                self.display_id as u32,
-                self.buffer.len() as i32,
+                display_id,
+                buffer_size,
                 &mut width,
                 &mut height,
                 self.buffer.as_mut_ptr(),
@@ -299,6 +326,7 @@ impl CaptureBackend for MuMuController {
 
     fn disconnect(&mut self) {
         if self.handle != 0 {
+            let _ipc = ipc_guard();
             unsafe { (self.symbols.disconnect)(self.handle) };
             self.handle = 0;
         }
@@ -327,5 +355,17 @@ mod tests {
     fn test_find_dll_returns_error_for_invalid_path() {
         let result = MuMuController::find_dll("C:\\nonexistent\\path");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn wide_null_appends_single_terminator() {
+        let encoded = wide_null("D:\\MuMu");
+
+        assert_eq!(encoded.last(), Some(&0));
+        assert_eq!(encoded.iter().filter(|&&unit| unit == 0).count(), 1);
+        assert_eq!(
+            String::from_utf16(&encoded[..encoded.len() - 1]).unwrap(),
+            "D:\\MuMu"
+        );
     }
 }

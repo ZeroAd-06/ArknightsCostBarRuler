@@ -50,6 +50,10 @@ pub mod win32 {
     const ID_TIMER_FORWARD_CYCLE: usize = 2204;
     const ID_ABOUT: usize = 2300;
     const ID_EXIT: usize = 2301;
+    const ID_SCALE_75: usize = 2400;
+    const ID_SCALE_100: usize = 2401;
+    const ID_SCALE_125: usize = 2402;
+    const ID_SCALE_150: usize = 2403;
     const ID_PROFILE_SELECT_BASE: usize = 3000;
     const ID_PROFILE_RENAME_BASE: usize = 4000;
     const ID_PROFILE_DELETE_BASE: usize = 5000;
@@ -112,6 +116,10 @@ pub mod win32 {
                 },
             ),
             ID_TIMER_FORWARD_CYCLE => adjust_cycle(command_tx, state, 1),
+            ID_SCALE_75 => send(command_tx, UiCommand::SetOverlayScale(0.75)),
+            ID_SCALE_100 => send(command_tx, UiCommand::SetOverlayScale(1.0)),
+            ID_SCALE_125 => send(command_tx, UiCommand::SetOverlayScale(1.25)),
+            ID_SCALE_150 => send(command_tx, UiCommand::SetOverlayScale(1.5)),
             ID_ABOUT => open_about_page(),
             ID_EXIT => send(command_tx, UiCommand::Exit),
             id if (ID_PROFILE_SELECT_BASE..ID_PROFILE_SELECT_BASE + 500).contains(&id) => {
@@ -207,6 +215,10 @@ pub mod win32 {
         if let Some(timer) = timer {
             append_timer_menu(timer, &snapshot.ui, i18n);
             append_cascade(menu, &i18n.tr("overlay.menu.timer"), timer);
+        }
+        if let Ok(scale) = CreatePopupMenu() {
+            append_scale_menu(scale, snapshot.ui.overlay_scale_pct);
+            append_cascade(menu, &i18n.tr("overlay.menu.scale"), scale);
         }
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -333,6 +345,17 @@ pub mod win32 {
     unsafe fn append_cascade(menu: HMENU, text: &str, submenu: HMENU) {
         let text = wide(text);
         let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(text.as_ptr()));
+    }
+
+    unsafe fn append_scale_menu(menu: HMENU, current_pct: u16) {
+        for (pct, id) in [
+            (75u16, ID_SCALE_75),
+            (100, ID_SCALE_100),
+            (125, ID_SCALE_125),
+            (150, ID_SCALE_150),
+        ] {
+            append_string(menu, id, &format!("{pct}%"), true, current_pct == pct);
+        }
     }
 
     unsafe fn append_string(menu: HMENU, id: usize, text: &str, enabled: bool, checked: bool) {

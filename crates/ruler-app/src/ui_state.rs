@@ -103,6 +103,7 @@ pub struct UiSnapshot {
     pub display_mode: FrameDisplayMode,
     pub profiles: Vec<ProfileMenuItem>,
     pub capture_dimensions: Option<(u32, u32)>,
+    pub overlay_scale_pct: u16,
     pub should_exit: bool,
 }
 
@@ -121,6 +122,7 @@ impl Default for UiSnapshot {
             display_mode: FrameDisplayMode::ZeroToNMinusOne,
             profiles: Vec::new(),
             capture_dimensions: None,
+            overlay_scale_pct: 100,
             should_exit: false,
         }
     }

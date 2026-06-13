@@ -51,6 +51,7 @@
     "overlay.menu.calibration": "校准配置",
     "overlay.menu.display": "帧数显示",
     "overlay.menu.timer": "调节计时器",
+    "overlay.menu.scale": "缩放",
     "overlay.menu.about": "{version} Z_06 作品",
     "overlay.menu.exit": "退出",
     "overlay.menu.new_profile": "-- 新建 --",

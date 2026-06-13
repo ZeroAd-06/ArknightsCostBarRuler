@@ -90,6 +90,12 @@ impl SharedAppState {
                     .as_deref()
                     .map(calibration_basename)
             });
+            state.ui.overlay_scale_pct = startup
+                .loaded_config
+                .as_ref()
+                .and_then(|config| config.overlay_scale)
+                .map(|mult| (mult * 100.0).round().clamp(50.0, 400.0) as u16)
+                .unwrap_or(100);
         }
         self.notify_overlay();
     }
@@ -461,6 +467,17 @@ fn handle_command(
                 Some(context.last_elapsed_frames)
             };
             publish_current_state(state, context);
+        }
+        UiCommand::SetOverlayScale(mult) => {
+            let pct = (mult * 100.0).round().clamp(50.0, 400.0) as u16;
+            context.config.overlay_scale = Some(mult);
+            let _ = context.config.save_to_path(&context.config_path);
+            state.update_ui(|ui, _| ui.overlay_scale_pct = pct);
+        }
+        UiCommand::SaveOverlayPlacement { x, y } => {
+            context.config.overlay_pos_x = Some(x);
+            context.config.overlay_pos_y = Some(y);
+            let _ = context.config.save_to_path(&context.config_path);
         }
         UiCommand::Exit => {
             running.store(false, Ordering::Relaxed);

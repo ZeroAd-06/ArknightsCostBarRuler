@@ -5,11 +5,30 @@ use std::{
 
 use crate::{commands::UiCommand, i18n::I18n, icons::IconSet, worker::SharedAppState};
 
+/// Initial overlay window placement, sourced from the persisted config.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OverlayPlacement {
+    pub pos: Option<(i32, i32)>,
+    pub scale_mult: f32,
+}
+
+impl OverlayPlacement {
+    #[must_use]
+    pub fn scale_or_default(self) -> f32 {
+        if self.scale_mult > 0.1 {
+            self.scale_mult
+        } else {
+            1.0
+        }
+    }
+}
+
 pub struct OverlayRuntime {
     state: Arc<SharedAppState>,
     command_tx: Sender<UiCommand>,
     i18n: Arc<I18n>,
     icons: Arc<IconSet>,
+    placement: OverlayPlacement,
 }
 
 impl fmt::Debug for OverlayRuntime {
@@ -27,12 +46,14 @@ impl OverlayRuntime {
         command_tx: Sender<UiCommand>,
         i18n: Arc<I18n>,
         icons: Arc<IconSet>,
+        placement: OverlayPlacement,
     ) -> Self {
         Self {
             state,
             command_tx,
             i18n,
             icons,
+            placement,
         }
     }
 
@@ -51,6 +72,7 @@ impl OverlayRuntime {
             self.command_tx.clone(),
             Arc::clone(&self.i18n),
             Arc::clone(&self.icons),
+            self.placement,
         )
     }
 }
@@ -89,6 +111,7 @@ mod platform {
         _: Sender<UiCommand>,
         _: Arc<I18n>,
         _: Arc<IconSet>,
+        _: super::OverlayPlacement,
     ) -> Result<(), OverlayError> {
         Err(OverlayError::new(
             "native overlay window is currently implemented for Windows only",
@@ -154,10 +177,11 @@ mod platform {
                     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW, SetTimer,
                     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
                     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, MSG,
-                    SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA,
-                    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN,
-                    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
-                    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+                    SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
+                    ULW_ALPHA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY,
+                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP,
+                    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                    WS_VISIBLE,
                 },
             },
         },
@@ -239,6 +263,8 @@ mod platform {
         buf_w: usize,
         buf_h: usize,
         scale: f32,
+        base_scale: f32,
+        scale_mult: f32,
         // pointer / drag bookkeeping
         mouse_down: bool,
         moved: bool,
@@ -251,8 +277,8 @@ mod platform {
     impl Drop for WindowState {
         fn drop(&mut self) {
             unsafe {
-                let _ = DeleteObject(HGDIOBJ(self.dib.0));
                 let _ = DeleteDC(self.mem_dc);
+                let _ = DeleteObject(HGDIOBJ(self.dib.0));
             }
         }
     }
@@ -262,6 +288,7 @@ mod platform {
         command_tx: Sender<UiCommand>,
         i18n: Arc<I18n>,
         _icons: Arc<IconSet>,
+        placement: super::OverlayPlacement,
     ) -> Result<(), OverlayError> {
         let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
         slint::platform::set_platform(Box::new(RulerPlatform {
@@ -273,7 +300,9 @@ mod platform {
         let hud = Hud::new()
             .map_err(|error| OverlayError::new(format!("failed to build HUD component: {error}")))?;
 
-        let (left, top, width, height, scale) = initial_geometry();
+        let scale_mult = placement.scale_or_default();
+        let (left, top, width, height, base_scale) = initial_geometry(placement.pos, scale_mult);
+        let scale = base_scale * scale_mult;
 
         // Drive layout at the fixed logical design size via the scale factor.
         window
@@ -332,6 +361,8 @@ mod platform {
                 buf_w: width as usize,
                 buf_h: height as usize,
                 scale,
+                base_scale,
+                scale_mult,
                 mouse_down: false,
                 moved: false,
                 drag_on_bg,
@@ -536,10 +567,16 @@ mod platform {
 
     unsafe fn tick(hwnd: HWND) {
         slint::platform::update_timers_and_animations();
-        let Some(state) = window_state(hwnd) else {
+        let Some(state) = window_state_mut(hwnd) else {
             return;
         };
         let snapshot = state.state.snapshot();
+
+        let want_mult = f32::from(snapshot.ui.overlay_scale_pct) / 100.0;
+        if (want_mult - state.scale_mult).abs() > 0.001 {
+            apply_scale(hwnd, state, want_mult);
+        }
+
         sync_properties(state, &snapshot.ui);
 
         let w = state.buf_w;
@@ -555,6 +592,42 @@ mod platform {
                 .state
                 .record_overlay_paint(snapshot.worker_timing.sample_index, Instant::now());
         }
+    }
+
+    unsafe fn apply_scale(hwnd: HWND, state: &mut WindowState, new_mult: f32) {
+        let effective = state.base_scale * new_mult;
+        let width = (LOGICAL_W * effective).round() as i32;
+        let height = (LOGICAL_H * effective).round() as i32;
+
+        // Rebuild the framebuffer DIB at the new physical size.
+        let _ = DeleteDC(state.mem_dc);
+        let _ = DeleteObject(HGDIOBJ(state.dib.0));
+        if let Some((mem_dc, dib, bits)) = create_dib(width, height) {
+            state.mem_dc = mem_dc;
+            state.dib = dib;
+            state.bits = bits;
+            state.buf_w = width as usize;
+            state.buf_h = height as usize;
+        }
+
+        state.scale = effective;
+        state.scale_mult = new_mult;
+        let _ = state
+            .window
+            .window()
+            .try_dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: effective,
+            });
+        state.window.set_size(PhysicalSize::new(width as u32, height as u32));
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
     }
 
     fn sync_properties(state: &WindowState, ui: &crate::ui_state::UiSnapshot) {
@@ -696,6 +769,13 @@ mod platform {
                 .window
                 .window()
                 .try_dispatch_event(WindowEvent::PointerExited);
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect).is_ok() {
+                let _ = state.command_tx.send(UiCommand::SaveOverlayPlacement {
+                    x: rect.left,
+                    y: rect.top,
+                });
+            }
         } else {
             let _ = state
                 .window
@@ -796,22 +876,35 @@ mod platform {
         }
     }
 
-    /// Returns `(left, top, width, height, scale)` in physical pixels.
-    /// Height is aligned to the legacy overlay footprint; the bar's width then
-    /// follows the fixed logical aspect ratio.
-    fn initial_geometry() -> (i32, i32, i32, i32, f32) {
+    /// Returns `(left, top, width, height, base_scale)` in physical pixels.
+    /// `base_scale` aligns the bar height to the legacy overlay footprint; the
+    /// effective scale is `base_scale * scale_mult`. A persisted `pos` is used
+    /// when present (clamped on-screen), otherwise it anchors bottom-right.
+    fn initial_geometry(
+        pos: Option<(i32, i32)>,
+        scale_mult: f32,
+    ) -> (i32, i32, i32, i32, f32) {
         unsafe {
             let screen_width = GetSystemMetrics(SM_CXSCREEN);
             let screen_height = GetSystemMetrics(SM_CYSCREEN);
             let (roi_x1, roi_x2, _) = find_cost_bar_roi(screen_width, screen_height);
             let cost_bar_pixel_length = (roi_x2 - roi_x1).abs().max(180);
             let legacy_height = (cost_bar_pixel_length * 5 / 6) * 27 / 50;
-            let scale = (legacy_height as f32 / LOGICAL_H).clamp(1.0, 4.0);
-            let width = (LOGICAL_W * scale).round() as i32;
-            let height = (LOGICAL_H * scale).round() as i32;
-            let left = (screen_width - width - 50).max(0);
-            let top = (screen_height - height - 100).max(0);
-            (left, top, width, height, scale)
+            let base_scale = (legacy_height as f32 / LOGICAL_H).clamp(1.0, 4.0);
+            let effective = base_scale * scale_mult;
+            let width = (LOGICAL_W * effective).round() as i32;
+            let height = (LOGICAL_H * effective).round() as i32;
+            let (left, top) = match pos {
+                Some((x, y)) => (
+                    x.clamp(0, (screen_width - width).max(0)),
+                    y.clamp(0, (screen_height - height).max(0)),
+                ),
+                None => (
+                    (screen_width - width - 50).max(0),
+                    (screen_height - height - 100).max(0),
+                ),
+            };
+            (left, top, width, height, base_scale)
         }
     }
 

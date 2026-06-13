@@ -11,7 +11,7 @@ use crate::{
     config_wizard::run_config_wizard,
     i18n::I18n,
     icons::IconSet,
-    overlay::OverlayRuntime,
+    overlay::{OverlayPlacement, OverlayRuntime},
     resources::ResourceLocator,
     target_discovery::{discover_targets, probe_candidate_once},
     tray::TrayRuntime,
@@ -42,12 +42,24 @@ impl RulerApp {
         state.update_startup_status(&startup_status);
 
         let icons = Arc::new(IconSet::load(&resources));
+        let placement = startup_status
+            .loaded_config
+            .as_ref()
+            .map(|config| OverlayPlacement {
+                pos: match (config.overlay_pos_x, config.overlay_pos_y) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    _ => None,
+                },
+                scale_mult: config.overlay_scale.unwrap_or(1.0),
+            })
+            .unwrap_or_default();
         let (command_tx, command_rx) = mpsc::channel();
         let overlay = OverlayRuntime::new(
             Arc::clone(&state),
             command_tx.clone(),
             Arc::clone(&i18n),
             Arc::clone(&icons),
+            placement,
         );
         let tray = TrayRuntime::new(
             Arc::clone(&state),
@@ -242,5 +254,8 @@ fn try_auto_select_config(config: &RulerConfig) -> Result<Option<RulerConfig>, S
     selected.active_calibration_profile = config.active_calibration_profile.clone();
     selected.frame_display_mode = config.frame_display_mode.clone();
     selected.language = config.language.clone();
+    selected.overlay_pos_x = config.overlay_pos_x;
+    selected.overlay_pos_y = config.overlay_pos_y;
+    selected.overlay_scale = config.overlay_scale;
     Ok(Some(selected))
 }

@@ -584,6 +584,9 @@ mod platform {
                 .or_else(|| Some("zh_CN".to_string())),
             auto_select_target: false,
             target_fingerprint: Some(fingerprint.to_string()),
+            overlay_pos_x: previous.and_then(|config| config.overlay_pos_x),
+            overlay_pos_y: previous.and_then(|config| config.overlay_pos_y),
+            overlay_scale: previous.and_then(|config| config.overlay_scale),
         }
     }
 

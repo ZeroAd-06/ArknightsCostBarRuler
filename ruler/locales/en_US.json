@@ -51,6 +51,7 @@
     "overlay.menu.calibration": "Calibration",
     "overlay.menu.display": "Frame Display",
     "overlay.menu.timer": "Adjust Timer",
+    "overlay.menu.scale": "Scale",
     "overlay.menu.about": "{version} by Z_06",
     "overlay.menu.exit": "Exit",
     "overlay.menu.new_profile": "-- New --",

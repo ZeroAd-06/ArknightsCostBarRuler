@@ -1,6 +1,6 @@
 use crate::ui_state::FrameDisplayMode;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum UiCommand {
     PrepareCalibration,
     StartCalibration,
@@ -21,5 +21,12 @@ pub enum UiCommand {
     },
     ResetTimer,
     ToggleLapTimer,
+    /// Persist the overlay scale multiplier (1.0 == 100%).
+    SetOverlayScale(f32),
+    /// Persist the overlay window position (screen pixels).
+    SaveOverlayPlacement {
+        x: i32,
+        y: i32,
+    },
     Exit,
 }

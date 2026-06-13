@@ -33,6 +33,14 @@ pub struct RulerConfig {
     pub auto_select_target: bool,
     #[serde(default)]
     pub target_fingerprint: Option<String>,
+    /// Overlay window top-left in screen pixels (persisted across runs).
+    #[serde(default)]
+    pub overlay_pos_x: Option<i32>,
+    #[serde(default)]
+    pub overlay_pos_y: Option<i32>,
+    /// Overlay scale multiplier (1.0 == 100%, the height-aligned default).
+    #[serde(default)]
+    pub overlay_scale: Option<f32>,
 }
 
 impl RulerConfig {

@@ -57,6 +57,18 @@ impl Platform for PreviewPlatform {
     }
 }
 
+fn register_fonts() {
+    use slint::fontique_08::fontique::Blob;
+    let mut collection = slint::fontique_08::shared_collection();
+    for face in [
+        include_bytes!("../assets/fonts/Bender-Regular.otf").as_slice(),
+        include_bytes!("../assets/fonts/Bender-Bold.otf").as_slice(),
+        include_bytes!("../assets/fonts/Bender-Black.otf").as_slice(),
+    ] {
+        let _ = collection.register_fonts(Blob::new(std::sync::Arc::new(face.to_vec())), None);
+    }
+}
+
 fn render_png(window: &Rc<MinimalSoftwareWindow>, w: usize, h: usize, path: &str) {
     let mut buffer = vec![PreviewPixel::from_rgb(64, 74, 68); w * h];
     // Pump real time so opacity cross-fades settle before we capture.
@@ -81,7 +93,7 @@ fn render_png(window: &Rc<MinimalSoftwareWindow>, w: usize, h: usize, path: &str
 
 fn main() {
     let scale = 2.5_f32;
-    let w = (232.0 * scale).round() as usize;
+    let w = (210.0 * scale).round() as usize;
     let h = (56.0 * scale).round() as usize;
 
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
@@ -89,6 +101,7 @@ fn main() {
         window: window.clone(),
     }))
     .unwrap();
+    register_fonts();
 
     let hud = Hud::new().unwrap();
     window
@@ -108,6 +121,11 @@ fn main() {
     hud.set_lap_str("48".into());
     hud.set_cost_negative(false);
     render_png(&window, w, h, "hud_running.png");
+
+    // Running with hover control toolbar revealed
+    hud.set_force_controls(true);
+    render_png(&window, w, h, "hud_controls.png");
+    hud.set_force_controls(false);
 
     // Negative-cost running
     hud.set_total_str("/30".into());

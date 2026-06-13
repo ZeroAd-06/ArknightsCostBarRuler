@@ -64,7 +64,7 @@
     "overlay.timer.fwd_1s": "> 前进 1 秒",
     "overlay.timer.fwd_frames": "> 前进 {frames} 帧",
     "overlay.msg.idle": "右键托盘或窗口\n选择一个配置",
-    "overlay.msg.pre_cal": "进入关卡后\n点击左侧校准",
+    "overlay.msg.pre_cal": "进入关卡后\n点击此处校准",
     "overlay.dialog.rename.title": "重命名",
     "overlay.dialog.rename.prompt": "为 '{old_basename}' 输入新名称:",
     "overlay.dialog.delete.title": "确认删除",

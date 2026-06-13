@@ -21,26 +21,37 @@ global Palette {
     out property <color> text-primary: #eef6fb;
     out property <color> text-secondary: #7d93a6;
     out property <color> text-faint: #54677a;
+    out property <color> toolbar: #0d1117f5;
 }
 
-// --- small control button (hover-revealed row) ---------------------------
+// Material-style outlined icon paths (24x24 viewbox, stroked).
+global Icons {
+    out property <string> prev: "M16 6 L8 12 L16 18 M7 6 L7 18";
+    out property <string> next: "M8 6 L16 12 L8 18 M17 6 L17 18";
+    out property <string> flag: "M7 4 L7 20 M7 5 L16 8 L7 11";
+    out property <string> reset: "M5 12 A7 7 0 1 0 8.5 6 M8.5 6 L5 5.5 M8.5 6 L8 9.5";
+}
+
+// --- small icon control button (hover-revealed toolbar) ------------------
 component CtrlBtn inherits Rectangle {
-    in property <string> label;
+    in property <string> icon;
     in property <bool> strong: false;
     callback clicked;
-    width: 26px;
-    height: 18px;
-    border-width: 1px;
-    border-color: ta.has-hover ? Palette.accent : #ffffff14;
-    background: ta.has-hover ? #ffffff1a : #ffffff08;
-    animate background, border-color { duration: 110ms; }
-    Text {
-        text: root.label;
-        color: root.strong ? Palette.amber : (ta.has-hover ? Palette.text-primary : Palette.text-secondary);
-        font-size: 11px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    width: 24px;
+    height: 20px;
+    background: ta.has-hover ? #ffffff26 : #ffffff00;
+    animate background { duration: 110ms; }
+    Path {
+        width: 15px;
+        height: 15px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon;
+        stroke: root.strong ? Palette.amber : (ta.has-hover ? Palette.text-primary : Palette.text-secondary);
+        stroke-width: 2px;
+        fill: transparent;
     }
     ta := TouchArea {
         clicked => { root.clicked(); }
@@ -58,6 +69,7 @@ export component Hud inherits Window {
     in property <float> progress: 0;          // 0..100 during calibration
     in property <string> progress-str: "0%";
     in property <string> message: "";
+    in property <bool> force-controls: false; // preview/debug only
 
     // ---- outputs ----
     callback start-clicked();
@@ -69,12 +81,12 @@ export component Hud inherits Window {
     callback bg-released();
 
     background: transparent;
-    // default logical design size; Rust drives the real size via scale factor
-    preferred-width: 232px;
+    default-font-family: "Bender";
+    preferred-width: 210px;
     preferred-height: 56px;
 
     property <bool> running: root.mode == HudMode.running;
-    property <bool> show-controls: hover.has-hover && root.running;
+    property <bool> show-controls: (hover.has-hover || root.force-controls) && root.running;
 
     // ---- panel ----
     Rectangle {
@@ -95,61 +107,60 @@ export component Hud inherits Window {
         animate background { duration: 200ms; }
     }
 
-    // ===== RUNNING: timer hero + secondary cluster =====
+    // ===== RUNNING: timer hero + secondary cluster (packed left, no gap) =====
     running-layer := Rectangle {
         opacity: root.running ? 1 : 0;
         animate opacity { duration: 160ms; }
         visible: running-layer.opacity > 0.01;
 
-        // hero timer
-        Text {
-            x: 14px;
-            y: 0;
-            height: 100%;
-            text: root.time-str;
-            color: Palette.text-primary;
-            font-size: 30px;
-            font-weight: 600;
-            vertical-alignment: center;
-            horizontal-alignment: left;
-        }
+        HorizontalLayout {
+            padding-left: 13px;
+            padding-right: 12px;
+            spacing: 13px;
+            alignment: start;
 
-        // secondary cluster (cost frame + lap), right aligned
-        VerticalLayout {
-            x: parent.width - 78px;
-            width: 70px;
-            y: 0;
-            height: 100%;
-            padding-top: 7px;
-            padding-bottom: 7px;
-            alignment: center;
-            spacing: 1px;
-
-            HorizontalLayout {
-                alignment: end;
-                spacing: 0px;
-                Text {
-                    text: root.frame-str;
-                    color: Palette.text-primary;
-                    font-size: 17px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: root.total-str;
-                    color: root.cost-negative ? Palette.amber : Palette.text-secondary;
-                    font-size: 12px;
-                    font-weight: 500;
-                    vertical-alignment: bottom;
-                }
-            }
+            // hero timer
             Text {
-                visible: root.lap-str != "";
-                text: "+" + root.lap-str;
-                color: Palette.amber;
-                font-size: 11px;
-                font-weight: 600;
-                horizontal-alignment: right;
+                text: root.time-str;
+                color: Palette.text-primary;
+                font-size: 30px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            // secondary cluster (cost frame + lap) — dims out while the
+            // hover toolbar is shown so the two don't clash.
+            VerticalLayout {
+                alignment: center;
+                spacing: 0px;
+                opacity: root.show-controls ? 0 : 1;
+                animate opacity { duration: 140ms; }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 0px;
+                    Text {
+                        text: root.frame-str;
+                        color: Palette.text-primary;
+                        font-size: 18px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.total-str;
+                        color: root.cost-negative ? Palette.amber : Palette.text-secondary;
+                        font-size: 12px;
+                        font-weight: 500;
+                        vertical-alignment: bottom;
+                    }
+                }
+                Text {
+                    visible: root.lap-str != "";
+                    text: "+" + root.lap-str;
+                    color: Palette.amber;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: left;
+                }
             }
         }
     }
@@ -164,13 +175,12 @@ export component Hud inherits Window {
             text: root.progress-str;
             color: Palette.accent;
             font-size: 20px;
-            font-weight: 600;
-            x: 14px;
+            font-weight: 700;
+            x: 13px;
             y: 0;
             height: 100%;
             vertical-alignment: center;
         }
-        // progress track
         Rectangle {
             x: 0;
             y: parent.height - 3px;
@@ -207,9 +217,9 @@ export component Hud inherits Window {
         }
     }
 
-    // ===== background interaction (drag + CTA) with control row as child =====
+    // ===== background interaction (drag + CTA), control toolbar as child =====
     // As a TouchArea, hover-state propagates to children, so moving onto a
-    // control button keeps `hover.has-hover` true (no reveal/hide flicker).
+    // button keeps `hover.has-hover` true (no reveal/hide flicker).
     hover := TouchArea {
         clicked => {
             if (root.mode == HudMode.precal) {
@@ -225,23 +235,27 @@ export component Hud inherits Window {
             }
         }
 
-        // hover-revealed control row (running only)
+        // hover-revealed control toolbar (running only), solid background.
         Rectangle {
-            x: parent.width - 130px;
-            y: parent.height - 24px;
-            width: 124px;
-            height: 20px;
+            width: 108px;
+            height: 24px;
+            x: parent.width - self.width - 4px;
+            y: parent.height - self.height - 4px;
+            background: Palette.toolbar;
+            border-width: 1px;
+            border-color: Palette.hairline;
             opacity: root.show-controls ? 1 : 0;
             visible: self.opacity > 0.01;
             animate opacity { duration: 140ms; }
 
             HorizontalLayout {
-                spacing: 4px;
-                alignment: end;
-                CtrlBtn { label: "−c"; clicked => { root.back-cycle(); } }
-                CtrlBtn { label: "RST"; clicked => { root.reset-clicked(); } }
-                CtrlBtn { label: "LAP"; strong: root.lap-str != ""; clicked => { root.lap-clicked(); } }
-                CtrlBtn { label: "+c"; clicked => { root.fwd-cycle(); } }
+                padding: 2px;
+                spacing: 2px;
+                alignment: center;
+                CtrlBtn { icon: Icons.prev; clicked => { root.back-cycle(); } }
+                CtrlBtn { icon: Icons.reset; clicked => { root.reset-clicked(); } }
+                CtrlBtn { icon: Icons.flag; strong: root.lap-str != ""; clicked => { root.lap-clicked(); } }
+                CtrlBtn { icon: Icons.next; clicked => { root.fwd-cycle(); } }
             }
         }
     }

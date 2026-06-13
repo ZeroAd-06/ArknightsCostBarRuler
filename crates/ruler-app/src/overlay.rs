@@ -192,7 +192,7 @@ mod platform {
     const WM_OVERLAY_WAKE: u32 = WM_APP + 2;
 
     // Fixed logical design size of `hud.slint`. Physical size = logical * scale.
-    const LOGICAL_W: f32 = 232.0;
+    const LOGICAL_W: f32 = 210.0;
     const LOGICAL_H: f32 = 56.0;
 
     /// Premultiplied BGRA pixel, the exact layout `UpdateLayeredWindow` expects
@@ -290,12 +290,16 @@ mod platform {
         _icons: Arc<IconSet>,
         placement: super::OverlayPlacement,
     ) -> Result<(), OverlayError> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        // NewBuffer = full repaint each frame. The HUD is tiny, and it avoids
+        // partial-repaint residue (stale glyph fragments when text shrinks)
+        // that ReusedBuffer can leave on a per-pixel-alpha layered window.
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(RulerPlatform {
             window: window.clone(),
             start: Instant::now(),
         }))
         .map_err(|error| OverlayError::new(format!("set_platform failed: {error:?}")))?;
+        crate::fonts::register_bundled_fonts();
 
         let hud = Hud::new()
             .map_err(|error| OverlayError::new(format!("failed to build HUD component: {error}")))?;
@@ -503,11 +507,19 @@ mod platform {
                 let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &paint);
                 LRESULT(0)
             }
-            WM_OVERLAY_WAKE | WM_TIMER => {
+            WM_TIMER => {
                 if should_exit(hwnd) {
                     let _ = DestroyWindow(hwnd);
                 } else {
                     tick(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_OVERLAY_WAKE => {
+                // Worker notifications can arrive at ~1 kHz; rendering is
+                // throttled to the 16 ms timer, so only act on a prompt exit.
+                if should_exit(hwnd) {
+                    let _ = DestroyWindow(hwnd);
                 }
                 LRESULT(0)
             }

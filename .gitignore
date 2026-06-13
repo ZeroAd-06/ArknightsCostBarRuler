@@ -24,4 +24,4 @@ calibration/
 calibration_data_*.json
 
 # --- HUD preview output (examples/hud_preview) ---
-crates/ruler-app/hud_*.png
+hud_*.png

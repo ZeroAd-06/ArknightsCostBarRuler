@@ -1,6 +1,11 @@
 //! Registers the bundled Bender font (SIL OFL 1.1) into Slint's shared font
 //! collection so the HUD can use `font-family: "Bender"`. CJK glyphs fall back
 //! to system fonts via fontique. Must be called after `set_platform`.
+//!
+//! The bundled faces are a modified copy: the digit glyphs (0-9) were given a
+//! uniform advance (centered into the width of `0`) so the timer reads as
+//! tabular and stops jittering. The software renderer ignores OpenType `tnum`,
+//! so this has to be baked into the font — see `scripts/mono_digits.py`.
 
 const BENDER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Bender-Regular.otf");
 const BENDER_BOLD: &[u8] = include_bytes!("../assets/fonts/Bender-Bold.otf");

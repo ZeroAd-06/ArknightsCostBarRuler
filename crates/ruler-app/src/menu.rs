@@ -1,383 +1,34 @@
-use std::{
-    ffi::c_void,
-    iter,
-    sync::{mpsc::Sender, Arc},
-};
-
-use crate::{
-    commands::UiCommand,
-    i18n::I18n,
-    ui_state::{FrameDisplayMode, FRAMES_PER_SECOND, VERSION},
-    worker::SharedAppState,
-};
+//! Native modal dialogs used by the overlay: the rename text-input prompt, the
+//! delete confirmation, an error message box, and the "about" page launcher.
+//!
+//! The right-click menu itself is now a Slint popup (see `overlay.rs`); only
+//! these blocking dialogs remain native for the moment.
 
 #[cfg(windows)]
 pub mod win32 {
-    use super::*;
+    use std::{ffi::c_void, iter};
+
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+            Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
             System::LibraryLoader::GetModuleHandleW,
             UI::{
                 Shell::ShellExecuteW,
                 WindowsAndMessaging::{
-                    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
-                    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, MessageBoxW,
-                    PostMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW,
-                    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, BS_DEFPUSHBUTTON,
-                    BS_PUSHBUTTON, ES_AUTOHSCROLL, GWLP_USERDATA, HMENU, IDCANCEL, IDOK, IDYES,
-                    MB_ICONWARNING, MB_OK, MB_YESNO, MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_POPUP,
-                    MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE,
-                    SWP_NOZORDER, SW_SHOW, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-                    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
-                    WM_CREATE, WM_DESTROY, WM_NCCREATE, WM_NULL, WNDCLASSW, WS_BORDER, WS_CAPTION,
+                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+                    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
+                    MessageBoxW, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                    TranslateMessage, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW,
+                    ES_AUTOHSCROLL, GWLP_USERDATA, HMENU, IDCANCEL, IDOK, IDYES, MB_ICONWARNING,
+                    MB_OK, MB_YESNO, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER,
+                    SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CAPTION,
                     WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+                    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NCCREATE, WNDCLASSW,
                 },
             },
         },
     };
-
-    const ID_NEW_PROFILE: usize = 2000;
-    const ID_DISPLAY_ZERO_TO_N_MINUS_ONE: usize = 2100;
-    const ID_DISPLAY_ZERO_TO_N: usize = 2101;
-    const ID_DISPLAY_ONE_TO_N: usize = 2102;
-    const ID_TIMER_BACK_CYCLE: usize = 2200;
-    const ID_TIMER_BACK_SECOND: usize = 2201;
-    const ID_TIMER_RESET: usize = 2202;
-    const ID_TIMER_FORWARD_SECOND: usize = 2203;
-    const ID_TIMER_FORWARD_CYCLE: usize = 2204;
-    const ID_ABOUT: usize = 2300;
-    const ID_EXIT: usize = 2301;
-    const ID_SCALE_75: usize = 2400;
-    const ID_SCALE_100: usize = 2401;
-    const ID_SCALE_125: usize = 2402;
-    const ID_SCALE_150: usize = 2403;
-    const ID_PROFILE_SELECT_BASE: usize = 3000;
-    const ID_PROFILE_RENAME_BASE: usize = 4000;
-    const ID_PROFILE_DELETE_BASE: usize = 5000;
-
-    pub unsafe fn show_context_menu(hwnd: HWND, state: &SharedAppState, i18n: &I18n) {
-        let Ok(menu) = CreatePopupMenu() else {
-            return;
-        };
-        append_root_menu(menu, state, i18n);
-
-        let mut cursor = POINT::default();
-        let _ = GetCursorPos(&mut cursor);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
-            cursor.x,
-            cursor.y,
-            0,
-            hwnd,
-            None,
-        );
-        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-    }
-
-    pub unsafe fn handle_menu_command(
-        hwnd: HWND,
-        command_id: usize,
-        state: &Arc<SharedAppState>,
-        command_tx: &Sender<UiCommand>,
-        i18n: &I18n,
-    ) {
-        match command_id {
-            ID_NEW_PROFILE => send(command_tx, UiCommand::PrepareCalibration),
-            ID_DISPLAY_ZERO_TO_N_MINUS_ONE => send(
-                command_tx,
-                UiCommand::SetDisplayMode(FrameDisplayMode::ZeroToNMinusOne),
-            ),
-            ID_DISPLAY_ZERO_TO_N => send(
-                command_tx,
-                UiCommand::SetDisplayMode(FrameDisplayMode::ZeroToN),
-            ),
-            ID_DISPLAY_ONE_TO_N => send(
-                command_tx,
-                UiCommand::SetDisplayMode(FrameDisplayMode::OneToN),
-            ),
-            ID_TIMER_BACK_CYCLE => adjust_cycle(command_tx, state, -1),
-            ID_TIMER_BACK_SECOND => send(
-                command_tx,
-                UiCommand::AdjustTimer {
-                    frames: -FRAMES_PER_SECOND,
-                },
-            ),
-            ID_TIMER_RESET => send(command_tx, UiCommand::ResetTimer),
-            ID_TIMER_FORWARD_SECOND => send(
-                command_tx,
-                UiCommand::AdjustTimer {
-                    frames: FRAMES_PER_SECOND,
-                },
-            ),
-            ID_TIMER_FORWARD_CYCLE => adjust_cycle(command_tx, state, 1),
-            ID_SCALE_75 => send(command_tx, UiCommand::SetOverlayScale(0.75)),
-            ID_SCALE_100 => send(command_tx, UiCommand::SetOverlayScale(1.0)),
-            ID_SCALE_125 => send(command_tx, UiCommand::SetOverlayScale(1.25)),
-            ID_SCALE_150 => send(command_tx, UiCommand::SetOverlayScale(1.5)),
-            ID_ABOUT => open_about_page(),
-            ID_EXIT => send(command_tx, UiCommand::Exit),
-            id if (ID_PROFILE_SELECT_BASE..ID_PROFILE_SELECT_BASE + 500).contains(&id) => {
-                if let Some(profile) = state
-                    .snapshot()
-                    .ui
-                    .profiles
-                    .get(id - ID_PROFILE_SELECT_BASE)
-                {
-                    send(
-                        command_tx,
-                        UiCommand::UseProfile {
-                            filename: profile.filename.clone(),
-                        },
-                    );
-                }
-            }
-            id if (ID_PROFILE_RENAME_BASE..ID_PROFILE_RENAME_BASE + 500).contains(&id) => {
-                if let Some(profile) = state
-                    .snapshot()
-                    .ui
-                    .profiles
-                    .get(id - ID_PROFILE_RENAME_BASE)
-                    .cloned()
-                {
-                    let prompt = i18n.tr_with(
-                        "overlay.dialog.rename.prompt",
-                        &[("old_basename", profile.basename.clone())],
-                    );
-                    if let Some(new_base) = prompt_text(
-                        hwnd,
-                        &i18n.tr("overlay.dialog.rename.title"),
-                        &prompt,
-                        &profile.basename,
-                    ) {
-                        if new_base.trim().is_empty() {
-                            show_message(
-                                hwnd,
-                                &i18n.tr("overlay.error.name_empty.title"),
-                                &i18n.tr("overlay.error.name_empty"),
-                            );
-                        } else {
-                            send(
-                                command_tx,
-                                UiCommand::RenameProfile {
-                                    old: profile.filename,
-                                    new_base,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-            id if (ID_PROFILE_DELETE_BASE..ID_PROFILE_DELETE_BASE + 500).contains(&id) => {
-                if let Some(profile) = state
-                    .snapshot()
-                    .ui
-                    .profiles
-                    .get(id - ID_PROFILE_DELETE_BASE)
-                {
-                    let message = i18n.tr_with(
-                        "overlay.dialog.delete.msg",
-                        &[("basename", profile.basename.clone())],
-                    );
-                    if confirm(hwnd, &i18n.tr("overlay.dialog.delete.title"), &message) {
-                        send(
-                            command_tx,
-                            UiCommand::DeleteProfile {
-                                filename: profile.filename.clone(),
-                            },
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    unsafe fn append_root_menu(menu: HMENU, state: &SharedAppState, i18n: &I18n) {
-        let snapshot = state.snapshot();
-        let calibration = CreatePopupMenu().ok();
-        let display = CreatePopupMenu().ok();
-        let timer = CreatePopupMenu().ok();
-
-        if let Some(calibration) = calibration {
-            append_profile_menu(calibration, &snapshot.ui, i18n);
-            append_cascade(menu, &i18n.tr("overlay.menu.calibration"), calibration);
-        }
-        if let Some(display) = display {
-            append_display_menu(display, snapshot.ui.display_mode);
-            append_cascade(menu, &i18n.tr("overlay.menu.display"), display);
-        }
-        if let Some(timer) = timer {
-            append_timer_menu(timer, &snapshot.ui, i18n);
-            append_cascade(menu, &i18n.tr("overlay.menu.timer"), timer);
-        }
-        if let Ok(scale) = CreatePopupMenu() {
-            append_scale_menu(scale, snapshot.ui.overlay_scale_pct);
-            append_cascade(menu, &i18n.tr("overlay.menu.scale"), scale);
-        }
-
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        append_string(
-            menu,
-            ID_ABOUT,
-            &i18n.tr_with("overlay.menu.about", &[("version", VERSION.to_string())]),
-            true,
-            false,
-        );
-        append_string(menu, ID_EXIT, &i18n.tr("overlay.menu.exit"), true, false);
-    }
-
-    unsafe fn append_profile_menu(menu: HMENU, ui: &crate::ui_state::UiSnapshot, i18n: &I18n) {
-        append_string(
-            menu,
-            ID_NEW_PROFILE,
-            &i18n.tr("overlay.menu.new_profile"),
-            true,
-            false,
-        );
-        if !ui.profiles.is_empty() {
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        }
-        for (index, profile) in ui.profiles.iter().enumerate() {
-            let Ok(actions) = CreatePopupMenu() else {
-                continue;
-            };
-            append_string(
-                actions,
-                ID_PROFILE_SELECT_BASE + index,
-                &i18n.tr("overlay.menu.select"),
-                !profile.is_active,
-                false,
-            );
-            append_string(
-                actions,
-                ID_PROFILE_RENAME_BASE + index,
-                &i18n.tr("overlay.menu.rename"),
-                true,
-                false,
-            );
-            append_string(
-                actions,
-                ID_PROFILE_DELETE_BASE + index,
-                &i18n.tr("overlay.menu.delete"),
-                true,
-                false,
-            );
-            let prefix = if profile.is_active { "● " } else { "" };
-            append_cascade(
-                menu,
-                &format!(
-                    "{prefix}{} ({})",
-                    profile.basename, profile.total_frames_str
-                ),
-                actions,
-            );
-        }
-    }
-
-    unsafe fn append_display_menu(menu: HMENU, current: FrameDisplayMode) {
-        for (mode, id) in [
-            (
-                FrameDisplayMode::ZeroToNMinusOne,
-                ID_DISPLAY_ZERO_TO_N_MINUS_ONE,
-            ),
-            (FrameDisplayMode::ZeroToN, ID_DISPLAY_ZERO_TO_N),
-            (FrameDisplayMode::OneToN, ID_DISPLAY_ONE_TO_N),
-        ] {
-            append_string(menu, id, mode.label(), true, current == mode);
-        }
-    }
-
-    unsafe fn append_timer_menu(menu: HMENU, ui: &crate::ui_state::UiSnapshot, i18n: &I18n) {
-        let enabled = ui.active_profile.is_some();
-        let cycle_frames = ui.total_frames_in_cycle;
-        append_string(
-            menu,
-            ID_TIMER_BACK_CYCLE,
-            &i18n.tr_with(
-                "overlay.timer.back_frames",
-                &[("frames", cycle_frames.to_string())],
-            ),
-            enabled,
-            false,
-        );
-        append_string(
-            menu,
-            ID_TIMER_BACK_SECOND,
-            &i18n.tr("overlay.timer.back_1s"),
-            enabled,
-            false,
-        );
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        append_string(
-            menu,
-            ID_TIMER_RESET,
-            &i18n.tr("overlay.timer.reset"),
-            enabled,
-            false,
-        );
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        append_string(
-            menu,
-            ID_TIMER_FORWARD_SECOND,
-            &i18n.tr("overlay.timer.fwd_1s"),
-            enabled,
-            false,
-        );
-        append_string(
-            menu,
-            ID_TIMER_FORWARD_CYCLE,
-            &i18n.tr_with(
-                "overlay.timer.fwd_frames",
-                &[("frames", cycle_frames.to_string())],
-            ),
-            enabled,
-            false,
-        );
-    }
-
-    unsafe fn append_cascade(menu: HMENU, text: &str, submenu: HMENU) {
-        let text = wide(text);
-        let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(text.as_ptr()));
-    }
-
-    unsafe fn append_scale_menu(menu: HMENU, current_pct: u16) {
-        for (pct, id) in [
-            (75u16, ID_SCALE_75),
-            (100, ID_SCALE_100),
-            (125, ID_SCALE_125),
-            (150, ID_SCALE_150),
-        ] {
-            append_string(menu, id, &format!("{pct}%"), true, current_pct == pct);
-        }
-    }
-
-    unsafe fn append_string(menu: HMENU, id: usize, text: &str, enabled: bool, checked: bool) {
-        let mut flags = MF_STRING;
-        if !enabled {
-            flags |= MF_DISABLED | MF_GRAYED;
-        }
-        if checked {
-            flags |= MF_CHECKED;
-        }
-        let text = wide(text);
-        let _ = AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()));
-    }
-
-    fn send(command_tx: &Sender<UiCommand>, command: UiCommand) {
-        let _ = command_tx.send(command);
-    }
-
-    fn adjust_cycle(command_tx: &Sender<UiCommand>, state: &SharedAppState, direction: i32) {
-        let frames = state.snapshot().ui.total_frames_in_cycle * direction;
-        send(command_tx, UiCommand::AdjustTimer { frames });
-    }
 
     pub unsafe fn open_about_page() {
         let operation = wide("open");
@@ -460,8 +111,7 @@ pub mod win32 {
     ) -> LRESULT {
         match message {
             WM_NCCREATE => {
-                let create_struct =
-                    lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
+                let create_struct = lparam.0 as *const CREATESTRUCTW;
                 let state_ptr = (*create_struct).lpCreateParams as *mut InputDialogState;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
                 LRESULT(1)
@@ -574,6 +224,7 @@ pub mod win32 {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn create_dialog_control(
         parent: HWND,
         class_name: &str,
@@ -654,12 +305,7 @@ pub mod win32 {
     pub unsafe fn show_message(hwnd: HWND, title: &str, message: &str) {
         let title = wide(title);
         let message = wide(message);
-        let _ = MessageBoxW(
-            hwnd,
-            PCWSTR(message.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OK,
-        );
+        let _ = MessageBoxW(hwnd, PCWSTR(message.as_ptr()), PCWSTR(title.as_ptr()), MB_OK);
     }
 
     fn wide(value: &str) -> Vec<u16> {

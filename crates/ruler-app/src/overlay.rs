@@ -152,6 +152,7 @@ mod platform {
         i18n::I18n,
         icons::IconSet,
         menu,
+        tray,
         ui::{Hud, HudMode, ProfileRow, RulerMenu},
         ui_state::{FrameDisplayMode, OverlayMode},
         worker::SharedAppState,
@@ -172,15 +173,16 @@ mod platform {
                     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
                     VK_ESCAPE,
                 },
+                Shell::NOTIFYICONDATAW,
                 WindowsAndMessaging::{
                     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
                     GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
                     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
                     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
                     TranslateMessage, UpdateLayeredWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-                    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
-                    SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WINDOW_EX_STYLE, WINDOW_STYLE,
-                    WM_APP, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                    GWLP_USERDATA, HICON, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN,
+                    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WINDOW_EX_STYLE,
+                    WINDOW_STYLE, WM_APP, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
                     WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
                     WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
@@ -196,6 +198,7 @@ mod platform {
     const OVERLAY_TIMER_ID: usize = 1;
     const OVERLAY_TIMER_INTERVAL_MS: u32 = 16;
     const WM_OVERLAY_WAKE: u32 = WM_APP + 2;
+    const WM_TRAYICON: u32 = WM_APP + 1;
 
     // Fixed logical design size of `hud.slint`. Physical size = logical * scale.
     const LOGICAL_W: f32 = 210.0;
@@ -277,6 +280,11 @@ mod platform {
         scale_mult: f32,
         // factory slot, used to claim windows for menu/dialog popups
         window_slot: WindowSlot,
+        // tray icon bound to this window (Shell_NotifyIcon)
+        nid: NOTIFYICONDATAW,
+        tray_icon: Option<HICON>,
+        // guards against a re-entrant popup (e.g. tray click while menu is open)
+        menu_open: bool,
         // pointer / drag bookkeeping
         mouse_down: bool,
         moved: bool,
@@ -299,7 +307,7 @@ mod platform {
         shared_state: Arc<SharedAppState>,
         command_tx: Sender<UiCommand>,
         i18n: Arc<I18n>,
-        _icons: Arc<IconSet>,
+        icons: Arc<IconSet>,
         placement: super::OverlayPlacement,
     ) -> Result<(), OverlayError> {
         // NewBuffer = full repaint each frame. The HUD is tiny, and it avoids
@@ -384,6 +392,9 @@ mod platform {
                 base_scale,
                 scale_mult,
                 window_slot: Rc::clone(&slot),
+                nid: NOTIFYICONDATAW::default(),
+                tray_icon: None,
+                menu_open: false,
                 mouse_down: false,
                 moved: false,
                 drag_on_bg,
@@ -432,6 +443,15 @@ mod platform {
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetTimer(hwnd, OVERLAY_TIMER_ID, OVERLAY_TIMER_INTERVAL_MS, None);
             let _ = PostMessageW(hwnd, WM_OVERLAY_WAKE, WPARAM(0), LPARAM(0));
+
+            // Tray icon now lives on the UI thread alongside the HUD, so its
+            // right-click can open the same Slint menu.
+            if let Some((nid, tray_icon)) = tray::win32::install(hwnd, &icons, WM_TRAYICON) {
+                if let Some(state) = window_state_mut(hwnd) {
+                    state.nid = nid;
+                    state.tray_icon = tray_icon;
+                }
+            }
 
             let mut message = MSG::default();
             loop {
@@ -566,10 +586,26 @@ mod platform {
                 show_menu(hwnd);
                 LRESULT(0)
             }
+            WM_TRAYICON => {
+                // Shell forwards the mouse action in the low word of lparam.
+                if lparam.0 as u32 == WM_RBUTTONUP {
+                    if let Some(state) = window_state_mut(hwnd) {
+                        let snapshot = state.state.snapshot();
+                        let tip = match snapshot.ui.mode {
+                            OverlayMode::Running => "明日方舟费用条尺子".to_string(),
+                            _ => snapshot.ui.message.clone(),
+                        };
+                        tray::win32::update_tooltip(&mut state.nid, &tip);
+                    }
+                    show_menu(hwnd);
+                }
+                LRESULT(0)
+            }
             WM_DESTROY => {
                 let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
                 if !state_ptr.is_null() {
                     (*state_ptr).state.set_overlay_waker(None);
+                    tray::win32::remove(&(*state_ptr).nid, (*state_ptr).tray_icon);
                     let _ = Box::from_raw(state_ptr);
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
@@ -947,6 +983,14 @@ mod platform {
     }
 
     unsafe fn show_menu(parent: HWND) {
+        // Re-entrancy guard: the tray callback can arrive on this window even
+        // while a menu's nested loop is running (Shell_NotifyIcon ignores our
+        // mouse capture), which would otherwise stack a second popup.
+        match window_state_mut(parent) {
+            Some(state) if !state.menu_open => state.menu_open = true,
+            _ => return,
+        }
+
         let Some(parent_state) = window_state(parent) else {
             return;
         };
@@ -1082,6 +1126,11 @@ mod platform {
                 delete_profile_dialog(parent, &state, &command_tx, &i18n, idx)
             }
             MenuOutcome::None => {}
+        }
+
+        // Clear the guard (no-op if the window was destroyed while open).
+        if let Some(state) = window_state_mut(parent) {
+            state.menu_open = false;
         }
     }
 

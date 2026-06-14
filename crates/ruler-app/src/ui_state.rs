@@ -29,15 +29,6 @@ impl FrameDisplayMode {
     }
 
     #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ZeroToNMinusOne => "0 / n-1",
-            Self::ZeroToN => "0 / n",
-            Self::OneToN => "1 / n",
-        }
-    }
-
-    #[must_use]
     pub fn display_total(self, total_frames: i32) -> String {
         match self {
             Self::ZeroToNMinusOne => format!("/{}", (total_frames - 1).max(0)),

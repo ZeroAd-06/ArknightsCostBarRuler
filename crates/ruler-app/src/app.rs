@@ -14,14 +14,12 @@ use crate::{
     overlay::{OverlayPlacement, OverlayRuntime},
     resources::ResourceLocator,
     target_discovery::{discover_targets, probe_candidate_once},
-    tray::TrayRuntime,
     worker::{SharedAppState, StartupStatus, WorkerRuntime},
 };
 
 pub struct RulerApp {
     state: Arc<SharedAppState>,
     overlay: OverlayRuntime,
-    tray: TrayRuntime,
     api: ApiRuntime,
     worker: WorkerRuntime,
 }
@@ -61,12 +59,6 @@ impl RulerApp {
             Arc::clone(&icons),
             placement,
         );
-        let tray = TrayRuntime::new(
-            Arc::clone(&state),
-            command_tx.clone(),
-            Arc::clone(&i18n),
-            Arc::clone(&icons),
-        );
         let api = ApiRuntime::new(Arc::clone(&state));
         let worker = WorkerRuntime::spawn_from_startup(
             Arc::clone(&state),
@@ -79,7 +71,6 @@ impl RulerApp {
         Ok(Self {
             state,
             overlay,
-            tray,
             api,
             worker,
         })
@@ -89,7 +80,6 @@ impl RulerApp {
         let RulerApp {
             state,
             overlay,
-            tray,
             api,
             worker,
         } = self;
@@ -101,14 +91,12 @@ impl RulerApp {
             startup_snapshot.ui.message
         );
         log::info!("startup plan: {}", overlay.startup_note());
-        log::info!("startup plan: {}", tray.startup_note());
         log::info!("startup plan: {}", api.startup_note());
         log::info!("startup plan: {}", worker.startup_note());
 
         #[cfg(windows)]
         {
             log::info!("Windows-oriented UI path selected");
-            let _tray = tray.run().map_err(StartupError::from)?;
             let result = overlay.run().map_err(StartupError::from);
             drop(worker);
             drop(api);
@@ -148,12 +136,6 @@ impl std::error::Error for StartupError {}
 
 impl From<crate::overlay::OverlayError> for StartupError {
     fn from(value: crate::overlay::OverlayError) -> Self {
-        Self::new(value.to_string())
-    }
-}
-
-impl From<crate::tray::TrayError> for StartupError {
-    fn from(value: crate::tray::TrayError) -> Self {
         Self::new(value.to_string())
     }
 }

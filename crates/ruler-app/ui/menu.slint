@@ -90,17 +90,24 @@ export component RulerMenu inherits Window {
                     HorizontalLayout {
                         padding-left: 8px;
                         padding-right: 10px;
-                        spacing: 4px;
+                        spacing: 5px;
                         alignment: center;
-                        Path {
-                            width: 12px;
-                            height: 12px;
-                            viewbox-width: 24;
-                            viewbox-height: 24;
-                            commands: Icons.plus;
-                            stroke: Palette.accent;
-                            stroke-width: 2px;
-                            fill: transparent;
+                        // Path wrapped in a stretching Rectangle: x/y centering is
+                        // ignored on a direct layout child, so center it inside.
+                        Rectangle {
+                            width: 13px;
+                            Path {
+                                width: 13px;
+                                height: 13px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: Icons.plus;
+                                stroke: Palette.accent;
+                                stroke-width: 2px;
+                                fill: transparent;
+                            }
                         }
                         Text {
                             text: root.label-new;
@@ -117,18 +124,24 @@ export component RulerMenu inherits Window {
             }
         }
 
-        // ===== profile rows =====
+        // ===== profile rows (click the row body to select) =====
         for profile[idx] in root.profiles: Rectangle {
             height: root.row-h;
-            background: pta.has-hover ? #ffffff0f : transparent;
+            background: pta.has-hover && !profile.active ? #ffffff14 : transparent;
             animate background { duration: 90ms; }
-            pta := TouchArea { }   // row hover wash only
+            pta := TouchArea {
+                clicked => {
+                    if (!profile.active) {
+                        root.select-profile(idx);
+                    }
+                }
+            }
             HorizontalLayout {
                 padding-left: 2px;
                 spacing: 3px;
                 // active marker
                 Rectangle {
-                    width: 9px;
+                    width: 12px;
                     Rectangle {
                         width: 6px;
                         height: 6px;
@@ -154,19 +167,13 @@ export component RulerMenu inherits Window {
                     vertical-alignment: center;
                 }
                 IconBtn {
-                    icon: Icons.play;
-                    glyph: 13px;
-                    enabled: !profile.active;
-                    clicked => { root.select-profile(idx); }
-                }
-                IconBtn {
                     icon: Icons.pencil;
-                    glyph: 13px;
+                    glyph: 14px;
                     clicked => { root.rename-profile(idx); }
                 }
                 IconBtn {
                     icon: Icons.cross;
-                    glyph: 13px;
+                    glyph: 14px;
                     danger: true;
                     clicked => { root.delete-profile(idx); }
                 }
@@ -309,16 +316,20 @@ export component RulerMenu inherits Window {
                         padding-left: 4px;
                         spacing: 5px;
                         alignment: start;
-                        Path {
-                            width: 13px;
-                            height: 13px;
-                            y: (parent.height - self.height) / 2;
-                            viewbox-width: 24;
-                            viewbox-height: 24;
-                            commands: Icons.info;
-                            stroke: Palette.text-secondary;
-                            stroke-width: 2px;
-                            fill: transparent;
+                        Rectangle {
+                            width: 14px;
+                            Path {
+                                width: 13px;
+                                height: 13px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: Icons.info;
+                                stroke: Palette.text-secondary;
+                                stroke-width: 2px;
+                                fill: transparent;
+                            }
                         }
                         Text {
                             text: root.about-text;
@@ -333,7 +344,7 @@ export component RulerMenu inherits Window {
                 }
                 IconBtn {
                     icon: Icons.power;
-                    glyph: 14px;
+                    glyph: 13px;
                     danger: true;
                     clicked => { root.exit(); }
                 }

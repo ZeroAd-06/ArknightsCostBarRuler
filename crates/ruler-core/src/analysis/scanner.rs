@@ -23,7 +23,9 @@ const COST_SIGN_RIGHT_OFFSET_FROM_RIGHT_REF: f64 = 42.0;
 const COST_SIGN_TOP_OFFSET_FROM_BOTTOM_REF: f64 = 208.0;
 const COST_SIGN_BOTTOM_OFFSET_FROM_BOTTOM_REF: f64 = 201.0;
 const COST_SIGN_MIN_RUN_REF: f64 = 14.0;
-const COST_SIGN_MIN_ROWS_REF: f64 = 2.0;
+// At 720p the pure-white core of the minus sign is only a single row tall; it
+// thickens with resolution. Keep the floor at one row so 720p still detects.
+const COST_SIGN_MIN_ROWS_REF: f64 = 1.0;
 
 #[inline(always)]
 fn read_pixel(
@@ -72,15 +74,17 @@ fn is_pixel_grayscale(r: u8, g: u8, b: u8) -> bool {
         && (g as i16 - b as i16).unsigned_abs() <= GRAY_TOLERANCE as u16
 }
 
+/// The cost minus sign has a solid pure-white (#ffffff) core that is present even
+/// at 720p and only grows at higher resolutions. Matching that core specifically
+/// — rather than any bright-ish pixel — is what separates the sign from the
+/// anti-aliased curves/edges of positive digits: those accumulate wide "bright"
+/// runs but never a wide *pure-white* run across the bar's vertical centre.
 #[inline(always)]
 fn is_cost_sign_pixel(r: u8, g: u8, b: u8, a: u8) -> bool {
-    if a != ALPHA_OPAQUE {
-        return false;
-    }
-
-    let max_channel = r.max(g).max(b);
-    let min_channel = r.min(g).min(b);
-    max_channel >= 175 && min_channel >= 145 && max_channel - min_channel <= 80
+    a == ALPHA_OPAQUE
+        && r > WHITE_THRESHOLD
+        && g > WHITE_THRESHOLD
+        && b > WHITE_THRESHOLD
 }
 
 #[inline]
@@ -348,6 +352,40 @@ mod tests {
         }
         for y in 521..524 {
             for x in 1220..1238 {
+                put_bgr_screen_pixel(&mut buf, width, height, x, y, [255, 255, 255]);
+            }
+        }
+
+        assert!(!is_cost_negative(&buf, width, height, PixelFormat::Bgr));
+    }
+
+    #[test]
+    fn ignores_wide_bright_non_white_run() {
+        // A wide run of bright-but-not-white pixels (e.g. a reddish HUD background
+        // or anti-aliased digit body) used to satisfy the loose sign test and
+        // trigger a false positive. The real minus sign core is pure #ffffff.
+        let width = 1280;
+        let height = 720;
+        let mut buf = vec![20u8; (width * height * 3) as usize];
+        for y in 513..518 {
+            for x in 1212..1233 {
+                put_bgr_screen_pixel(&mut buf, width, height, x, y, [200, 200, 200]);
+            }
+        }
+
+        assert!(!is_cost_negative(&buf, width, height, PixelFormat::Bgr));
+    }
+
+    #[test]
+    fn ignores_narrow_white_run() {
+        // Positive digits can clip the scan band with a short pure-white segment
+        // (real samples peaked at ~10px); the minus core is ~19px at 720p. A run
+        // below the minimum must not register as the sign.
+        let width = 1280;
+        let height = 720;
+        let mut buf = vec![20u8; (width * height * 3) as usize];
+        for y in 513..518 {
+            for x in 1216..1226 {
                 put_bgr_screen_pixel(&mut buf, width, height, x, y, [255, 255, 255]);
             }
         }

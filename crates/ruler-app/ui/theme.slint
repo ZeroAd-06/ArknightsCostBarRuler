@@ -1,0 +1,101 @@
+// Arknights Cost Bar Ruler — shared design tokens.
+// Cold / sharp / minimal: hard right angles, hairline strokes, near-black panels,
+// cyan accent, amber reserved for warnings / negative cost / lap.
+// Imported by hud.slint and menu.slint.
+
+export global Palette {
+    out property <color> panel: #0a0e12e0;          // near-black, ~88% opaque
+    out property <color> panel-solid: #0b1016;       // opaque variant for popups
+    out property <color> hairline: #46c4ff8c;        // cyan hairline ~55%
+    out property <color> hairline-faint: #46c4ff40;  // cyan hairline ~25%
+    out property <color> accent: #36c5f0;            // running cyan
+    out property <color> accent-dim: #1c6b86;        // muted cyan
+    out property <color> amber: #ffb020;             // warning / negative cost / lap
+    out property <color> text-primary: #eef6fb;
+    out property <color> text-secondary: #7d93a6;
+    out property <color> text-faint: #54677a;
+    out property <color> toolbar: #0d1117f5;
+    out property <color> hover-fill: #ffffff1a;       // subtle white wash on hover
+    out property <color> danger: #ff6b5e;            // delete affordance
+}
+
+// Material-style outlined icon paths (24x24 viewbox, stroked, fill transparent).
+export global Icons {
+    out property <string> prev: "M16 6 L8 12 L16 18 M7 6 L7 18";
+    out property <string> next: "M8 6 L16 12 L8 18 M17 6 L17 18";
+    out property <string> chev-left: "M14 6 L8 12 L14 18";
+    out property <string> chev-right: "M10 6 L16 12 L10 18";
+    out property <string> flag: "M7 4 L7 20 M7 5 L16 8 L7 11";
+    out property <string> reset: "M5 12 A7 7 0 1 0 8.5 6 M8.5 6 L5 5.5 M8.5 6 L8 9.5";
+    out property <string> plus: "M12 6 L12 18 M6 12 L18 12";
+    out property <string> play: "M9 6 L17 12 L9 18 Z";
+    out property <string> pencil: "M6 18 L6 14.5 L15.5 5 L19 8.5 L9.5 18 Z";
+    out property <string> cross: "M7 7 L17 17 M17 7 L7 17";
+    out property <string> info: "M12 5 A7 7 0 1 0 12.01 5 M12 11 L12 16.5";
+    out property <string> power: "M12 4 L12 11 M6.5 8 A7 7 0 1 0 17.5 8";
+}
+
+// Small square icon button used by the HUD hover toolbar and the menu.
+export component IconBtn inherits Rectangle {
+    in property <string> icon;
+    in property <bool> strong: false;          // amber tint (e.g. active lap)
+    in property <bool> danger: false;          // red tint (delete)
+    in property <bool> enabled: true;
+    in property <length> glyph: 15px;
+    callback clicked;
+    width: 24px;
+    height: 20px;
+    background: ta.has-hover && root.enabled ? Palette.hover-fill : transparent;
+    animate background { duration: 110ms; }
+    Path {
+        width: root.glyph;
+        height: root.glyph;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon;
+        stroke: !root.enabled ? Palette.text-faint
+            : root.danger ? Palette.danger
+            : root.strong ? Palette.amber
+            : (ta.has-hover ? Palette.text-primary : Palette.text-secondary);
+        stroke-width: 2px;
+        fill: transparent;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A compact toggle chip (text), filled cyan when selected.
+export component Chip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 20px;
+    horizontal-stretch: 0;
+    border-width: 1px;
+    border-color: root.selected ? Palette.accent : Palette.hairline-faint;
+    background: root.selected ? Palette.accent-dim
+        : (ta.has-hover && root.enabled ? Palette.hover-fill : transparent);
+    animate background, border-color { duration: 110ms; }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-size: 12px;
+            font-weight: root.selected ? 700 : 500;
+            color: !root.enabled ? Palette.text-faint
+                : (root.selected ? Palette.text-primary : Palette.text-secondary);
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}

@@ -55,6 +55,7 @@
     "overlay.menu.about": "{version} Z_06 作品",
     "overlay.menu.exit": "退出",
     "overlay.menu.new_profile": "-- 新建 --",
+    "overlay.menu.new_short": "新建",
     "overlay.menu.select": "选用",
     "overlay.menu.rename": "重命名",
     "overlay.menu.delete": "删除",

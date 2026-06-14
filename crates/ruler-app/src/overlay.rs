@@ -122,7 +122,7 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use std::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         ffi::c_void,
         iter,
         rc::Rc,
@@ -143,7 +143,7 @@ mod platform {
             },
             Platform, PointerEventButton, WindowAdapter, WindowEvent,
         },
-        ComponentHandle, LogicalPosition, PhysicalSize, PlatformError,
+        ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, PlatformError, VecModel,
     };
 
     use super::OverlayError;
@@ -152,8 +152,8 @@ mod platform {
         i18n::I18n,
         icons::IconSet,
         menu,
-        ui::{Hud, HudMode},
-        ui_state::OverlayMode,
+        ui::{Hud, HudMode, ProfileRow, RulerMenu},
+        ui_state::{FrameDisplayMode, OverlayMode},
         worker::SharedAppState,
     };
     use windows::{
@@ -170,22 +170,28 @@ mod platform {
                 Controls::WM_MOUSELEAVE,
                 Input::KeyboardAndMouse::{
                     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+                    VK_ESCAPE,
                 },
                 WindowsAndMessaging::{
                     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
                     GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-                    LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW, SetTimer,
-                    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
-                    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, MSG,
-                    SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
-                    ULW_ALPHA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY,
-                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP,
-                    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-                    WS_VISIBLE,
+                    LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
+                    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                    TranslateMessage, UpdateLayeredWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+                    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
+                    SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WINDOW_EX_STYLE, WINDOW_STYLE,
+                    WM_APP, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                    WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+                    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
         },
     };
+
+    /// Shared slot the platform writes each freshly-created window into, so the
+    /// caller can claim it right after instantiating a component (single-threaded
+    /// UI thread, so this is race-free).
+    type WindowSlot = Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>;
 
     const OVERLAY_TIMER_ID: usize = 1;
     const OVERLAY_TIMER_INTERVAL_MS: u32 = 16;
@@ -236,13 +242,17 @@ mod platform {
     }
 
     struct RulerPlatform {
-        window: Rc<MinimalSoftwareWindow>,
+        /// Each `create_window_adapter` call mints a fresh window and parks it here
+        /// so the caller can claim it (HUD on startup; menu/dialog popups later).
+        slot: WindowSlot,
         start: Instant,
     }
 
     impl Platform for RulerPlatform {
         fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-            Ok(self.window.clone())
+            let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+            *self.slot.borrow_mut() = Some(window.clone());
+            Ok(window)
         }
 
         fn duration_since_start(&self) -> core::time::Duration {
@@ -265,6 +275,8 @@ mod platform {
         scale: f32,
         base_scale: f32,
         scale_mult: f32,
+        // factory slot, used to claim windows for menu/dialog popups
+        window_slot: WindowSlot,
         // pointer / drag bookkeeping
         mouse_down: bool,
         moved: bool,
@@ -293,9 +305,9 @@ mod platform {
         // NewBuffer = full repaint each frame. The HUD is tiny, and it avoids
         // partial-repaint residue (stale glyph fragments when text shrinks)
         // that ReusedBuffer can leave on a per-pixel-alpha layered window.
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let slot: WindowSlot = Rc::new(RefCell::new(None));
         slint::platform::set_platform(Box::new(RulerPlatform {
-            window: window.clone(),
+            slot: Rc::clone(&slot),
             start: Instant::now(),
         }))
         .map_err(|error| OverlayError::new(format!("set_platform failed: {error:?}")))?;
@@ -303,6 +315,10 @@ mod platform {
 
         let hud = Hud::new()
             .map_err(|error| OverlayError::new(format!("failed to build HUD component: {error}")))?;
+        let window = slot
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| OverlayError::new("platform did not produce a HUD window"))?;
 
         let scale_mult = placement.scale_or_default();
         let (left, top, width, height, base_scale) = initial_geometry(placement.pos, scale_mult);
@@ -367,6 +383,7 @@ mod platform {
                 scale,
                 base_scale,
                 scale_mult,
+                window_slot: Rc::clone(&slot),
                 mouse_down: false,
                 moved: false,
                 drag_on_bg,
@@ -546,21 +563,7 @@ mod platform {
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
-                if let Some(state) = window_state(hwnd) {
-                    menu::win32::show_context_menu(hwnd, &state.state, &state.i18n);
-                }
-                LRESULT(0)
-            }
-            WM_COMMAND => {
-                if let Some(state) = window_state(hwnd) {
-                    menu::win32::handle_menu_command(
-                        hwnd,
-                        wparam.0 & 0xffff,
-                        &state.state,
-                        &state.command_tx,
-                        &state.i18n,
-                    );
-                }
+                show_menu(hwnd);
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -862,6 +865,530 @@ mod platform {
             ULW_ALPHA,
         );
         let _ = ReleaseDC(HWND::default(), screen);
+    }
+
+    // ===================== context menu (Slint popup) =====================
+
+    const MENU_TIMER_ID: usize = 2;
+    const MENU_LOGICAL_W: f32 = 300.0;
+    const MENU_ROW_H: f32 = 30.0; // mirror of `row-h` in menu.slint
+    const MENU_DIV_H: f32 = 12.0; // mirror of divider rows
+    const MENU_PAD_V: f32 = 8.0; // mirror of vertical padding
+
+    /// Logical menu height for `n` profiles. Mirrors the fixed vertical metrics of
+    /// menu.slint: `2*pad + (header + n*profile + display + scale + timer + footer)
+    /// rows + 2 dividers`.
+    fn menu_logical_height(n_profiles: usize) -> f32 {
+        MENU_PAD_V * 2.0 + (5.0 + n_profiles as f32) * MENU_ROW_H + 2.0 * MENU_DIV_H
+    }
+
+    /// Deferred action that needs a follow-up dialog after the menu closes.
+    enum MenuOutcome {
+        None,
+        Rename(usize),
+        Delete(usize),
+    }
+
+    struct MenuState {
+        #[allow(dead_code)] // kept alive so its window/callbacks stay valid
+        menu: RulerMenu,
+        window: Rc<MinimalSoftwareWindow>,
+        state: Arc<SharedAppState>,
+        mem_dc: HDC,
+        dib: HBITMAP,
+        bits: *mut PreBgra,
+        buf_w: usize,
+        buf_h: usize,
+        scale: f32,
+        closing: Rc<Cell<bool>>,
+    }
+
+    impl Drop for MenuState {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.mem_dc);
+                let _ = DeleteObject(HGDIOBJ(self.dib.0));
+            }
+        }
+    }
+
+    fn display_mode_index(mode: FrameDisplayMode) -> i32 {
+        match mode {
+            FrameDisplayMode::ZeroToNMinusOne => 0,
+            FrameDisplayMode::ZeroToN => 1,
+            FrameDisplayMode::OneToN => 2,
+        }
+    }
+
+    fn index_to_display_mode(index: i32) -> FrameDisplayMode {
+        match index {
+            1 => FrameDisplayMode::ZeroToN,
+            2 => FrameDisplayMode::OneToN,
+            _ => FrameDisplayMode::ZeroToNMinusOne,
+        }
+    }
+
+    fn scale_pct_to_index(pct: u16) -> i32 {
+        match pct {
+            75 => 0,
+            125 => 2,
+            150 => 3,
+            _ => 1,
+        }
+    }
+
+    fn index_to_scale(index: i32) -> f32 {
+        match index {
+            0 => 0.75,
+            2 => 1.25,
+            3 => 1.5,
+            _ => 1.0,
+        }
+    }
+
+    unsafe fn show_menu(parent: HWND) {
+        let Some(parent_state) = window_state(parent) else {
+            return;
+        };
+        let state = Arc::clone(&parent_state.state);
+        let command_tx = parent_state.command_tx.clone();
+        let i18n = Arc::clone(&parent_state.i18n);
+        let slot = Rc::clone(&parent_state.window_slot);
+        let scale = parent_state.scale;
+
+        let snapshot = state.snapshot();
+        let n_profiles = snapshot.ui.profiles.len();
+
+        let Ok(menu) = RulerMenu::new() else {
+            return;
+        };
+        let Some(menu_window) = slot.borrow_mut().take() else {
+            return;
+        };
+
+        populate_menu(&menu, &snapshot.ui, &i18n);
+
+        let closing = Rc::new(Cell::new(false));
+        let outcome = Rc::new(RefCell::new(MenuOutcome::None));
+        wire_menu_callbacks(&menu, &command_tx, &state, &closing, &outcome);
+
+        let width = (MENU_LOGICAL_W * scale).round() as i32;
+        let height = (menu_logical_height(n_profiles) * scale).round() as i32;
+        let _ = menu_window
+            .window()
+            .try_dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            });
+        menu_window.set_size(PhysicalSize::new(width as u32, height as u32));
+        let _ = menu.show();
+
+        // Pop at the cursor, clamped fully on-screen.
+        let mut cursor = POINT::default();
+        let _ = GetCursorPos(&mut cursor);
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let left = cursor.x.min((screen_w - width).max(0)).max(0);
+        let top = cursor.y.min((screen_h - height).max(0)).max(0);
+
+        let Some((mem_dc, dib, bits)) = create_dib(width, height) else {
+            return;
+        };
+
+        let menu_state = Box::new(MenuState {
+            menu,
+            window: menu_window,
+            state: Arc::clone(&state),
+            mem_dc,
+            dib,
+            bits,
+            buf_w: width as usize,
+            buf_h: height as usize,
+            scale,
+            closing: Rc::clone(&closing),
+        });
+        let state_ptr = Box::into_raw(menu_state);
+
+        let Ok(instance) = GetModuleHandleW(PCWSTR::null()) else {
+            let _ = Box::from_raw(state_ptr);
+            return;
+        };
+        let class_name = wide("RulerMenuWindowClass");
+        let class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(menu_window_proc),
+            hInstance: HINSTANCE(instance.0),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            ..Default::default()
+        };
+        // Re-registration on subsequent opens returns 0; the class persists, so
+        // the error is expected and ignored.
+        RegisterClassW(&class);
+
+        let title = wide("Ruler Menu");
+        let Ok(hwnd) = CreateWindowExW(
+            WINDOW_EX_STYLE(WS_EX_TOPMOST.0 | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            WINDOW_STYLE(WS_POPUP.0 | WS_VISIBLE.0),
+            left,
+            top,
+            width,
+            height,
+            parent,
+            HMENU::default(),
+            HINSTANCE(instance.0),
+            Some(state_ptr.cast()),
+        ) else {
+            let _ = Box::from_raw(state_ptr);
+            return;
+        };
+        if hwnd.0.is_null() {
+            let _ = Box::from_raw(state_ptr);
+            return;
+        }
+
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetCapture(hwnd);
+        let _ = SetTimer(hwnd, MENU_TIMER_ID, OVERLAY_TIMER_INTERVAL_MS, None);
+        menu_tick(hwnd);
+
+        // Nested loop. The HUD's own WM_TIMER keeps firing on this thread, so the
+        // timer/readout behind the menu stays live.
+        let mut message = MSG::default();
+        while !closing.get() {
+            let result = GetMessageW(&mut message, HWND::default(), 0, 0).0;
+            if result == 0 {
+                // WM_QUIT consumed here; re-post so the outer loop also exits.
+                PostQuitMessage(0);
+                break;
+            }
+            if result == -1 {
+                break;
+            }
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        let _ = ReleaseCapture();
+        let _ = DestroyWindow(hwnd);
+
+        match outcome.replace(MenuOutcome::None) {
+            MenuOutcome::Rename(idx) => {
+                rename_profile_dialog(parent, &state, &command_tx, &i18n, idx)
+            }
+            MenuOutcome::Delete(idx) => {
+                delete_profile_dialog(parent, &state, &command_tx, &i18n, idx)
+            }
+            MenuOutcome::None => {}
+        }
+    }
+
+    unsafe fn populate_menu(menu: &RulerMenu, ui: &crate::ui_state::UiSnapshot, i18n: &I18n) {
+        let rows: Vec<ProfileRow> = ui
+            .profiles
+            .iter()
+            .map(|profile| ProfileRow {
+                name: profile.basename.as_str().into(),
+                frames: profile.total_frames_str.as_str().into(),
+                active: profile.is_active,
+            })
+            .collect();
+        menu.set_profiles(ModelRc::new(VecModel::from(rows)));
+        menu.set_display_mode(display_mode_index(ui.display_mode));
+        menu.set_scale_index(scale_pct_to_index(ui.overlay_scale_pct));
+        menu.set_timer_enabled(ui.active_profile.is_some());
+        menu.set_cap_calibration(i18n.tr("overlay.menu.calibration").into());
+        menu.set_cap_display(i18n.tr("overlay.menu.display").into());
+        menu.set_cap_scale(i18n.tr("overlay.menu.scale").into());
+        menu.set_cap_timer(i18n.tr("overlay.menu.timer").into());
+        menu.set_label_new(i18n.tr("overlay.menu.new_short").into());
+        menu.set_about_text(
+            i18n.tr_with(
+                "overlay.menu.about",
+                &[("version", crate::ui_state::VERSION.to_string())],
+            )
+            .into(),
+        );
+    }
+
+    fn wire_menu_callbacks(
+        menu: &RulerMenu,
+        command_tx: &Sender<UiCommand>,
+        state: &Arc<SharedAppState>,
+        closing: &Rc<Cell<bool>>,
+        outcome: &Rc<RefCell<MenuOutcome>>,
+    ) {
+        menu.on_new_profile({
+            let tx = command_tx.clone();
+            let closing = Rc::clone(closing);
+            move || {
+                let _ = tx.send(UiCommand::PrepareCalibration);
+                closing.set(true);
+            }
+        });
+        menu.on_select_profile({
+            let tx = command_tx.clone();
+            let state = Arc::clone(state);
+            let closing = Rc::clone(closing);
+            move |idx| {
+                if let Some(profile) = state.snapshot().ui.profiles.get(idx as usize) {
+                    let _ = tx.send(UiCommand::UseProfile {
+                        filename: profile.filename.clone(),
+                    });
+                }
+                closing.set(true);
+            }
+        });
+        menu.on_rename_profile({
+            let outcome = Rc::clone(outcome);
+            let closing = Rc::clone(closing);
+            move |idx| {
+                *outcome.borrow_mut() = MenuOutcome::Rename(idx as usize);
+                closing.set(true);
+            }
+        });
+        menu.on_delete_profile({
+            let outcome = Rc::clone(outcome);
+            let closing = Rc::clone(closing);
+            move |idx| {
+                *outcome.borrow_mut() = MenuOutcome::Delete(idx as usize);
+                closing.set(true);
+            }
+        });
+        // Settings actions keep the panel open; the tick re-syncs the selection.
+        menu.on_set_display({
+            let tx = command_tx.clone();
+            move |index| {
+                let _ = tx.send(UiCommand::SetDisplayMode(index_to_display_mode(index)));
+            }
+        });
+        menu.on_set_scale({
+            let tx = command_tx.clone();
+            move |index| {
+                let _ = tx.send(UiCommand::SetOverlayScale(index_to_scale(index)));
+            }
+        });
+        menu.on_timer_action({
+            let tx = command_tx.clone();
+            let state = Arc::clone(state);
+            move |action| {
+                let cycle = state.snapshot().ui.total_frames_in_cycle;
+                let command = match action {
+                    0 => UiCommand::AdjustTimer { frames: -cycle },
+                    1 => UiCommand::AdjustTimer {
+                        frames: -crate::ui_state::FRAMES_PER_SECOND,
+                    },
+                    2 => UiCommand::ResetTimer,
+                    3 => UiCommand::AdjustTimer {
+                        frames: crate::ui_state::FRAMES_PER_SECOND,
+                    },
+                    4 => UiCommand::AdjustTimer { frames: cycle },
+                    _ => return,
+                };
+                let _ = tx.send(command);
+            }
+        });
+        menu.on_about({
+            let closing = Rc::clone(closing);
+            move || {
+                unsafe { menu::win32::open_about_page() };
+                closing.set(true);
+            }
+        });
+        menu.on_exit({
+            let tx = command_tx.clone();
+            let closing = Rc::clone(closing);
+            move || {
+                let _ = tx.send(UiCommand::Exit);
+                closing.set(true);
+            }
+        });
+    }
+
+    unsafe fn rename_profile_dialog(
+        parent: HWND,
+        state: &Arc<SharedAppState>,
+        command_tx: &Sender<UiCommand>,
+        i18n: &I18n,
+        idx: usize,
+    ) {
+        let Some(profile) = state.snapshot().ui.profiles.get(idx).cloned() else {
+            return;
+        };
+        let prompt = i18n.tr_with(
+            "overlay.dialog.rename.prompt",
+            &[("old_basename", profile.basename.clone())],
+        );
+        if let Some(new_base) = menu::win32::prompt_text(
+            parent,
+            &i18n.tr("overlay.dialog.rename.title"),
+            &prompt,
+            &profile.basename,
+        ) {
+            if new_base.trim().is_empty() {
+                menu::win32::show_message(
+                    parent,
+                    &i18n.tr("overlay.error.name_empty.title"),
+                    &i18n.tr("overlay.error.name_empty"),
+                );
+            } else {
+                let _ = command_tx.send(UiCommand::RenameProfile {
+                    old: profile.filename,
+                    new_base,
+                });
+            }
+        }
+    }
+
+    unsafe fn delete_profile_dialog(
+        parent: HWND,
+        state: &Arc<SharedAppState>,
+        command_tx: &Sender<UiCommand>,
+        i18n: &I18n,
+        idx: usize,
+    ) {
+        let Some(profile) = state.snapshot().ui.profiles.get(idx).cloned() else {
+            return;
+        };
+        let message = i18n.tr_with(
+            "overlay.dialog.delete.msg",
+            &[("basename", profile.basename.clone())],
+        );
+        if menu::win32::confirm(parent, &i18n.tr("overlay.dialog.delete.title"), &message) {
+            let _ = command_tx.send(UiCommand::DeleteProfile {
+                filename: profile.filename.clone(),
+            });
+        }
+    }
+
+    unsafe extern "system" fn menu_window_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match message {
+            WM_NCCREATE => {
+                let create_struct = lparam.0 as *const CREATESTRUCTW;
+                let state_ptr = (*create_struct).lpCreateParams as *mut MenuState;
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
+                LRESULT(1)
+            }
+            WM_TIMER => {
+                menu_tick(hwnd);
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                if let Some(state) = menu_state(hwnd) {
+                    let position = logical_pos(lparam, state.scale);
+                    let _ = state
+                        .window
+                        .window()
+                        .try_dispatch_event(WindowEvent::PointerMoved { position });
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
+                if let Some(state) = menu_state(hwnd) {
+                    let (x, y) = client_xy(lparam);
+                    let inside =
+                        x >= 0 && y >= 0 && x < state.buf_w as i32 && y < state.buf_h as i32;
+                    if !inside {
+                        state.closing.set(true);
+                    } else if message == WM_LBUTTONDOWN {
+                        let position = logical_pos(lparam, state.scale);
+                        let _ = state.window.window().try_dispatch_event(
+                            WindowEvent::PointerPressed {
+                                position,
+                                button: PointerEventButton::Left,
+                            },
+                        );
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                if let Some(state) = menu_state(hwnd) {
+                    let (x, y) = client_xy(lparam);
+                    let inside =
+                        x >= 0 && y >= 0 && x < state.buf_w as i32 && y < state.buf_h as i32;
+                    if inside {
+                        let position = logical_pos(lparam, state.scale);
+                        let _ = state.window.window().try_dispatch_event(
+                            WindowEvent::PointerReleased {
+                                position,
+                                button: PointerEventButton::Left,
+                            },
+                        );
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                if (wparam.0 as u16) == VK_ESCAPE.0 {
+                    if let Some(state) = menu_state(hwnd) {
+                        state.closing.set(true);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuState;
+                if !state_ptr.is_null() {
+                    let _ = Box::from_raw(state_ptr);
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
+    }
+
+    unsafe fn menu_tick(hwnd: HWND) {
+        slint::platform::update_timers_and_animations();
+        let Some(state) = menu_state(hwnd) else {
+            return;
+        };
+        // Live-sync the cheap selections so chips reflect changes made via the
+        // menu (and the worker) without rebuilding the profile model each frame.
+        let snapshot = state.state.snapshot();
+        state
+            .menu
+            .set_display_mode(display_mode_index(snapshot.ui.display_mode));
+        state
+            .menu
+            .set_scale_index(scale_pct_to_index(snapshot.ui.overlay_scale_pct));
+        state
+            .menu
+            .set_timer_enabled(snapshot.ui.active_profile.is_some());
+
+        let w = state.buf_w;
+        let h = state.buf_h;
+        let bits = state.bits;
+        let drawn = state.window.draw_if_needed(|renderer: &SoftwareRenderer| {
+            let buffer = unsafe { std::slice::from_raw_parts_mut(bits, w * h) };
+            renderer.render(buffer, w);
+        });
+        if drawn {
+            present_layered(hwnd, state.mem_dc, w as i32, h as i32);
+        }
+    }
+
+    fn client_xy(lparam: LPARAM) -> (i32, i32) {
+        let x = (lparam.0 as u32 & 0xffff) as i16 as i32;
+        let y = ((lparam.0 as u32 >> 16) & 0xffff) as i16 as i32;
+        (x, y)
+    }
+
+    unsafe fn menu_state<'a>(hwnd: HWND) -> Option<&'a MenuState> {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuState;
+        if state_ptr.is_null() {
+            None
+        } else {
+            Some(&*state_ptr)
+        }
     }
 
     unsafe fn should_exit(hwnd: HWND) -> bool {

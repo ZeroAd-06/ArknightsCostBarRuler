@@ -55,6 +55,7 @@
     "overlay.menu.about": "{version} by Z_06",
     "overlay.menu.exit": "Exit",
     "overlay.menu.new_profile": "-- New --",
+    "overlay.menu.new_short": "New",
     "overlay.menu.select": "Select",
     "overlay.menu.rename": "Rename",
     "overlay.menu.delete": "Delete",

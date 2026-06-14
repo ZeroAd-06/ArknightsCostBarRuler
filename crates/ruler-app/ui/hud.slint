@@ -3,6 +3,12 @@
 // Rendered by the software renderer into a per-pixel-alpha layered window.
 // All user-facing strings are localized in Rust and pushed in as properties.
 
+import { Palette, Icons, IconBtn } from "theme.slint";
+
+// Secondary surfaces live in their own files; re-export so `include_modules!`
+// exposes them to Rust alongside `Hud`.
+export { RulerMenu, ProfileRow } from "menu.slint";
+
 export enum HudMode {
     booting,
     idle,
@@ -10,52 +16,6 @@ export enum HudMode {
     calibrating,
     running,
     error,
-}
-
-// --- design tokens -------------------------------------------------------
-global Palette {
-    out property <color> panel: #0a0e12e0;          // near-black, ~88% opaque
-    out property <color> hairline: #46c4ff8c;        // cyan hairline ~55%
-    out property <color> accent: #36c5f0;            // running cyan
-    out property <color> amber: #ffb020;             // warning / negative cost / lap
-    out property <color> text-primary: #eef6fb;
-    out property <color> text-secondary: #7d93a6;
-    out property <color> text-faint: #54677a;
-    out property <color> toolbar: #0d1117f5;
-}
-
-// Material-style outlined icon paths (24x24 viewbox, stroked).
-global Icons {
-    out property <string> prev: "M16 6 L8 12 L16 18 M7 6 L7 18";
-    out property <string> next: "M8 6 L16 12 L8 18 M17 6 L17 18";
-    out property <string> flag: "M7 4 L7 20 M7 5 L16 8 L7 11";
-    out property <string> reset: "M5 12 A7 7 0 1 0 8.5 6 M8.5 6 L5 5.5 M8.5 6 L8 9.5";
-}
-
-// --- small icon control button (hover-revealed toolbar) ------------------
-component CtrlBtn inherits Rectangle {
-    in property <string> icon;
-    in property <bool> strong: false;
-    callback clicked;
-    width: 24px;
-    height: 20px;
-    background: ta.has-hover ? #ffffff26 : #ffffff00;
-    animate background { duration: 110ms; }
-    Path {
-        width: 15px;
-        height: 15px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        viewbox-width: 24;
-        viewbox-height: 24;
-        commands: root.icon;
-        stroke: root.strong ? Palette.amber : (ta.has-hover ? Palette.text-primary : Palette.text-secondary);
-        stroke-width: 2px;
-        fill: transparent;
-    }
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-    }
 }
 
 export component Hud inherits Window {
@@ -252,10 +212,10 @@ export component Hud inherits Window {
                 padding: 2px;
                 spacing: 2px;
                 alignment: center;
-                CtrlBtn { icon: Icons.prev; clicked => { root.back-cycle(); } }
-                CtrlBtn { icon: Icons.reset; clicked => { root.reset-clicked(); } }
-                CtrlBtn { icon: Icons.flag; strong: root.lap-str != ""; clicked => { root.lap-clicked(); } }
-                CtrlBtn { icon: Icons.next; clicked => { root.fwd-cycle(); } }
+                IconBtn { icon: Icons.prev; clicked => { root.back-cycle(); } }
+                IconBtn { icon: Icons.reset; clicked => { root.reset-clicked(); } }
+                IconBtn { icon: Icons.flag; strong: root.lap-str != ""; clicked => { root.lap-clicked(); } }
+                IconBtn { icon: Icons.next; clicked => { root.fwd-cycle(); } }
             }
         }
     }

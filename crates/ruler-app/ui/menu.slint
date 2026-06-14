@@ -1,0 +1,343 @@
+// Arknights Cost Bar Ruler — right-click menu (replaces the native TrackPopupMenu).
+// A single flat panel rather than nested submenus: each profile row carries its
+// own select / rename / delete affordances inline. Rendered by the software
+// renderer into its own per-pixel-alpha layered popup window.
+//
+// IMPORTANT: the vertical metrics below (ROW / DIV / PAD_V) are mirrored by
+// `menu_height()` in overlay.rs so the native window is sized to fit exactly.
+// Keep them in sync.
+
+import { Palette, Icons, IconBtn, Chip } from "theme.slint";
+
+export struct ProfileRow {
+    name: string,
+    frames: string,
+    active: bool,
+}
+
+export component RulerMenu inherits Window {
+    // ---- inputs ----
+    in property <[ProfileRow]> profiles;
+    in property <int> display-mode;     // 0 = 0/n-1, 1 = 0/n, 2 = 1/n
+    in property <int> scale-index;      // 0=75% 1=100% 2=125% 3=150%
+    in property <bool> timer-enabled;   // an active profile exists
+    in property <string> cap-calibration;
+    in property <string> cap-display;
+    in property <string> cap-scale;
+    in property <string> cap-timer;
+    in property <string> label-new;
+    in property <string> about-text;
+
+    // ---- outputs ----
+    callback new-profile();
+    callback select-profile(int);
+    callback rename-profile(int);
+    callback delete-profile(int);
+    callback set-display(int);
+    callback set-scale(int);
+    callback timer-action(int);   // 0 back-cycle, 1 back-1s, 2 reset, 3 fwd-1s, 4 fwd-cycle
+    callback about();
+    callback exit();
+
+    background: transparent;
+    default-font-family: "Bender";
+
+    // shared row metric (logical px) — mirror in overlay.rs
+    property <length> row-h: 30px;
+    property <length> cap-w: 58px;
+
+    // ---- panel ----
+    Rectangle {
+        background: #0b1016f8;
+        border-width: 1px;
+        border-color: Palette.hairline;
+    }
+    Rectangle {
+        x: 0; y: 0;
+        width: 100%;
+        height: 2px;
+        background: Palette.accent;
+        opacity: 0.9;
+    }
+
+    VerticalLayout {
+        padding-top: 8px;
+        padding-bottom: 8px;
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 0px;
+
+        // ===== calibration header: caption + new-profile =====
+        Rectangle {
+            height: root.row-h;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.cap-calibration;
+                    color: Palette.text-faint;
+                    font-size: 10px;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                new-btn := Rectangle {
+                    width: 78px;
+                    height: 22px;
+                    border-width: 1px;
+                    border-color: Palette.hairline-faint;
+                    background: nta.has-hover ? Palette.hover-fill : transparent;
+                    animate background { duration: 110ms; }
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 10px;
+                        spacing: 4px;
+                        alignment: center;
+                        Path {
+                            width: 12px;
+                            height: 12px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: Icons.plus;
+                            stroke: Palette.accent;
+                            stroke-width: 2px;
+                            fill: transparent;
+                        }
+                        Text {
+                            text: root.label-new;
+                            color: Palette.accent;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                    nta := TouchArea {
+                        clicked => { root.new-profile(); }
+                    }
+                }
+            }
+        }
+
+        // ===== profile rows =====
+        for profile[idx] in root.profiles: Rectangle {
+            height: root.row-h;
+            background: pta.has-hover ? #ffffff0f : transparent;
+            animate background { duration: 90ms; }
+            pta := TouchArea { }   // row hover wash only
+            HorizontalLayout {
+                padding-left: 2px;
+                spacing: 3px;
+                // active marker
+                Rectangle {
+                    width: 9px;
+                    Rectangle {
+                        width: 6px;
+                        height: 6px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 3px;
+                        background: profile.active ? Palette.accent : transparent;
+                    }
+                }
+                Text {
+                    text: profile.name;
+                    color: Palette.text-primary;
+                    font-size: 13px;
+                    font-weight: profile.active ? 700 : 500;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: profile.frames;
+                    color: Palette.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                IconBtn {
+                    icon: Icons.play;
+                    glyph: 13px;
+                    enabled: !profile.active;
+                    clicked => { root.select-profile(idx); }
+                }
+                IconBtn {
+                    icon: Icons.pencil;
+                    glyph: 13px;
+                    clicked => { root.rename-profile(idx); }
+                }
+                IconBtn {
+                    icon: Icons.cross;
+                    glyph: 13px;
+                    danger: true;
+                    clicked => { root.delete-profile(idx); }
+                }
+            }
+        }
+
+        // ===== divider =====
+        Rectangle {
+            height: 12px;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 100%;
+                height: 1px;
+                background: Palette.hairline-faint;
+            }
+        }
+
+        // ===== display mode =====
+        Rectangle {
+            height: root.row-h;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.cap-display;
+                    color: Palette.text-faint;
+                    font-size: 10px;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                    width: root.cap-w;
+                }
+                HorizontalLayout {
+                    spacing: 5px;
+                    Chip {
+                        label: "0/n-1";
+                        selected: root.display-mode == 0;
+                        clicked => { root.set-display(0); }
+                    }
+                    Chip {
+                        label: "0/n";
+                        selected: root.display-mode == 1;
+                        clicked => { root.set-display(1); }
+                    }
+                    Chip {
+                        label: "1/n";
+                        selected: root.display-mode == 2;
+                        clicked => { root.set-display(2); }
+                    }
+                    Rectangle { }   // trailing spacer
+                }
+            }
+        }
+
+        // ===== scale =====
+        Rectangle {
+            height: root.row-h;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.cap-scale;
+                    color: Palette.text-faint;
+                    font-size: 10px;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                    width: root.cap-w;
+                }
+                HorizontalLayout {
+                    spacing: 5px;
+                    Chip {
+                        label: "75%";
+                        selected: root.scale-index == 0;
+                        clicked => { root.set-scale(0); }
+                    }
+                    Chip {
+                        label: "100%";
+                        selected: root.scale-index == 1;
+                        clicked => { root.set-scale(1); }
+                    }
+                    Chip {
+                        label: "125%";
+                        selected: root.scale-index == 2;
+                        clicked => { root.set-scale(2); }
+                    }
+                    Chip {
+                        label: "150%";
+                        selected: root.scale-index == 3;
+                        clicked => { root.set-scale(3); }
+                    }
+                    Rectangle { }   // trailing spacer
+                }
+            }
+        }
+
+        // ===== timer adjust =====
+        Rectangle {
+            height: root.row-h;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.cap-timer;
+                    color: Palette.text-faint;
+                    font-size: 10px;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                    width: root.cap-w;
+                }
+                HorizontalLayout {
+                    spacing: 2px;
+                    alignment: start;
+                    IconBtn { icon: Icons.prev; enabled: root.timer-enabled; clicked => { root.timer-action(0); } }
+                    IconBtn { icon: Icons.chev-left; enabled: root.timer-enabled; clicked => { root.timer-action(1); } }
+                    IconBtn { icon: Icons.reset; enabled: root.timer-enabled; clicked => { root.timer-action(2); } }
+                    IconBtn { icon: Icons.chev-right; enabled: root.timer-enabled; clicked => { root.timer-action(3); } }
+                    IconBtn { icon: Icons.next; enabled: root.timer-enabled; clicked => { root.timer-action(4); } }
+                    Rectangle { }   // trailing spacer
+                }
+            }
+        }
+
+        // ===== divider =====
+        Rectangle {
+            height: 12px;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 100%;
+                height: 1px;
+                background: Palette.hairline-faint;
+            }
+        }
+
+        // ===== footer: about (left) + exit (right) =====
+        Rectangle {
+            height: root.row-h;
+            HorizontalLayout {
+                spacing: 2px;
+                about-btn := Rectangle {
+                    horizontal-stretch: 1;
+                    background: ata.has-hover ? Palette.hover-fill : transparent;
+                    animate background { duration: 110ms; }
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        spacing: 5px;
+                        alignment: start;
+                        Path {
+                            width: 13px;
+                            height: 13px;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: Icons.info;
+                            stroke: Palette.text-secondary;
+                            stroke-width: 2px;
+                            fill: transparent;
+                        }
+                        Text {
+                            text: root.about-text;
+                            color: Palette.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    ata := TouchArea {
+                        clicked => { root.about(); }
+                    }
+                }
+                IconBtn {
+                    icon: Icons.power;
+                    glyph: 14px;
+                    danger: true;
+                    clicked => { root.exit(); }
+                }
+            }
+        }
+    }
+}

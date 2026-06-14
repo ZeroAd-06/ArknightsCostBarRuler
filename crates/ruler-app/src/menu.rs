@@ -379,7 +379,7 @@ pub mod win32 {
         send(command_tx, UiCommand::AdjustTimer { frames });
     }
 
-    unsafe fn open_about_page() {
+    pub unsafe fn open_about_page() {
         let operation = wide("open");
         let url = wide("https://github.com/ZeroAd-06/ArknightsCostBarRuler");
         let _ = ShellExecuteW(
@@ -400,7 +400,7 @@ pub mod win32 {
         done: bool,
     }
 
-    unsafe fn prompt_text(owner: HWND, title: &str, prompt: &str, initial: &str) -> Option<String> {
+    pub unsafe fn prompt_text(owner: HWND, title: &str, prompt: &str, initial: &str) -> Option<String> {
         const CLASS_NAME: &str = "RulerProfileRenameDialog";
         let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
             return None;
@@ -640,7 +640,7 @@ pub mod win32 {
         }
     }
 
-    unsafe fn confirm(hwnd: HWND, title: &str, message: &str) -> bool {
+    pub unsafe fn confirm(hwnd: HWND, title: &str, message: &str) -> bool {
         let title = wide(title);
         let message = wide(message);
         MessageBoxW(
@@ -651,7 +651,7 @@ pub mod win32 {
         ) == IDYES
     }
 
-    unsafe fn show_message(hwnd: HWND, title: &str, message: &str) {
+    pub unsafe fn show_message(hwnd: HWND, title: &str, message: &str) {
         let title = wide(title);
         let message = wide(message);
         let _ = MessageBoxW(

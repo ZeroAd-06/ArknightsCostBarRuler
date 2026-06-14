@@ -1,0 +1,155 @@
+// Arknights Cost Bar Ruler — modal dialog (replaces the native MessageBox /
+// rename prompt). One flexible component covers three uses:
+//   * message  : title + body + single OK button            (show-cancel = false)
+//   * confirm  : title + body + cancel / confirm buttons     (danger tints destructive)
+//   * prompt   : title + body + text field + cancel / accept (has-input = true)
+// Rendered by the software renderer into its own per-pixel-alpha layered popup.
+//
+// IMPORTANT: the vertical metrics here (PAD / SPACING / row heights) are mirrored
+// by `dialog_logical_height()` in overlay.rs so the native window fits exactly.
+// Keep them in sync.
+
+import { Palette } from "theme.slint";
+
+export component RulerDialog inherits Window {
+    // ---- inputs ----
+    in property <string> heading;
+    in property <string> body;
+    in property <bool> has-input: false;
+    in-out property <string> input-text;
+    in property <string> ok-label;
+    in property <string> cancel-label;
+    in property <bool> show-cancel: true;
+    in property <bool> danger: false;   // destructive (delete) → red accent
+
+    // ---- outputs ----
+    callback accept();
+    callback cancel();
+
+    background: transparent;
+    default-font-family: "Bender";
+
+    // ---- panel ----
+    Rectangle {
+        background: #0b1016f8;
+        border-width: 1px;
+        border-color: Palette.hairline;
+    }
+    Rectangle {
+        x: 0; y: 0;
+        width: 100%;
+        height: 2px;
+        background: root.danger ? Palette.danger : Palette.accent;
+        opacity: 0.9;
+    }
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        // title (fixed 22px — mirrored in Rust)
+        Rectangle {
+            height: 22px;
+            Text {
+                text: root.heading;
+                color: Palette.text-primary;
+                font-size: 15px;
+                font-weight: 700;
+                vertical-alignment: center;
+                width: 100%;
+            }
+        }
+
+        // body (fixed 40px — mirrored in Rust)
+        Rectangle {
+            height: 40px;
+            Text {
+                text: root.body;
+                color: Palette.text-secondary;
+                font-size: 12px;
+                wrap: word-wrap;
+                overflow: elide;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+        }
+
+        // input field (prompt only, fixed 30px)
+        if root.has-input: Rectangle {
+            height: 30px;
+            border-width: 1px;
+            border-color: ti.has-focus ? Palette.accent : Palette.hairline-faint;
+            background: #ffffff0e;
+            animate border-color { duration: 110ms; }
+            HorizontalLayout {
+                padding-left: 9px;
+                padding-right: 9px;
+                ti := TextInput {
+                    text <=> root.input-text;
+                    color: Palette.text-primary;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    single-line: true;
+                    selection-background-color: Palette.accent-dim;
+                    selection-foreground-color: Palette.text-primary;
+                    // Grab focus on creation and pre-select the whole name so the
+                    // user can type to replace it (overlay.rs dispatches
+                    // WindowActiveChanged to engage focus).
+                    init => {
+                        self.focus();
+                        self.select-all();
+                    }
+                }
+            }
+        }
+
+        // buttons (fixed 30px row)
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+
+            if root.show-cancel: cancel-btn := Rectangle {
+                width: 92px;
+                height: 30px;
+                border-width: 1px;
+                border-color: Palette.hairline-faint;
+                background: cta.has-hover ? Palette.hover-fill : transparent;
+                animate background { duration: 110ms; }
+                Text {
+                    text: root.cancel-label;
+                    color: Palette.text-secondary;
+                    font-size: 12px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                cta := TouchArea {
+                    clicked => { root.cancel(); }
+                }
+            }
+
+            ok-btn := Rectangle {
+                width: 92px;
+                height: 30px;
+                border-width: 1px;
+                border-color: root.danger ? Palette.danger : Palette.accent;
+                background: ota.has-hover
+                    ? (root.danger ? Palette.danger.with-alpha(0.22) : Palette.accent.with-alpha(0.22))
+                    : (root.danger ? Palette.danger.with-alpha(0.12) : Palette.accent.with-alpha(0.12));
+                animate background { duration: 110ms; }
+                Text {
+                    text: root.ok-label;
+                    color: root.danger ? Palette.danger : Palette.accent;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                ota := TouchArea {
+                    clicked => { root.accept(); }
+                }
+            }
+        }
+    }
+}

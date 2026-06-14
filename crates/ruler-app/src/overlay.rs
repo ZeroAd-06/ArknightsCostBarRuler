@@ -141,9 +141,10 @@ mod platform {
                 MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, SoftwareRenderer,
                 TargetPixel,
             },
-            Platform, PointerEventButton, WindowAdapter, WindowEvent,
+            Key, Platform, PointerEventButton, WindowAdapter, WindowEvent,
         },
-        ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, PlatformError, VecModel,
+        ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, PlatformError, SharedString,
+        VecModel,
     };
 
     use super::OverlayError;
@@ -153,7 +154,7 @@ mod platform {
         icons::IconSet,
         menu,
         tray,
-        ui::{Hud, HudMode, ProfileRow, RulerMenu},
+        ui::{Hud, HudMode, ProfileRow, RulerDialog, RulerMenu},
         ui_state::{FrameDisplayMode, OverlayMode},
         worker::SharedAppState,
     };
@@ -171,7 +172,7 @@ mod platform {
                 Controls::WM_MOUSELEAVE,
                 Input::KeyboardAndMouse::{
                     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
-                    VK_ESCAPE,
+                    VK_BACK, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT,
                 },
                 Shell::NOTIFYICONDATAW,
                 WindowsAndMessaging::{
@@ -182,9 +183,10 @@ mod platform {
                     TranslateMessage, UpdateLayeredWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
                     GWLP_USERDATA, HICON, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN,
                     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WINDOW_EX_STYLE,
-                    WINDOW_STYLE, WM_APP, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                    WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
-                    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+                    WINDOW_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+                    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN,
+                    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+                    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
         },
@@ -1270,24 +1272,42 @@ mod platform {
             "overlay.dialog.rename.prompt",
             &[("old_basename", profile.basename.clone())],
         );
-        if let Some(new_base) = menu::win32::prompt_text(
+        let result = run_dialog(
             parent,
-            &i18n.tr("overlay.dialog.rename.title"),
-            &prompt,
-            &profile.basename,
-        ) {
-            if new_base.trim().is_empty() {
-                menu::win32::show_message(
-                    parent,
-                    &i18n.tr("overlay.error.name_empty.title"),
-                    &i18n.tr("overlay.error.name_empty"),
-                );
-            } else {
-                let _ = command_tx.send(UiCommand::RenameProfile {
-                    old: profile.filename,
-                    new_base,
-                });
-            }
+            DialogConfig {
+                title: &i18n.tr("overlay.dialog.rename.title"),
+                body: &prompt,
+                has_input: true,
+                initial_text: &profile.basename,
+                ok_label: &i18n.tr("overlay.dialog.ok"),
+                cancel_label: &i18n.tr("overlay.dialog.cancel"),
+                show_cancel: true,
+                danger: false,
+            },
+        );
+        if !result.accepted {
+            return;
+        }
+        let new_base = result.text.trim().to_string();
+        if new_base.is_empty() {
+            run_dialog(
+                parent,
+                DialogConfig {
+                    title: &i18n.tr("overlay.error.name_empty.title"),
+                    body: &i18n.tr("overlay.error.name_empty"),
+                    has_input: false,
+                    initial_text: "",
+                    ok_label: &i18n.tr("overlay.dialog.ok"),
+                    cancel_label: "",
+                    show_cancel: false,
+                    danger: false,
+                },
+            );
+        } else {
+            let _ = command_tx.send(UiCommand::RenameProfile {
+                old: profile.filename,
+                new_base,
+            });
         }
     }
 
@@ -1305,10 +1325,421 @@ mod platform {
             "overlay.dialog.delete.msg",
             &[("basename", profile.basename.clone())],
         );
-        if menu::win32::confirm(parent, &i18n.tr("overlay.dialog.delete.title"), &message) {
+        let result = run_dialog(
+            parent,
+            DialogConfig {
+                title: &i18n.tr("overlay.dialog.delete.title"),
+                body: &message,
+                has_input: false,
+                initial_text: "",
+                ok_label: &i18n.tr("overlay.dialog.delete.confirm"),
+                cancel_label: &i18n.tr("overlay.dialog.cancel"),
+                show_cancel: true,
+                danger: true,
+            },
+        );
+        if result.accepted {
             let _ = command_tx.send(UiCommand::DeleteProfile {
                 filename: profile.filename.clone(),
             });
+        }
+    }
+
+    // ===================== modal dialogs (Slint popup) =====================
+
+    const DIALOG_TIMER_ID: usize = 3;
+    const DIALOG_LOGICAL_W: f32 = 340.0;
+    const DIALOG_PAD: f32 = 16.0; // mirror of dialog.slint VerticalLayout padding
+    const DIALOG_SPACING: f32 = 12.0; // mirror of layout spacing
+    const DIALOG_TITLE_H: f32 = 22.0;
+    const DIALOG_BODY_H: f32 = 40.0;
+    const DIALOG_INPUT_H: f32 = 30.0;
+    const DIALOG_BUTTON_H: f32 = 30.0;
+
+    /// Logical dialog height; mirrors the fixed row metrics in dialog.slint.
+    /// Children stacked with `spacing` between each: title, body, [input], buttons.
+    fn dialog_logical_height(has_input: bool) -> f32 {
+        if has_input {
+            DIALOG_PAD * 2.0
+                + DIALOG_TITLE_H
+                + DIALOG_BODY_H
+                + DIALOG_INPUT_H
+                + DIALOG_BUTTON_H
+                + DIALOG_SPACING * 3.0
+        } else {
+            DIALOG_PAD * 2.0 + DIALOG_TITLE_H + DIALOG_BODY_H + DIALOG_BUTTON_H + DIALOG_SPACING * 2.0
+        }
+    }
+
+    struct DialogConfig<'a> {
+        title: &'a str,
+        body: &'a str,
+        has_input: bool,
+        initial_text: &'a str,
+        ok_label: &'a str,
+        cancel_label: &'a str,
+        show_cancel: bool,
+        danger: bool,
+    }
+
+    struct DialogResult {
+        accepted: bool,
+        text: String,
+    }
+
+    struct DialogState {
+        window: Rc<MinimalSoftwareWindow>,
+        mem_dc: HDC,
+        dib: HBITMAP,
+        bits: *mut PreBgra,
+        buf_w: usize,
+        buf_h: usize,
+        scale: f32,
+        has_input: bool,
+        closing: Rc<Cell<bool>>,
+        accepted: Rc<Cell<bool>>,
+        // high half of a pending UTF-16 surrogate pair (supplementary-plane input)
+        pending_high: Cell<u16>,
+    }
+
+    impl Drop for DialogState {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.mem_dc);
+                let _ = DeleteObject(HGDIOBJ(self.dib.0));
+            }
+        }
+    }
+
+    /// Show a modal dialog (message / confirm / prompt) centered on screen, running
+    /// its own nested message loop. The HUD's timer keeps firing on this thread, so
+    /// the readout behind the dialog stays live. Returns whether the affirmative
+    /// button was used and, for prompts, the text field's final value.
+    unsafe fn run_dialog(parent: HWND, cfg: DialogConfig) -> DialogResult {
+        let cancelled = || DialogResult {
+            accepted: false,
+            text: String::new(),
+        };
+
+        let (scale, slot) = match window_state(parent) {
+            Some(state) => (state.scale, Rc::clone(&state.window_slot)),
+            None => return cancelled(),
+        };
+
+        let Ok(dialog) = RulerDialog::new() else {
+            return cancelled();
+        };
+        let Some(window) = slot.borrow_mut().take() else {
+            return cancelled();
+        };
+
+        dialog.set_heading(cfg.title.into());
+        dialog.set_body(cfg.body.into());
+        dialog.set_has_input(cfg.has_input);
+        dialog.set_input_text(cfg.initial_text.into());
+        dialog.set_ok_label(cfg.ok_label.into());
+        dialog.set_cancel_label(cfg.cancel_label.into());
+        dialog.set_show_cancel(cfg.show_cancel);
+        dialog.set_danger(cfg.danger);
+
+        let closing = Rc::new(Cell::new(false));
+        let accepted = Rc::new(Cell::new(false));
+        dialog.on_accept({
+            let closing = Rc::clone(&closing);
+            let accepted = Rc::clone(&accepted);
+            move || {
+                accepted.set(true);
+                closing.set(true);
+            }
+        });
+        dialog.on_cancel({
+            let closing = Rc::clone(&closing);
+            move || closing.set(true)
+        });
+
+        let width = (DIALOG_LOGICAL_W * scale).round() as i32;
+        let height = (dialog_logical_height(cfg.has_input) * scale).round() as i32;
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            });
+        window.set_size(PhysicalSize::new(width as u32, height as u32));
+        let _ = dialog.show();
+        // Engage Slint's focus model so the text field shows a caret and takes keys.
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::WindowActiveChanged(true));
+
+        // Center on the primary screen.
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let left = ((screen_w - width) / 2).max(0);
+        let top = ((screen_h - height) / 2).max(0);
+
+        let Some((mem_dc, dib, bits)) = create_dib(width, height) else {
+            return cancelled();
+        };
+
+        let dialog_state = Box::new(DialogState {
+            window: window.clone(),
+            mem_dc,
+            dib,
+            bits,
+            buf_w: width as usize,
+            buf_h: height as usize,
+            scale,
+            has_input: cfg.has_input,
+            closing: Rc::clone(&closing),
+            accepted: Rc::clone(&accepted),
+            pending_high: Cell::new(0),
+        });
+        let state_ptr = Box::into_raw(dialog_state);
+
+        let Ok(instance) = GetModuleHandleW(PCWSTR::null()) else {
+            let _ = Box::from_raw(state_ptr);
+            return cancelled();
+        };
+        let class_name = wide("RulerDialogWindowClass");
+        let class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(dialog_window_proc),
+            hInstance: HINSTANCE(instance.0),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            ..Default::default()
+        };
+        // Re-registration on later opens returns 0; the class persists, so ignore.
+        RegisterClassW(&class);
+
+        let title = wide("Ruler Dialog");
+        let Ok(hwnd) = CreateWindowExW(
+            WINDOW_EX_STYLE(WS_EX_TOPMOST.0 | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            WINDOW_STYLE(WS_POPUP.0 | WS_VISIBLE.0),
+            left,
+            top,
+            width,
+            height,
+            parent,
+            HMENU::default(),
+            HINSTANCE(instance.0),
+            Some(state_ptr.cast()),
+        ) else {
+            let _ = Box::from_raw(state_ptr);
+            return cancelled();
+        };
+        if hwnd.0.is_null() {
+            let _ = Box::from_raw(state_ptr);
+            return cancelled();
+        }
+
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetCapture(hwnd);
+        let _ = SetTimer(hwnd, DIALOG_TIMER_ID, OVERLAY_TIMER_INTERVAL_MS, None);
+        dialog_tick(hwnd);
+
+        // Nested loop. The HUD's WM_TIMER keeps firing on this thread, so the
+        // readout behind the dialog stays live.
+        let mut message = MSG::default();
+        while !closing.get() {
+            let result = GetMessageW(&mut message, HWND::default(), 0, 0).0;
+            if result == 0 {
+                // WM_QUIT consumed here; re-post so the outer loop also exits.
+                PostQuitMessage(0);
+                break;
+            }
+            if result == -1 {
+                break;
+            }
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        let _ = ReleaseCapture();
+        let _ = DestroyWindow(hwnd);
+
+        // `dialog` is still alive in this scope, so reading the field is valid even
+        // though the window's boxed state was freed on WM_DESTROY.
+        DialogResult {
+            accepted: accepted.get(),
+            text: dialog.get_input_text().to_string(),
+        }
+    }
+
+    unsafe extern "system" fn dialog_window_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match message {
+            WM_NCCREATE => {
+                let create_struct = lparam.0 as *const CREATESTRUCTW;
+                let state_ptr = (*create_struct).lpCreateParams as *mut DialogState;
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
+                LRESULT(1)
+            }
+            WM_TIMER => {
+                dialog_tick(hwnd);
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                if let Some(state) = dialog_state(hwnd) {
+                    let position = logical_pos(lparam, state.scale);
+                    let _ = state
+                        .window
+                        .window()
+                        .try_dispatch_event(WindowEvent::PointerMoved { position });
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
+                if let Some(state) = dialog_state(hwnd) {
+                    let (x, y) = client_xy(lparam);
+                    let inside =
+                        x >= 0 && y >= 0 && x < state.buf_w as i32 && y < state.buf_h as i32;
+                    if !inside {
+                        // Click outside the modal dismisses it (treated as cancel).
+                        state.closing.set(true);
+                    } else if message == WM_LBUTTONDOWN {
+                        let position = logical_pos(lparam, state.scale);
+                        let _ = state.window.window().try_dispatch_event(
+                            WindowEvent::PointerPressed {
+                                position,
+                                button: PointerEventButton::Left,
+                            },
+                        );
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                if let Some(state) = dialog_state(hwnd) {
+                    let (x, y) = client_xy(lparam);
+                    let inside =
+                        x >= 0 && y >= 0 && x < state.buf_w as i32 && y < state.buf_h as i32;
+                    if inside {
+                        let position = logical_pos(lparam, state.scale);
+                        let _ = state.window.window().try_dispatch_event(
+                            WindowEvent::PointerReleased {
+                                position,
+                                button: PointerEventButton::Left,
+                            },
+                        );
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_CHAR => {
+                // Printable text insertion for the prompt field. Control codes
+                // (Enter / Esc / Backspace) are handled in WM_KEYDOWN instead.
+                if let Some(state) = dialog_state(hwnd) {
+                    if state.has_input {
+                        if let Some(text) = decode_wm_char(&state.pending_high, wparam.0 as u16) {
+                            dispatch_key(&state.window, text);
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                if let Some(state) = dialog_state(hwnd) {
+                    let vk = wparam.0 as u16;
+                    if vk == VK_RETURN.0 {
+                        state.accepted.set(true);
+                        state.closing.set(true);
+                    } else if vk == VK_ESCAPE.0 {
+                        state.closing.set(true);
+                    } else if state.has_input {
+                        let key = match vk {
+                            v if v == VK_BACK.0 => Some(Key::Backspace),
+                            v if v == VK_DELETE.0 => Some(Key::Delete),
+                            v if v == VK_LEFT.0 => Some(Key::LeftArrow),
+                            v if v == VK_RIGHT.0 => Some(Key::RightArrow),
+                            v if v == VK_HOME.0 => Some(Key::Home),
+                            v if v == VK_END.0 => Some(Key::End),
+                            _ => None,
+                        };
+                        if let Some(key) = key {
+                            dispatch_key(&state.window, key.into());
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
+                if !state_ptr.is_null() {
+                    let _ = Box::from_raw(state_ptr);
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
+    }
+
+    /// Dispatch a press + release for `text` (a typed character or a `Key` glyph)
+    /// to the dialog's focused text field.
+    fn dispatch_key(window: &Rc<MinimalSoftwareWindow>, text: SharedString) {
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::KeyReleased { text });
+    }
+
+    /// Decode one WM_CHAR UTF-16 code unit into text, buffering the high half of a
+    /// surrogate pair across calls. Returns `None` for control characters and for
+    /// the (stashed) high surrogate.
+    fn decode_wm_char(pending_high: &Cell<u16>, unit: u16) -> Option<SharedString> {
+        if (0xd800..0xdc00).contains(&unit) {
+            pending_high.set(unit);
+            return None;
+        }
+        let units: Vec<u16> = if (0xdc00..0xe000).contains(&unit) {
+            let high = pending_high.replace(0);
+            if high == 0 {
+                return None;
+            }
+            vec![high, unit]
+        } else {
+            pending_high.set(0);
+            if unit < 0x20 || unit == 0x7f {
+                return None;
+            }
+            vec![unit]
+        };
+        Some(String::from_utf16_lossy(&units).into())
+    }
+
+    unsafe fn dialog_tick(hwnd: HWND) {
+        slint::platform::update_timers_and_animations();
+        let Some(state) = dialog_state(hwnd) else {
+            return;
+        };
+        let w = state.buf_w;
+        let h = state.buf_h;
+        let bits = state.bits;
+        let drawn = state.window.draw_if_needed(|renderer: &SoftwareRenderer| {
+            let buffer = unsafe { std::slice::from_raw_parts_mut(bits, w * h) };
+            renderer.render(buffer, w);
+        });
+        if drawn {
+            present_layered(hwnd, state.mem_dc, w as i32, h as i32);
+        }
+    }
+
+    unsafe fn dialog_state<'a>(hwnd: HWND) -> Option<&'a DialogState> {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
+        if state_ptr.is_null() {
+            None
+        } else {
+            Some(&*state_ptr)
         }
     }
 

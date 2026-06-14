@@ -167,4 +167,57 @@ fn main() {
     menu_window.set_size(PhysicalSize::new(mw as u32, mh as u32));
     menu.show().unwrap();
     render_png(&menu_window, mw, mh, "hud_menu.png");
+
+    // ----- Dialog: rename prompt (text field) -----
+    let rename = RulerDialog::new().unwrap();
+    let rename_window = last.borrow_mut().take().expect("rename dialog window");
+    rename.set_heading("重命名".into());
+    rename.set_body("为 '1-7 三星' 输入新名称:".into());
+    rename.set_has_input(true);
+    rename.set_input_text("1-7 三星".into());
+    rename.set_ok_label("确定".into());
+    rename.set_cancel_label("取消".into());
+    rename.set_show_cancel(true);
+    rename.set_danger(false);
+    render_dialog(&rename_window, &rename, true, scale, "hud_dialog_rename.png");
+
+    // ----- Dialog: delete confirm (destructive) -----
+    let delete = RulerDialog::new().unwrap();
+    let delete_window = last.borrow_mut().take().expect("delete dialog window");
+    delete.set_heading("确认删除".into());
+    delete.set_body("确实要删除校准配置 'CE-5 速通' 吗？".into());
+    delete.set_has_input(false);
+    delete.set_ok_label("删除".into());
+    delete.set_cancel_label("取消".into());
+    delete.set_show_cancel(true);
+    delete.set_danger(true);
+    render_dialog(&delete_window, &delete, false, scale, "hud_dialog_delete.png");
+}
+
+/// Size, show, focus and render a `RulerDialog` to a PNG. Height mirrors the fixed
+/// metrics in dialog.slint (pad 16, spacing 12, title 22, body 40, input 30, buttons 30).
+fn render_dialog(
+    window: &Rc<MinimalSoftwareWindow>,
+    dialog: &RulerDialog,
+    has_input: bool,
+    scale: f32,
+    path: &str,
+) {
+    let logical_w = 340.0_f32;
+    let logical_h = if has_input { 190.0 } else { 148.0 };
+    let w = (logical_w * scale).round() as usize;
+    let h = (logical_h * scale).round() as usize;
+    window
+        .window()
+        .try_dispatch_event(WindowEvent::ScaleFactorChanged {
+            scale_factor: scale,
+        })
+        .unwrap();
+    window.set_size(PhysicalSize::new(w as u32, h as u32));
+    dialog.show().unwrap();
+    // Engage focus so the text field shows its accent border + caret.
+    let _ = window
+        .window()
+        .try_dispatch_event(WindowEvent::WindowActiveChanged(true));
+    render_png(window, w, h, path);
 }

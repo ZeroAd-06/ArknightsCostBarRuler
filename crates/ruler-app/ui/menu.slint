@@ -25,14 +25,21 @@ export component RulerMenu inherits Window {
     in property <string> cap-display;
     in property <string> cap-scale;
     in property <string> cap-timer;
+    in property <string> cap-cancel;
+    in property <string> cap-delete;
     in property <string> label-new;
     in property <string> about-text;
+
+    // inline edit / delete state: index of the row in that mode, or -1 (none).
+    // Driven from Slint clicks; overlay.rs reads/clears them while routing keys.
+    in-out property <int> editing-index: -1;
+    in-out property <int> deleting-index: -1;
 
     // ---- outputs ----
     callback new-profile();
     callback select-profile(int);
-    callback rename-profile(int);
-    callback delete-profile(int);
+    callback commit-rename(int, string);
+    callback confirm-delete(int);
     callback set-display(int);
     callback set-scale(int);
     callback timer-action(int);   // 0 back-cycle, 1 back-1s, 2 reset, 3 fwd-1s, 4 fwd-cycle
@@ -124,22 +131,29 @@ export component RulerMenu inherits Window {
             }
         }
 
-        // ===== profile rows (click the row body to select) =====
+        // ===== profile rows: click body to select; inline rename / delete =====
         for profile[idx] in root.profiles: Rectangle {
             height: root.row-h;
-            background: pta.has-hover && !profile.active ? #ffffff14 : transparent;
+            background: root.deleting-index == idx ? #ff6b5e1a
+                : (pta.has-hover && !profile.active && root.editing-index != idx) ? #ffffff14
+                : transparent;
             animate background { duration: 90ms; }
+
+            // Row-body select. Disabled while this row is in an inline mode so the
+            // edit field / confirm buttons receive the clicks instead.
             pta := TouchArea {
+                enabled: root.editing-index != idx && root.deleting-index != idx;
                 clicked => {
                     if (!profile.active) {
                         root.select-profile(idx);
                     }
                 }
             }
-            HorizontalLayout {
+
+            // ---- normal ----
+            if (root.editing-index != idx && root.deleting-index != idx): HorizontalLayout {
                 padding-left: 2px;
                 spacing: 3px;
-                // active marker
                 Rectangle {
                     width: 12px;
                     Rectangle {
@@ -169,13 +183,149 @@ export component RulerMenu inherits Window {
                 IconBtn {
                     icon: Icons.pencil;
                     glyph: 14px;
-                    clicked => { root.rename-profile(idx); }
+                    clicked => {
+                        root.deleting-index = -1;
+                        root.editing-index = idx;
+                    }
                 }
                 IconBtn {
                     icon: Icons.cross;
                     glyph: 14px;
                     danger: true;
-                    clicked => { root.delete-profile(idx); }
+                    clicked => {
+                        root.editing-index = -1;
+                        root.deleting-index = idx;
+                    }
+                }
+            }
+
+            // ---- inline rename ----
+            if (root.editing-index == idx): HorizontalLayout {
+                padding-left: 2px;
+                spacing: 3px;
+                Rectangle {
+                    width: 12px;
+                    Rectangle {
+                        width: 6px;
+                        height: 6px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 3px;
+                        background: Palette.accent;
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 22px;
+                    y: (parent.height - self.height) / 2;
+                    border-width: 1px;
+                    border-color: Palette.accent;
+                    background: #ffffff10;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        edit := TextInput {
+                            color: Palette.text-primary;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            selection-background-color: Palette.accent-dim;
+                            selection-foreground-color: Palette.text-primary;
+                            // Seed once (not a reactive binding, so typing is free),
+                            // then focus + select so the user can replace immediately.
+                            init => {
+                                self.text = profile.name;
+                                self.select-all();
+                                self.focus();
+                            }
+                            accepted => {
+                                if (self.text != "") {
+                                    root.commit-rename(idx, self.text);
+                                    root.editing-index = -1;
+                                }
+                            }
+                        }
+                    }
+                }
+                IconBtn {
+                    icon: Icons.check;
+                    glyph: 14px;
+                    clicked => {
+                        if (edit.text != "") {
+                            root.commit-rename(idx, edit.text);
+                            root.editing-index = -1;
+                        }
+                    }
+                }
+                IconBtn {
+                    icon: Icons.cross;
+                    glyph: 14px;
+                    clicked => { root.editing-index = -1; }
+                }
+            }
+
+            // ---- inline delete confirm ----
+            if (root.deleting-index == idx): HorizontalLayout {
+                padding-left: 2px;
+                spacing: 4px;
+                Rectangle {
+                    width: 12px;
+                    Rectangle {
+                        width: 6px;
+                        height: 6px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 3px;
+                        background: Palette.danger;
+                    }
+                }
+                Text {
+                    text: profile.name;
+                    color: Palette.danger;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    width: 50px;
+                    height: 22px;
+                    border-width: 1px;
+                    border-color: Palette.hairline-faint;
+                    background: cancel-ta.has-hover ? Palette.hover-fill : transparent;
+                    animate background { duration: 110ms; }
+                    Text {
+                        text: root.cap-cancel;
+                        color: Palette.text-secondary;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    cancel-ta := TouchArea {
+                        clicked => { root.deleting-index = -1; }
+                    }
+                }
+                Rectangle {
+                    width: 50px;
+                    height: 22px;
+                    border-width: 1px;
+                    border-color: Palette.danger;
+                    background: del-ta.has-hover ? Palette.danger.with-alpha(0.24) : Palette.danger.with-alpha(0.12);
+                    animate background { duration: 110ms; }
+                    Text {
+                        text: root.cap-delete;
+                        color: Palette.danger;
+                        font-size: 11px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    del-ta := TouchArea {
+                        clicked => {
+                            root.confirm-delete(idx);
+                            root.deleting-index = -1;
+                        }
+                    }
                 }
             }
         }

@@ -154,7 +154,7 @@ mod platform {
         icons::IconSet,
         menu,
         tray,
-        ui::{Hud, HudMode, ProfileRow, RulerDialog, RulerMenu},
+        ui::{Hud, HudMode, ProfileRow, RulerMenu},
         ui_state::{FrameDisplayMode, OverlayMode},
         worker::SharedAppState,
     };
@@ -920,15 +920,7 @@ mod platform {
         MENU_PAD_V * 2.0 + (5.0 + n_profiles as f32) * MENU_ROW_H + 2.0 * MENU_DIV_H
     }
 
-    /// Deferred action that needs a follow-up dialog after the menu closes.
-    enum MenuOutcome {
-        None,
-        Rename(usize),
-        Delete(usize),
-    }
-
     struct MenuState {
-        #[allow(dead_code)] // kept alive so its window/callbacks stay valid
         menu: RulerMenu,
         window: Rc<MinimalSoftwareWindow>,
         state: Arc<SharedAppState>,
@@ -939,6 +931,11 @@ mod platform {
         buf_h: usize,
         scale: f32,
         closing: Rc<Cell<bool>>,
+        // high half of a pending UTF-16 surrogate pair (inline-rename IME input)
+        pending_high: Cell<u16>,
+        // last-seen profile list, so the model is refreshed / popup resized on change
+        profiles_sig: String,
+        profile_count: usize,
     }
 
     impl Drop for MenuState {
@@ -1015,8 +1012,7 @@ mod platform {
         populate_menu(&menu, &snapshot.ui, &i18n);
 
         let closing = Rc::new(Cell::new(false));
-        let outcome = Rc::new(RefCell::new(MenuOutcome::None));
-        wire_menu_callbacks(&menu, &command_tx, &state, &closing, &outcome);
+        wire_menu_callbacks(&menu, &command_tx, &state, &closing);
 
         let width = (MENU_LOGICAL_W * scale).round() as i32;
         let height = (menu_logical_height(n_profiles) * scale).round() as i32;
@@ -1027,6 +1023,10 @@ mod platform {
             });
         menu_window.set_size(PhysicalSize::new(width as u32, height as u32));
         let _ = menu.show();
+        // Activate so an inline-rename TextInput can hold focus and receive keys.
+        let _ = menu_window
+            .window()
+            .try_dispatch_event(WindowEvent::WindowActiveChanged(true));
 
         // Pop at the cursor, clamped fully on-screen.
         let mut cursor = POINT::default();
@@ -1051,6 +1051,9 @@ mod platform {
             buf_h: height as usize,
             scale,
             closing: Rc::clone(&closing),
+            pending_high: Cell::new(0),
+            profiles_sig: profiles_signature(&snapshot.ui.profiles),
+            profile_count: n_profiles,
         });
         let state_ptr = Box::into_raw(menu_state);
 
@@ -1120,16 +1123,6 @@ mod platform {
         let _ = ReleaseCapture();
         let _ = DestroyWindow(hwnd);
 
-        match outcome.replace(MenuOutcome::None) {
-            MenuOutcome::Rename(idx) => {
-                rename_profile_dialog(parent, &state, &command_tx, &i18n, idx)
-            }
-            MenuOutcome::Delete(idx) => {
-                delete_profile_dialog(parent, &state, &command_tx, &i18n, idx)
-            }
-            MenuOutcome::None => {}
-        }
-
         // Clear the guard (no-op if the window was destroyed while open).
         if let Some(state) = window_state_mut(parent) {
             state.menu_open = false;
@@ -1137,16 +1130,9 @@ mod platform {
     }
 
     unsafe fn populate_menu(menu: &RulerMenu, ui: &crate::ui_state::UiSnapshot, i18n: &I18n) {
-        let rows: Vec<ProfileRow> = ui
-            .profiles
-            .iter()
-            .map(|profile| ProfileRow {
-                name: profile.basename.as_str().into(),
-                frames: profile.total_frames_str.as_str().into(),
-                active: profile.is_active,
-            })
-            .collect();
-        menu.set_profiles(ModelRc::new(VecModel::from(rows)));
+        rebuild_profiles(menu, &ui.profiles);
+        menu.set_editing_index(-1);
+        menu.set_deleting_index(-1);
         menu.set_display_mode(display_mode_index(ui.display_mode));
         menu.set_scale_index(scale_pct_to_index(ui.overlay_scale_pct));
         menu.set_timer_enabled(ui.active_profile.is_some());
@@ -1154,6 +1140,8 @@ mod platform {
         menu.set_cap_display(i18n.tr("overlay.menu.display").into());
         menu.set_cap_scale(i18n.tr("overlay.menu.scale").into());
         menu.set_cap_timer(i18n.tr("overlay.menu.timer").into());
+        menu.set_cap_cancel(i18n.tr("overlay.dialog.cancel").into());
+        menu.set_cap_delete(i18n.tr("overlay.dialog.delete.confirm").into());
         menu.set_label_new(i18n.tr("overlay.menu.new_short").into());
         menu.set_about_text(
             i18n.tr_with(
@@ -1164,12 +1152,41 @@ mod platform {
         );
     }
 
+    /// Rebuild just the profile-row model (at open, and when the list changes).
+    fn rebuild_profiles(menu: &RulerMenu, profiles: &[crate::ui_state::ProfileMenuItem]) {
+        let rows: Vec<ProfileRow> = profiles
+            .iter()
+            .map(|profile| ProfileRow {
+                name: profile.basename.as_str().into(),
+                frames: profile.total_frames_str.as_str().into(),
+                active: profile.is_active,
+            })
+            .collect();
+        menu.set_profiles(ModelRc::new(VecModel::from(rows)));
+    }
+
+    /// Cheap change-detector for the profile list. When it differs from the menu's
+    /// last-seen value the model is rebuilt (and the popup resized if the count
+    /// changed), so an inline rename/delete reflects without reopening the menu.
+    fn profiles_signature(profiles: &[crate::ui_state::ProfileMenuItem]) -> String {
+        let mut sig = String::new();
+        for profile in profiles {
+            sig.push_str(&profile.filename);
+            sig.push('\u{1}');
+            sig.push_str(&profile.basename);
+            sig.push('\u{1}');
+            sig.push_str(&profile.total_frames_str);
+            sig.push(if profile.is_active { '1' } else { '0' });
+            sig.push('\u{2}');
+        }
+        sig
+    }
+
     fn wire_menu_callbacks(
         menu: &RulerMenu,
         command_tx: &Sender<UiCommand>,
         state: &Arc<SharedAppState>,
         closing: &Rc<Cell<bool>>,
-        outcome: &Rc<RefCell<MenuOutcome>>,
     ) {
         menu.on_new_profile({
             let tx = command_tx.clone();
@@ -1192,20 +1209,31 @@ mod platform {
                 closing.set(true);
             }
         });
-        menu.on_rename_profile({
-            let outcome = Rc::clone(outcome);
-            let closing = Rc::clone(closing);
-            move |idx| {
-                *outcome.borrow_mut() = MenuOutcome::Rename(idx as usize);
-                closing.set(true);
+        menu.on_commit_rename({
+            let tx = command_tx.clone();
+            let state = Arc::clone(state);
+            move |idx, new_name| {
+                let new_base = new_name.trim().to_string();
+                if new_base.is_empty() {
+                    return;
+                }
+                if let Some(profile) = state.snapshot().ui.profiles.get(idx as usize) {
+                    let _ = tx.send(UiCommand::RenameProfile {
+                        old: profile.filename.clone(),
+                        new_base,
+                    });
+                }
             }
         });
-        menu.on_delete_profile({
-            let outcome = Rc::clone(outcome);
-            let closing = Rc::clone(closing);
+        menu.on_confirm_delete({
+            let tx = command_tx.clone();
+            let state = Arc::clone(state);
             move |idx| {
-                *outcome.borrow_mut() = MenuOutcome::Delete(idx as usize);
-                closing.set(true);
+                if let Some(profile) = state.snapshot().ui.profiles.get(idx as usize) {
+                    let _ = tx.send(UiCommand::DeleteProfile {
+                        filename: profile.filename.clone(),
+                    });
+                }
             }
         });
         // Settings actions keep the panel open; the tick re-syncs the selection.
@@ -1258,432 +1286,10 @@ mod platform {
         });
     }
 
-    unsafe fn rename_profile_dialog(
-        parent: HWND,
-        state: &Arc<SharedAppState>,
-        command_tx: &Sender<UiCommand>,
-        i18n: &I18n,
-        idx: usize,
-    ) {
-        let Some(profile) = state.snapshot().ui.profiles.get(idx).cloned() else {
-            return;
-        };
-        let prompt = i18n.tr_with(
-            "overlay.dialog.rename.prompt",
-            &[("old_basename", profile.basename.clone())],
-        );
-        let result = run_dialog(
-            parent,
-            DialogConfig {
-                title: &i18n.tr("overlay.dialog.rename.title"),
-                body: &prompt,
-                has_input: true,
-                initial_text: &profile.basename,
-                ok_label: &i18n.tr("overlay.dialog.ok"),
-                cancel_label: &i18n.tr("overlay.dialog.cancel"),
-                show_cancel: true,
-                danger: false,
-            },
-        );
-        if !result.accepted {
-            return;
-        }
-        let new_base = result.text.trim().to_string();
-        if new_base.is_empty() {
-            run_dialog(
-                parent,
-                DialogConfig {
-                    title: &i18n.tr("overlay.error.name_empty.title"),
-                    body: &i18n.tr("overlay.error.name_empty"),
-                    has_input: false,
-                    initial_text: "",
-                    ok_label: &i18n.tr("overlay.dialog.ok"),
-                    cancel_label: "",
-                    show_cancel: false,
-                    danger: false,
-                },
-            );
-        } else {
-            let _ = command_tx.send(UiCommand::RenameProfile {
-                old: profile.filename,
-                new_base,
-            });
-        }
-    }
-
-    unsafe fn delete_profile_dialog(
-        parent: HWND,
-        state: &Arc<SharedAppState>,
-        command_tx: &Sender<UiCommand>,
-        i18n: &I18n,
-        idx: usize,
-    ) {
-        let Some(profile) = state.snapshot().ui.profiles.get(idx).cloned() else {
-            return;
-        };
-        let message = i18n.tr_with(
-            "overlay.dialog.delete.msg",
-            &[("basename", profile.basename.clone())],
-        );
-        let result = run_dialog(
-            parent,
-            DialogConfig {
-                title: &i18n.tr("overlay.dialog.delete.title"),
-                body: &message,
-                has_input: false,
-                initial_text: "",
-                ok_label: &i18n.tr("overlay.dialog.delete.confirm"),
-                cancel_label: &i18n.tr("overlay.dialog.cancel"),
-                show_cancel: true,
-                danger: true,
-            },
-        );
-        if result.accepted {
-            let _ = command_tx.send(UiCommand::DeleteProfile {
-                filename: profile.filename.clone(),
-            });
-        }
-    }
-
-    // ===================== modal dialogs (Slint popup) =====================
-
-    const DIALOG_TIMER_ID: usize = 3;
-    const DIALOG_LOGICAL_W: f32 = 340.0;
-    const DIALOG_PAD: f32 = 16.0; // mirror of dialog.slint VerticalLayout padding
-    const DIALOG_SPACING: f32 = 12.0; // mirror of layout spacing
-    const DIALOG_TITLE_H: f32 = 22.0;
-    const DIALOG_BODY_H: f32 = 40.0;
-    const DIALOG_INPUT_H: f32 = 30.0;
-    const DIALOG_BUTTON_H: f32 = 30.0;
-
-    /// Logical dialog height; mirrors the fixed row metrics in dialog.slint.
-    /// Children stacked with `spacing` between each: title, body, [input], buttons.
-    fn dialog_logical_height(has_input: bool) -> f32 {
-        if has_input {
-            DIALOG_PAD * 2.0
-                + DIALOG_TITLE_H
-                + DIALOG_BODY_H
-                + DIALOG_INPUT_H
-                + DIALOG_BUTTON_H
-                + DIALOG_SPACING * 3.0
-        } else {
-            DIALOG_PAD * 2.0 + DIALOG_TITLE_H + DIALOG_BODY_H + DIALOG_BUTTON_H + DIALOG_SPACING * 2.0
-        }
-    }
-
-    struct DialogConfig<'a> {
-        title: &'a str,
-        body: &'a str,
-        has_input: bool,
-        initial_text: &'a str,
-        ok_label: &'a str,
-        cancel_label: &'a str,
-        show_cancel: bool,
-        danger: bool,
-    }
-
-    struct DialogResult {
-        accepted: bool,
-        text: String,
-    }
-
-    struct DialogState {
-        window: Rc<MinimalSoftwareWindow>,
-        mem_dc: HDC,
-        dib: HBITMAP,
-        bits: *mut PreBgra,
-        buf_w: usize,
-        buf_h: usize,
-        scale: f32,
-        has_input: bool,
-        closing: Rc<Cell<bool>>,
-        accepted: Rc<Cell<bool>>,
-        // high half of a pending UTF-16 surrogate pair (supplementary-plane input)
-        pending_high: Cell<u16>,
-    }
-
-    impl Drop for DialogState {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = DeleteDC(self.mem_dc);
-                let _ = DeleteObject(HGDIOBJ(self.dib.0));
-            }
-        }
-    }
-
-    /// Show a modal dialog (message / confirm / prompt) centered on screen, running
-    /// its own nested message loop. The HUD's timer keeps firing on this thread, so
-    /// the readout behind the dialog stays live. Returns whether the affirmative
-    /// button was used and, for prompts, the text field's final value.
-    unsafe fn run_dialog(parent: HWND, cfg: DialogConfig) -> DialogResult {
-        let cancelled = || DialogResult {
-            accepted: false,
-            text: String::new(),
-        };
-
-        let (scale, slot) = match window_state(parent) {
-            Some(state) => (state.scale, Rc::clone(&state.window_slot)),
-            None => return cancelled(),
-        };
-
-        let Ok(dialog) = RulerDialog::new() else {
-            return cancelled();
-        };
-        let Some(window) = slot.borrow_mut().take() else {
-            return cancelled();
-        };
-
-        dialog.set_heading(cfg.title.into());
-        dialog.set_body(cfg.body.into());
-        dialog.set_has_input(cfg.has_input);
-        dialog.set_input_text(cfg.initial_text.into());
-        dialog.set_ok_label(cfg.ok_label.into());
-        dialog.set_cancel_label(cfg.cancel_label.into());
-        dialog.set_show_cancel(cfg.show_cancel);
-        dialog.set_danger(cfg.danger);
-
-        let closing = Rc::new(Cell::new(false));
-        let accepted = Rc::new(Cell::new(false));
-        dialog.on_accept({
-            let closing = Rc::clone(&closing);
-            let accepted = Rc::clone(&accepted);
-            move || {
-                accepted.set(true);
-                closing.set(true);
-            }
-        });
-        dialog.on_cancel({
-            let closing = Rc::clone(&closing);
-            move || closing.set(true)
-        });
-
-        let width = (DIALOG_LOGICAL_W * scale).round() as i32;
-        let height = (dialog_logical_height(cfg.has_input) * scale).round() as i32;
-        let _ = window
-            .window()
-            .try_dispatch_event(WindowEvent::ScaleFactorChanged {
-                scale_factor: scale,
-            });
-        window.set_size(PhysicalSize::new(width as u32, height as u32));
-        let _ = dialog.show();
-        // Engage Slint's focus model so the text field shows a caret and takes keys.
-        let _ = window
-            .window()
-            .try_dispatch_event(WindowEvent::WindowActiveChanged(true));
-
-        // Center on the primary screen.
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let left = ((screen_w - width) / 2).max(0);
-        let top = ((screen_h - height) / 2).max(0);
-
-        let Some((mem_dc, dib, bits)) = create_dib(width, height) else {
-            return cancelled();
-        };
-
-        let dialog_state = Box::new(DialogState {
-            window: window.clone(),
-            mem_dc,
-            dib,
-            bits,
-            buf_w: width as usize,
-            buf_h: height as usize,
-            scale,
-            has_input: cfg.has_input,
-            closing: Rc::clone(&closing),
-            accepted: Rc::clone(&accepted),
-            pending_high: Cell::new(0),
-        });
-        let state_ptr = Box::into_raw(dialog_state);
-
-        let Ok(instance) = GetModuleHandleW(PCWSTR::null()) else {
-            let _ = Box::from_raw(state_ptr);
-            return cancelled();
-        };
-        let class_name = wide("RulerDialogWindowClass");
-        let class = WNDCLASSW {
-            style: CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: Some(dialog_window_proc),
-            hInstance: HINSTANCE(instance.0),
-            lpszClassName: PCWSTR(class_name.as_ptr()),
-            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
-            ..Default::default()
-        };
-        // Re-registration on later opens returns 0; the class persists, so ignore.
-        RegisterClassW(&class);
-
-        let title = wide("Ruler Dialog");
-        let Ok(hwnd) = CreateWindowExW(
-            WINDOW_EX_STYLE(WS_EX_TOPMOST.0 | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0),
-            PCWSTR(class_name.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            WINDOW_STYLE(WS_POPUP.0 | WS_VISIBLE.0),
-            left,
-            top,
-            width,
-            height,
-            parent,
-            HMENU::default(),
-            HINSTANCE(instance.0),
-            Some(state_ptr.cast()),
-        ) else {
-            let _ = Box::from_raw(state_ptr);
-            return cancelled();
-        };
-        if hwnd.0.is_null() {
-            let _ = Box::from_raw(state_ptr);
-            return cancelled();
-        }
-
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetCapture(hwnd);
-        let _ = SetTimer(hwnd, DIALOG_TIMER_ID, OVERLAY_TIMER_INTERVAL_MS, None);
-        dialog_tick(hwnd);
-
-        // Nested loop. The HUD's WM_TIMER keeps firing on this thread, so the
-        // readout behind the dialog stays live.
-        let mut message = MSG::default();
-        while !closing.get() {
-            let result = GetMessageW(&mut message, HWND::default(), 0, 0).0;
-            if result == 0 {
-                // WM_QUIT consumed here; re-post so the outer loop also exits.
-                PostQuitMessage(0);
-                break;
-            }
-            if result == -1 {
-                break;
-            }
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-
-        let _ = ReleaseCapture();
-        let _ = DestroyWindow(hwnd);
-
-        // `dialog` is still alive in this scope, so reading the field is valid even
-        // though the window's boxed state was freed on WM_DESTROY.
-        DialogResult {
-            accepted: accepted.get(),
-            text: dialog.get_input_text().to_string(),
-        }
-    }
-
-    unsafe extern "system" fn dialog_window_proc(
-        hwnd: HWND,
-        message: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        match message {
-            WM_NCCREATE => {
-                let create_struct = lparam.0 as *const CREATESTRUCTW;
-                let state_ptr = (*create_struct).lpCreateParams as *mut DialogState;
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
-                LRESULT(1)
-            }
-            WM_TIMER => {
-                dialog_tick(hwnd);
-                LRESULT(0)
-            }
-            WM_MOUSEMOVE => {
-                if let Some(state) = dialog_state(hwnd) {
-                    let position = logical_pos(lparam, state.scale);
-                    let _ = state
-                        .window
-                        .window()
-                        .try_dispatch_event(WindowEvent::PointerMoved { position });
-                }
-                LRESULT(0)
-            }
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
-                if let Some(state) = dialog_state(hwnd) {
-                    let (x, y) = client_xy(lparam);
-                    let inside =
-                        x >= 0 && y >= 0 && x < state.buf_w as i32 && y < state.buf_h as i32;
-                    if !inside {
-                        // Click outside the modal dismisses it (treated as cancel).
-                        state.closing.set(true);
-                    } else if message == WM_LBUTTONDOWN {
-                        let position = logical_pos(lparam, state.scale);
-                        let _ = state.window.window().try_dispatch_event(
-                            WindowEvent::PointerPressed {
-                                position,
-                                button: PointerEventButton::Left,
-                            },
-                        );
-                    }
-                }
-                LRESULT(0)
-            }
-            WM_LBUTTONUP => {
-                if let Some(state) = dialog_state(hwnd) {
-                    let (x, y) = client_xy(lparam);
-                    let inside =
-                        x >= 0 && y >= 0 && x < state.buf_w as i32 && y < state.buf_h as i32;
-                    if inside {
-                        let position = logical_pos(lparam, state.scale);
-                        let _ = state.window.window().try_dispatch_event(
-                            WindowEvent::PointerReleased {
-                                position,
-                                button: PointerEventButton::Left,
-                            },
-                        );
-                    }
-                }
-                LRESULT(0)
-            }
-            WM_CHAR => {
-                // Printable text insertion for the prompt field. Control codes
-                // (Enter / Esc / Backspace) are handled in WM_KEYDOWN instead.
-                if let Some(state) = dialog_state(hwnd) {
-                    if state.has_input {
-                        if let Some(text) = decode_wm_char(&state.pending_high, wparam.0 as u16) {
-                            dispatch_key(&state.window, text);
-                        }
-                    }
-                }
-                LRESULT(0)
-            }
-            WM_KEYDOWN => {
-                if let Some(state) = dialog_state(hwnd) {
-                    let vk = wparam.0 as u16;
-                    if vk == VK_RETURN.0 {
-                        state.accepted.set(true);
-                        state.closing.set(true);
-                    } else if vk == VK_ESCAPE.0 {
-                        state.closing.set(true);
-                    } else if state.has_input {
-                        let key = match vk {
-                            v if v == VK_BACK.0 => Some(Key::Backspace),
-                            v if v == VK_DELETE.0 => Some(Key::Delete),
-                            v if v == VK_LEFT.0 => Some(Key::LeftArrow),
-                            v if v == VK_RIGHT.0 => Some(Key::RightArrow),
-                            v if v == VK_HOME.0 => Some(Key::Home),
-                            v if v == VK_END.0 => Some(Key::End),
-                            _ => None,
-                        };
-                        if let Some(key) = key {
-                            dispatch_key(&state.window, key.into());
-                        }
-                    }
-                }
-                LRESULT(0)
-            }
-            WM_DESTROY => {
-                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
-                if !state_ptr.is_null() {
-                    let _ = Box::from_raw(state_ptr);
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                }
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, message, wparam, lparam),
-        }
-    }
+    // ===================== inline-edit keyboard plumbing =====================
 
     /// Dispatch a press + release for `text` (a typed character or a `Key` glyph)
-    /// to the dialog's focused text field.
+    /// to whichever text field currently holds focus (the inline rename field).
     fn dispatch_key(window: &Rc<MinimalSoftwareWindow>, text: SharedString) {
         let _ = window
             .window()
@@ -1715,32 +1321,6 @@ mod platform {
             vec![unit]
         };
         Some(String::from_utf16_lossy(&units).into())
-    }
-
-    unsafe fn dialog_tick(hwnd: HWND) {
-        slint::platform::update_timers_and_animations();
-        let Some(state) = dialog_state(hwnd) else {
-            return;
-        };
-        let w = state.buf_w;
-        let h = state.buf_h;
-        let bits = state.bits;
-        let drawn = state.window.draw_if_needed(|renderer: &SoftwareRenderer| {
-            let buffer = unsafe { std::slice::from_raw_parts_mut(bits, w * h) };
-            renderer.render(buffer, w);
-        });
-        if drawn {
-            present_layered(hwnd, state.mem_dc, w as i32, h as i32);
-        }
-    }
-
-    unsafe fn dialog_state<'a>(hwnd: HWND) -> Option<&'a DialogState> {
-        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
-        if state_ptr.is_null() {
-            None
-        } else {
-            Some(&*state_ptr)
-        }
     }
 
     unsafe extern "system" fn menu_window_proc(
@@ -1806,10 +1386,49 @@ mod platform {
                 }
                 LRESULT(0)
             }
+            WM_CHAR => {
+                // Inline-rename text entry: forward printable units to the focused
+                // field. Control codes (Enter/Esc/Backspace) come via WM_KEYDOWN.
+                if let Some(state) = menu_state(hwnd) {
+                    if state.menu.get_editing_index() >= 0 {
+                        if let Some(text) = decode_wm_char(&state.pending_high, wparam.0 as u16) {
+                            dispatch_key(&state.window, text);
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
             WM_KEYDOWN => {
-                if (wparam.0 as u16) == VK_ESCAPE.0 {
-                    if let Some(state) = menu_state(hwnd) {
-                        state.closing.set(true);
+                if let Some(state) = menu_state(hwnd) {
+                    let editing = state.menu.get_editing_index() >= 0;
+                    let deleting = state.menu.get_deleting_index() >= 0;
+                    let vk = wparam.0 as u16;
+                    if vk == VK_ESCAPE.0 {
+                        if editing || deleting {
+                            // Esc backs out of an inline edit / confirm first.
+                            state.menu.set_editing_index(-1);
+                            state.menu.set_deleting_index(-1);
+                        } else {
+                            state.closing.set(true);
+                        }
+                    } else if editing {
+                        if vk == VK_RETURN.0 {
+                            // Let the focused field's `accepted` commit the rename.
+                            dispatch_key(&state.window, Key::Return.into());
+                        } else {
+                            let key = match vk {
+                                v if v == VK_BACK.0 => Some(Key::Backspace),
+                                v if v == VK_DELETE.0 => Some(Key::Delete),
+                                v if v == VK_LEFT.0 => Some(Key::LeftArrow),
+                                v if v == VK_RIGHT.0 => Some(Key::RightArrow),
+                                v if v == VK_HOME.0 => Some(Key::Home),
+                                v if v == VK_END.0 => Some(Key::End),
+                                _ => None,
+                            };
+                            if let Some(key) = key {
+                                dispatch_key(&state.window, key.into());
+                            }
+                        }
                     }
                 }
                 LRESULT(0)
@@ -1828,12 +1447,12 @@ mod platform {
 
     unsafe fn menu_tick(hwnd: HWND) {
         slint::platform::update_timers_and_animations();
-        let Some(state) = menu_state(hwnd) else {
+        let Some(state) = menu_state_mut(hwnd) else {
             return;
         };
+        let snapshot = state.state.snapshot();
         // Live-sync the cheap selections so chips reflect changes made via the
         // menu (and the worker) without rebuilding the profile model each frame.
-        let snapshot = state.state.snapshot();
         state
             .menu
             .set_display_mode(display_mode_index(snapshot.ui.display_mode));
@@ -1843,6 +1462,20 @@ mod platform {
         state
             .menu
             .set_timer_enabled(snapshot.ui.active_profile.is_some());
+
+        // Refresh the profile model only when the list actually changes (an inline
+        // rename/delete landed), so an in-progress edit field is not torn down each
+        // frame. Resize the popup when the row count changed.
+        let sig = profiles_signature(&snapshot.ui.profiles);
+        if state.profiles_sig != sig {
+            rebuild_profiles(&state.menu, &snapshot.ui.profiles);
+            state.profiles_sig = sig;
+            let new_count = snapshot.ui.profiles.len();
+            if new_count != state.profile_count {
+                state.profile_count = new_count;
+                resize_menu(hwnd, state, new_count);
+            }
+        }
 
         let w = state.buf_w;
         let h = state.buf_h;
@@ -1854,6 +1487,34 @@ mod platform {
         if drawn {
             present_layered(hwnd, state.mem_dc, w as i32, h as i32);
         }
+    }
+
+    /// Resize the open menu popup to fit `n_profiles` rows (after an inline delete
+    /// removed one). Rebuilds the framebuffer DIB and the native + Slint window
+    /// size, keeping the top-left corner fixed.
+    unsafe fn resize_menu(hwnd: HWND, state: &mut MenuState, n_profiles: usize) {
+        let width = state.buf_w as i32;
+        let height = (menu_logical_height(n_profiles) * state.scale).round() as i32;
+        let _ = DeleteDC(state.mem_dc);
+        let _ = DeleteObject(HGDIOBJ(state.dib.0));
+        if let Some((mem_dc, dib, bits)) = create_dib(width, height) {
+            state.mem_dc = mem_dc;
+            state.dib = dib;
+            state.bits = bits;
+            state.buf_h = height as usize;
+        }
+        state
+            .window
+            .set_size(PhysicalSize::new(width as u32, height as u32));
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
     }
 
     fn client_xy(lparam: LPARAM) -> (i32, i32) {
@@ -1868,6 +1529,15 @@ mod platform {
             None
         } else {
             Some(&*state_ptr)
+        }
+    }
+
+    unsafe fn menu_state_mut<'a>(hwnd: HWND) -> Option<&'a mut MenuState> {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuState;
+        if state_ptr.is_null() {
+            None
+        } else {
+            Some(&mut *state_ptr)
         }
     }
 

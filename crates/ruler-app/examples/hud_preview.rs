@@ -183,4 +183,81 @@ fn main() {
     menu.set_editing_index(-1);
     menu.set_deleting_index(1);
     render_png(&menu_window, mw, mh, "hud_menu_delete.png");
+
+    // ----- Wizard -----
+    let wizard = Wizard::new().unwrap();
+    let wizard_window = last.borrow_mut().take().expect("wizard window");
+
+    let rows = vec![
+        TargetRow {
+            name: "MuMu #0".into(),
+            detail: "127.0.0.1:16384 | D:\\MuMuPlayer-12.0".into(),
+            latency: "12.3 ms".into(),
+            latency_class: 1,
+            error: false,
+            selected: true,
+        },
+        TargetRow {
+            name: "LDPlayer #0".into(),
+            detail: "emulator-5554 | D:\\LDPlayer9".into(),
+            latency: "45.0 ms".into(),
+            latency_class: 3,
+            error: false,
+            selected: false,
+        },
+        TargetRow {
+            name: "Windows 明日方舟".into(),
+            detail: "明日方舟 [UnityWndClass]".into(),
+            latency: "connect failed: device offline".into(),
+            latency_class: 5,
+            error: true,
+            selected: false,
+        },
+    ];
+    wizard.set_rows(ModelRc::new(VecModel::from(rows)));
+    wizard.set_title_text("首次使用配置向导".into());
+    wizard.set_header_text("请选择当前可用的明日方舟目标。当前平均截图延迟: 12.3 ms".into());
+    wizard.set_status_text("已选择: MuMu #0\n平均截图延迟: 12.3 ms".into());
+    wizard.set_status_error(false);
+    wizard.set_cap_preview("实时截图预览".into());
+    wizard.set_cap_empty("正在扫描目标并测量截图延迟...".into());
+    wizard.set_cap_auto("下次自动选择该实例".into());
+    wizard.set_cap_refresh("刷新".into());
+    wizard.set_cap_start("保存并启动".into());
+    wizard.set_cap_cancel("取消".into());
+    wizard.set_preview_placeholder("预览不可用".into());
+    wizard.set_auto_checked(true);
+    wizard.set_has_preview(true);
+    wizard.set_preview(synthetic_preview(160, 90));
+
+    let ww = (560.0 * scale).round() as usize;
+    let wh = (404.0 * scale).round() as usize;
+    wizard_window
+        .window()
+        .try_dispatch_event(WindowEvent::ScaleFactorChanged {
+            scale_factor: scale,
+        })
+        .unwrap();
+    wizard_window.set_size(PhysicalSize::new(ww as u32, wh as u32));
+    wizard.show().unwrap();
+    let _ = wizard_window
+        .window()
+        .try_dispatch_event(WindowEvent::WindowActiveChanged(true));
+    render_png(&wizard_window, ww, wh, "wizard.png");
+}
+
+/// A small synthetic RGBA gradient standing in for a live capture preview.
+fn synthetic_preview(w: u32, h: u32) -> slint::Image {
+    let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
+    let bytes = buffer.make_mut_bytes();
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let i = (y * w as usize + x) * 4;
+            bytes[i] = (x * 255 / w as usize) as u8;
+            bytes[i + 1] = (y * 255 / h as usize) as u8;
+            bytes[i + 2] = 140;
+            bytes[i + 3] = 255;
+        }
+    }
+    slint::Image::from_rgba8(buffer)
 }

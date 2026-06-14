@@ -25,3 +25,4 @@ calibration_data_*.json
 
 # --- HUD preview output (examples/hud_preview) ---
 hud_*.png
+wizard.png

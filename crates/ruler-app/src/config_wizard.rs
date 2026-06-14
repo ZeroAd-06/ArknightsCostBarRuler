@@ -24,9 +24,9 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use std::{
+        cell::{Cell, RefCell},
         collections::{HashMap, VecDeque},
-        ffi::c_void,
-        iter,
+        rc::Rc,
         sync::{
             atomic::{AtomicBool, Ordering},
             mpsc::{self, Receiver, Sender},
@@ -40,33 +40,30 @@ mod platform {
         capture::{create_backend, CapturedFrame},
         PixelFormat, RulerConfig,
     };
+    use slint::{
+        platform::{
+            software_renderer::{MinimalSoftwareWindow, SoftwareRenderer},
+            PointerEventButton, WindowAdapter, WindowEvent,
+        },
+        ComponentHandle, Image, ModelRc, PhysicalSize, Rgba8Pixel, SharedPixelBuffer, VecModel,
+    };
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
-            Graphics::Gdi::{
-                BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-                InvalidateRect, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor,
-                StretchDIBits, TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-                DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HGDIOBJ,
-                PAINTSTRUCT, SRCCOPY, TRANSPARENT,
-            },
+            Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+            Graphics::Gdi::{DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ},
             System::LibraryLoader::GetModuleHandleW,
             UI::{
-                Controls::{DRAWITEMSTRUCT, ODS_SELECTED},
+                Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE},
                 WindowsAndMessaging::{
-                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-                    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
-                    KillTimer, LoadIconW, MessageBoxW, RegisterClassW, SendMessageW, SetTimer,
-                    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-                    BM_GETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, GWLP_USERDATA,
-                    HMENU, IDCANCEL, IDI_APPLICATION, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOTIFY,
-                    LBS_OWNERDRAWFIXED, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
-                    MB_ICONERROR, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_NOZORDER,
-                    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE,
-                    WM_DESTROY, WM_DRAWITEM, WM_NCCREATE, WM_PAINT, WM_TIMER, WNDCLASSW, WS_BORDER,
-                    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
-                    WS_VISIBLE, WS_VSCROLL,
+                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+                    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, LoadCursorW,
+                    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
+                    ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+                    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE,
+                    SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_KEYDOWN,
+                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_TIMER, WNDCLASSW,
+                    WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
         },
@@ -74,52 +71,24 @@ mod platform {
 
     use crate::{
         i18n::I18n,
+        slint_win::{
+            create_dib, ensure_platform, logical_pos, present_layered, wide, PreBgra,
+        },
         target_discovery::{
             discover_targets, latency_class, LatencyClass, PreviewFrame, TargetCandidate,
         },
+        ui::{TargetRow, Wizard},
     };
 
-    const CLASS_NAME: &str = "RulerTargetSelectorWindow";
-    const ID_TARGET_LIST: i32 = 2001;
-    const ID_REFRESH: i32 = 2002;
-    const ID_AUTO_SELECT: i32 = 2003;
-    const ID_START: i32 = 2004;
-    const ID_STATUS: i32 = 2005;
-    const ID_TIMER_PROBE: usize = 1;
-    const ID_TIMER_REFRESH: usize = 2;
-    const PROBE_UI_INTERVAL_MS: u32 = 200;
-    const REFRESH_INTERVAL_MS: u32 = 7000;
+    const CLASS_NAME: &str = "RulerWizardWindowClass";
+    const TIMER_ID: usize = 1;
+    const TICK_INTERVAL_MS: u32 = 16;
     const PROBE_LOOP_PAUSE_MS: u64 = 250;
     const PROBE_RECONNECT_PAUSE_MS: u64 = 1000;
     const LATENCY_SAMPLE_WINDOW: usize = 12;
-    const WINDOW_WIDTH: i32 = 840;
-    const WINDOW_HEIGHT: i32 = 560;
-    const PREVIEW_RECT: RECT = RECT {
-        left: 20,
-        top: 350,
-        right: 430,
-        bottom: 505,
-    };
-
-    struct WizardState {
-        i18n: I18n,
-        previous_config: Option<RulerConfig>,
-        hwnd: HWND,
-        result: Option<RulerConfig>,
-        done: bool,
-        header_label: HWND,
-        target_list: HWND,
-        status_label: HWND,
-        auto_checkbox: HWND,
-        start_button: HWND,
-        candidates: Vec<TargetCandidate>,
-        selected_index: Option<usize>,
-        probe_tx: Sender<ProbeMessage>,
-        probe_rx: Receiver<ProbeMessage>,
-        probe_generation: u64,
-        probe_workers: Vec<ProbeWorker>,
-        latency_samples: HashMap<String, VecDeque<Duration>>,
-    }
+    // Fixed logical design size of `wizard.slint` (physical = logical * scale).
+    const WIZARD_LOGICAL_W: f32 = 560.0;
+    const WIZARD_LOGICAL_H: f32 = 404.0;
 
     #[derive(Clone, Debug)]
     struct ProbeMessage {
@@ -133,30 +102,24 @@ mod platform {
         handle: Option<JoinHandle<()>>,
     }
 
-    impl WizardState {
-        fn new(i18n: &I18n, previous_config: Option<&RulerConfig>) -> Self {
-            let (probe_tx, probe_rx) = mpsc::channel();
-            Self {
-                i18n: i18n.clone(),
-                previous_config: previous_config.cloned(),
-                hwnd: HWND::default(),
-                result: None,
-                done: false,
-                header_label: HWND::default(),
-                target_list: HWND::default(),
-                status_label: HWND::default(),
-                auto_checkbox: HWND::default(),
-                start_button: HWND::default(),
-                candidates: Vec::new(),
-                selected_index: None,
-                probe_tx,
-                probe_rx,
-                probe_generation: 0,
-                probe_workers: Vec::new(),
-                latency_samples: HashMap::new(),
-            }
-        }
+    /// All mutable wizard data shared between the Slint callbacks and the render
+    /// tick. Both run on the single UI thread, so a plain `Rc<RefCell<_>>` is safe.
+    struct WizardCore {
+        i18n: I18n,
+        previous_config: Option<RulerConfig>,
+        candidates: Vec<TargetCandidate>,
+        selected_index: Option<usize>,
+        probe_tx: Sender<ProbeMessage>,
+        probe_rx: Receiver<ProbeMessage>,
+        probe_generation: u64,
+        probe_workers: Vec<ProbeWorker>,
+        latency_samples: HashMap<String, VecDeque<Duration>>,
+        rows_sig: String,
+        // identity of the preview currently pushed to Slint: (selected idx, data ptr, len)
+        preview_token: Option<(usize, usize, usize)>,
+    }
 
+    impl WizardCore {
         fn selected_candidate(&self) -> Option<&TargetCandidate> {
             self.selected_index
                 .and_then(|index| self.candidates.get(index))
@@ -168,9 +131,38 @@ mod platform {
         }
     }
 
-    impl Drop for WizardState {
+    impl Drop for WizardCore {
         fn drop(&mut self) {
-            stop_probe_workers(self);
+            stop_probe_worker_list(&mut self.probe_workers);
+        }
+    }
+
+    /// The HWND-bound state: the Slint component, its software framebuffer, and a
+    /// handle to the shared [`WizardCore`].
+    struct WizardWindow {
+        wizard: Wizard,
+        window: Rc<MinimalSoftwareWindow>,
+        core: Rc<RefCell<WizardCore>>,
+        closing: Rc<Cell<bool>>,
+        drag_on_title: Rc<Cell<bool>>,
+        mem_dc: HDC,
+        dib: HBITMAP,
+        bits: *mut PreBgra,
+        buf_w: usize,
+        buf_h: usize,
+        scale: f32,
+        mouse_down: bool,
+        moved: bool,
+        drag_origin: POINT,
+        window_origin: POINT,
+    }
+
+    impl Drop for WizardWindow {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.mem_dc);
+                let _ = DeleteObject(HGDIOBJ(self.dib.0));
+            }
         }
     }
 
@@ -178,245 +170,378 @@ mod platform {
         i18n: &I18n,
         previous_config: Option<&RulerConfig>,
     ) -> Option<RulerConfig> {
+        let slot = ensure_platform();
+        let Ok(wizard) = Wizard::new() else {
+            return None;
+        };
+        let window = slot.borrow_mut().take()?;
+
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let core = Rc::new(RefCell::new(WizardCore {
+            i18n: i18n.clone(),
+            previous_config: previous_config.cloned(),
+            candidates: Vec::new(),
+            selected_index: None,
+            probe_tx,
+            probe_rx,
+            probe_generation: 0,
+            probe_workers: Vec::new(),
+            latency_samples: HashMap::new(),
+            rows_sig: String::new(),
+            preview_token: None,
+        }));
+        let result: Rc<RefCell<Option<RulerConfig>>> = Rc::new(RefCell::new(None));
+        let closing = Rc::new(Cell::new(false));
+        let drag_on_title = Rc::new(Cell::new(false));
+
+        populate_captions(&wizard, i18n);
+        wire_callbacks(&wizard, &core, &result, &closing, &drag_on_title);
+
+        // Initial discovery + probe.
+        refresh_candidates(&mut core.borrow_mut());
+
+        let scale = wizard_scale();
+        let width = (WIZARD_LOGICAL_W * scale).round() as i32;
+        let height = (WIZARD_LOGICAL_H * scale).round() as i32;
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            });
+        window.set_size(PhysicalSize::new(width as u32, height as u32));
+        let _ = wizard.show();
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::WindowActiveChanged(true));
+
         unsafe {
             let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
                 return None;
             };
             let class_name = wide(CLASS_NAME);
-            let icon = LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default();
             let class = WNDCLASSW {
+                style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(window_proc),
                 hInstance: HINSTANCE(module.0),
                 lpszClassName: PCWSTR(class_name.as_ptr()),
-                hIcon: icon,
+                hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
                 ..Default::default()
             };
-            let _ = RegisterClassW(&class);
+            RegisterClassW(&class);
 
-            let mut state = Box::new(WizardState::new(i18n, previous_config));
-            let state_ptr = state.as_mut() as *mut WizardState;
-            let title = wide(&i18n.tr("config.window.title"));
-            let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+            let screen_w = GetSystemMetrics(SM_CXSCREEN);
+            let screen_h = GetSystemMetrics(SM_CYSCREEN);
+            let left = ((screen_w - width) / 2).max(0);
+            let top = ((screen_h - height) / 2).max(0);
+
+            let (mem_dc, dib, bits) = create_dib(width, height)?;
+
+            let state = Box::new(WizardWindow {
+                wizard,
+                window,
+                core,
+                closing: Rc::clone(&closing),
+                drag_on_title,
+                mem_dc,
+                dib,
+                bits,
+                buf_w: width as usize,
+                buf_h: height as usize,
+                scale,
+                mouse_down: false,
+                moved: false,
+                drag_origin: POINT::default(),
+                window_origin: POINT::default(),
+            });
+            let state_ptr = Box::into_raw(state);
+
+            let title = wide("Arknights Ruler Setup");
+            let Ok(hwnd) = CreateWindowExW(
+                WINDOW_EX_STYLE(WS_EX_TOPMOST.0 | WS_EX_LAYERED.0),
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(title.as_ptr()),
-                WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0),
-                0,
-                0,
-                WINDOW_WIDTH,
-                WINDOW_HEIGHT,
+                WINDOW_STYLE(WS_POPUP.0 | WS_VISIBLE.0),
+                left,
+                top,
+                width,
+                height,
                 HWND::default(),
                 HMENU::default(),
                 HINSTANCE(module.0),
                 Some(state_ptr.cast()),
-            )
-            .ok()?;
+            ) else {
+                let _ = Box::from_raw(state_ptr);
+                return None;
+            };
             if hwnd.0.is_null() {
+                let _ = Box::from_raw(state_ptr);
                 return None;
             }
 
-            center_window(hwnd, WINDOW_WIDTH, WINDOW_HEIGHT);
             let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetTimer(hwnd, TIMER_ID, TICK_INTERVAL_MS, None);
+            tick(hwnd);
 
             let mut message = MSG::default();
-            while !state.done && GetMessageW(&mut message, HWND::default(), 0, 0).0 > 0 {
+            while !closing.get() {
+                let value = GetMessageW(&mut message, HWND::default(), 0, 0).0;
+                if value == 0 || value == -1 {
+                    break;
+                }
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
 
-            state.result.take()
+            let _ = DestroyWindow(hwnd);
+        }
+
+        let config = result.borrow_mut().take();
+        config
+    }
+
+    fn populate_captions(wizard: &Wizard, i18n: &I18n) {
+        wizard.set_title_text(i18n.tr("config.window.title").into());
+        wizard.set_header_text(i18n.tr("config.selector.header").into());
+        wizard.set_status_text(i18n.tr("config.selector.scanning").into());
+        wizard.set_status_error(false);
+        wizard.set_has_preview(false);
+        wizard.set_scanning(true);
+        wizard.set_cap_preview(i18n.tr("config.selector.preview").into());
+        wizard.set_cap_empty(i18n.tr("config.selector.scanning").into());
+        wizard.set_cap_auto(i18n.tr("config.selector.auto_next").into());
+        wizard.set_cap_refresh(i18n.tr("config.selector.refresh").into());
+        wizard.set_cap_start(i18n.tr("config.btn.save_start").into());
+        wizard.set_cap_cancel(i18n.tr("config.btn.cancel").into());
+        wizard.set_preview_placeholder(i18n.tr("config.window.preview.unavailable").into());
+        wizard.set_auto_checked(false);
+    }
+
+    fn wire_callbacks(
+        wizard: &Wizard,
+        core: &Rc<RefCell<WizardCore>>,
+        result: &Rc<RefCell<Option<RulerConfig>>>,
+        closing: &Rc<Cell<bool>>,
+        drag_on_title: &Rc<Cell<bool>>,
+    ) {
+        wizard.on_select_target({
+            let core = Rc::clone(core);
+            move |idx| {
+                let mut core = core.borrow_mut();
+                core.selected_index = (idx >= 0).then_some(idx as usize);
+            }
+        });
+        wizard.on_refresh({
+            let core = Rc::clone(core);
+            move || refresh_candidates(&mut core.borrow_mut())
+        });
+        wizard.on_cancel({
+            let closing = Rc::clone(closing);
+            move || closing.set(true)
+        });
+        wizard.on_close({
+            let closing = Rc::clone(closing);
+            move || closing.set(true)
+        });
+        wizard.on_title_pressed({
+            let drag_on_title = Rc::clone(drag_on_title);
+            move || drag_on_title.set(true)
+        });
+        wizard.on_title_released({
+            let drag_on_title = Rc::clone(drag_on_title);
+            move || drag_on_title.set(false)
+        });
+        wizard.on_confirm({
+            let core = Rc::clone(core);
+            let result = Rc::clone(result);
+            let closing = Rc::clone(closing);
+            let weak = wizard.as_weak();
+            move || {
+                let auto = weak
+                    .upgrade()
+                    .map(|wizard| wizard.get_auto_checked())
+                    .unwrap_or(false);
+                let core = core.borrow();
+                let Some(candidate) = core.selected_candidate() else {
+                    return;
+                };
+                if candidate.error.is_some() || candidate.preview.is_none() {
+                    return; // status line already explains why; refuse silently
+                }
+                let mut config = candidate.config.clone();
+                config.language = core
+                    .previous_config
+                    .as_ref()
+                    .and_then(|previous| previous.language.clone())
+                    .or_else(|| Some(core.i18n.locale().to_string()));
+                config.auto_select_target = auto;
+                config.target_fingerprint = Some(candidate.fingerprint.clone());
+                *result.borrow_mut() = Some(config);
+                closing.set(true);
+            }
+        });
+    }
+
+    // ===================== render / sync tick =====================
+
+    unsafe fn tick(hwnd: HWND) {
+        slint::platform::update_timers_and_animations();
+        let Some(state) = wizard_window_mut(hwnd) else {
+            return;
+        };
+        {
+            let mut core = state.core.borrow_mut();
+            drain_probe_messages(&mut core);
+            sync_to_slint(&state.wizard, &mut core);
+        }
+
+        let w = state.buf_w;
+        let h = state.buf_h;
+        let bits = state.bits;
+        let drawn = state.window.draw_if_needed(|renderer: &SoftwareRenderer| {
+            let buffer = unsafe { std::slice::from_raw_parts_mut(bits, w * h) };
+            renderer.render(buffer, w);
+        });
+        if drawn {
+            present_layered(hwnd, state.mem_dc, w as i32, h as i32);
         }
     }
 
-    unsafe extern "system" fn window_proc(
-        hwnd: HWND,
-        message: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        match message {
-            WM_NCCREATE => {
-                let create_struct =
-                    lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
-                let state_ptr = (*create_struct).lpCreateParams as *mut WizardState;
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
-                (*state_ptr).hwnd = hwnd;
-                LRESULT(1)
-            }
-            WM_CREATE => {
-                if let Some(state) = state_mut(hwnd) {
-                    create_controls(hwnd, state);
-                    refresh_candidates(state);
-                    let _ = SetTimer(hwnd, ID_TIMER_PROBE, PROBE_UI_INTERVAL_MS, None);
-                    let _ = SetTimer(hwnd, ID_TIMER_REFRESH, REFRESH_INTERVAL_MS, None);
-                }
-                LRESULT(0)
-            }
-            WM_COMMAND => {
-                if let Some(state) = state_mut(hwnd) {
-                    let control_id = (wparam.0 & 0xffff) as i32;
-                    let notification = ((wparam.0 >> 16) & 0xffff) as u32;
-                    match control_id {
-                        ID_TARGET_LIST if notification == LBN_SELCHANGE => {
-                            select_target_from_list(state);
-                        }
-                        ID_REFRESH => refresh_candidates(state),
-                        ID_START => save_selected_target(state),
-                        id if id == IDCANCEL.0 => close_without_result(state),
-                        _ => {}
+    /// Push the current candidate state into the Slint component. Rebuilds the row
+    /// model only when it changed, and the preview image only when a new frame for
+    /// the selected target arrived (or the selection changed).
+    fn sync_to_slint(wizard: &Wizard, core: &mut WizardCore) {
+        let i18n = &core.i18n;
+
+        // rows
+        let sig = rows_signature(&core.candidates, core.selected_index);
+        if core.rows_sig != sig {
+            let rows: Vec<TargetRow> = core
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(idx, candidate)| {
+                    let error = candidate.error.is_some();
+                    let latency = candidate
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| candidate.latency_text());
+                    TargetRow {
+                        name: candidate.name.as_str().into(),
+                        detail: candidate.detail.as_str().into(),
+                        latency: latency.into(),
+                        latency_class: latency_class_index(candidate.latency_class),
+                        error,
+                        selected: core.selected_index == Some(idx),
                     }
+                })
+                .collect();
+            wizard.set_rows(ModelRc::new(VecModel::from(rows)));
+            wizard.set_scanning(core.candidates.is_empty());
+            wizard.set_cap_empty(i18n.tr("config.selector.no_targets").into());
+            core.rows_sig = sig;
+        }
+
+        // preview
+        let token = core
+            .selected_candidate()
+            .and_then(|candidate| candidate.preview.as_ref())
+            .map(|preview| {
+                (
+                    core.selected_index.unwrap_or(usize::MAX),
+                    preview.data.as_ptr() as usize,
+                    preview.data.len(),
+                )
+            });
+        if token != core.preview_token {
+            match core
+                .selected_candidate()
+                .and_then(|candidate| candidate.preview.as_ref())
+                .and_then(preview_image)
+            {
+                Some(image) => {
+                    wizard.set_preview(image);
+                    wizard.set_has_preview(true);
                 }
-                LRESULT(0)
+                None => wizard.set_has_preview(false),
             }
-            WM_DRAWITEM => {
-                if let Some(state) = state_mut(hwnd) {
-                    draw_target_list_item(state, lparam);
-                }
-                LRESULT(1)
-            }
-            WM_TIMER => {
-                if let Some(state) = state_mut(hwnd) {
-                    if wparam.0 == ID_TIMER_PROBE {
-                        drain_probe_messages(state);
-                    } else if wparam.0 == ID_TIMER_REFRESH {
-                        refresh_candidates(state);
-                    }
-                }
-                LRESULT(0)
-            }
-            WM_PAINT => {
-                if let Some(state) = state_mut(hwnd) {
-                    paint_preview(hwnd, state);
-                }
-                LRESULT(0)
-            }
-            WM_CLOSE => {
-                if let Some(state) = state_mut(hwnd) {
-                    close_without_result(state);
+            core.preview_token = token;
+        }
+
+        // header + status
+        let header = core
+            .selected_candidate()
+            .and_then(|candidate| candidate.latency.map(|_| candidate.latency_text()))
+            .map(|latency| {
+                i18n.tr_with("config.selector.header_with_latency", &[("latency", latency)])
+            })
+            .unwrap_or_else(|| i18n.tr("config.selector.header"));
+        wizard.set_header_text(header.into());
+
+        let (status, is_error) = match core.selected_candidate() {
+            None if core.candidates.is_empty() => (i18n.tr("config.selector.no_targets"), false),
+            None => (i18n.tr("config.selector.no_selection"), false),
+            Some(candidate) => {
+                if let Some(error) = &candidate.error {
+                    (
+                        i18n.tr_with("config.selector.selected_error", &[("error", error.clone())]),
+                        true,
+                    )
+                } else if candidate.preview.is_none() {
+                    (i18n.tr("config.selector.error.waiting_probe"), false)
                 } else {
-                    let _ = DestroyWindow(hwnd);
+                    (
+                        i18n.tr_with(
+                            "config.selector.selected_ok",
+                            &[
+                                ("name", candidate.name.clone()),
+                                ("latency", candidate.latency_text()),
+                            ],
+                        ),
+                        false,
+                    )
                 }
-                LRESULT(0)
             }
-            WM_DESTROY => {
-                let _ = KillTimer(hwnd, ID_TIMER_PROBE);
-                let _ = KillTimer(hwnd, ID_TIMER_REFRESH);
-                if let Some(state) = state_mut(hwnd) {
-                    stop_probe_workers(state);
-                    state.done = true;
-                }
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        };
+        wizard.set_status_text(status.into());
+        wizard.set_status_error(is_error);
+    }
+
+    fn latency_class_index(class: LatencyClass) -> i32 {
+        match class {
+            LatencyClass::PaleGreen => 0,
+            LatencyClass::Green => 1,
+            LatencyClass::Yellow => 2,
+            LatencyClass::Orange => 3,
+            LatencyClass::Red => 4,
+            LatencyClass::Unknown => 5,
         }
     }
 
-    unsafe fn create_controls(hwnd: HWND, state: &mut WizardState) {
-        state.header_label = create_static(
-            hwnd,
-            20,
-            18,
-            700,
-            24,
-            &state.i18n.tr("config.selector.header"),
-        );
-        state.target_list = create_control(
-            hwnd,
-            "LISTBOX",
-            "",
-            ID_TARGET_LIST,
-            20,
-            50,
-            790,
-            280,
-            WINDOW_STYLE(
-                WS_CHILD.0
-                    | WS_VISIBLE.0
-                    | WS_TABSTOP.0
-                    | WS_BORDER.0
-                    | WS_VSCROLL.0
-                    | LBS_NOTIFY as u32
-                    | LBS_OWNERDRAWFIXED as u32
-                    | LBS_HASSTRINGS as u32,
-            ),
-            WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0),
-        );
-        create_static(
-            hwnd,
-            PREVIEW_RECT.left,
-            PREVIEW_RECT.top - 24,
-            180,
-            22,
-            &state.i18n.tr("config.selector.preview"),
-        );
-        state.status_label = create_static_id(
-            hwnd,
-            ID_STATUS,
-            450,
-            352,
-            360,
-            78,
-            &state.i18n.tr("config.selector.scanning"),
-        );
-        state.auto_checkbox = create_control(
-            hwnd,
-            "BUTTON",
-            &state.i18n.tr("config.selector.auto_next"),
-            ID_AUTO_SELECT,
-            450,
-            435,
-            360,
-            26,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        create_control(
-            hwnd,
-            "BUTTON",
-            &state.i18n.tr("config.selector.refresh"),
-            ID_REFRESH,
-            520,
-            475,
-            100,
-            34,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        state.start_button = create_control(
-            hwnd,
-            "BUTTON",
-            &state.i18n.tr("config.btn.save_start"),
-            ID_START,
-            640,
-            475,
-            120,
-            34,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32),
-            WINDOW_EX_STYLE::default(),
-        );
-        create_control(
-            hwnd,
-            "BUTTON",
-            &state.i18n.tr("config.btn.cancel"),
-            IDCANCEL.0,
-            770,
-            475,
-            60,
-            34,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
-            WINDOW_EX_STYLE::default(),
-        );
+    /// Cheap change-detector: rebuild the Slint row model only when a label,
+    /// latency, error, or the selection changed.
+    fn rows_signature(candidates: &[TargetCandidate], selected: Option<usize>) -> String {
+        let mut sig = String::new();
+        for (idx, candidate) in candidates.iter().enumerate() {
+            sig.push_str(&candidate.fingerprint);
+            sig.push('\u{1}');
+            sig.push_str(&candidate.list_label());
+            sig.push(if candidate.error.is_some() { 'E' } else { 'o' });
+            sig.push(if selected == Some(idx) { '*' } else { '.' });
+            sig.push('\u{2}');
+        }
+        sig
     }
 
-    unsafe fn refresh_candidates(state: &mut WizardState) {
-        let preferred_fingerprint = state.selected_fingerprint().or_else(|| {
-            state
-                .previous_config
+    // ===================== discovery + probe workers =====================
+
+    fn refresh_candidates(core: &mut WizardCore) {
+        let preferred_fingerprint = core.selected_fingerprint().or_else(|| {
+            core.previous_config
                 .as_ref()
                 .and_then(|config| config.target_fingerprint.clone())
         });
-        let previous_probe_state = state
+        let previous_probe_state = core
             .candidates
             .iter()
             .map(|candidate| {
@@ -432,16 +557,13 @@ mod platform {
             })
             .collect::<HashMap<_, _>>();
 
-        stop_probe_workers(state);
-        state.probe_generation = state.probe_generation.wrapping_add(1);
-        set_text(
-            state.status_label,
-            &state.i18n.tr("config.selector.scanning"),
-        );
-        let _ = SendMessageW(state.target_list, LB_RESETCONTENT, WPARAM(0), LPARAM(0));
+        stop_probe_worker_list(&mut core.probe_workers);
+        core.probe_generation = core.probe_generation.wrapping_add(1);
+        core.preview_token = None;
+        core.rows_sig = String::new();
 
-        state.candidates = discover_targets(state.previous_config.as_ref());
-        for candidate in &mut state.candidates {
+        core.candidates = discover_targets(core.previous_config.as_ref());
+        for candidate in &mut core.candidates {
             if let Some((latency, latency_class, preview, error)) =
                 previous_probe_state.get(&candidate.fingerprint)
             {
@@ -451,89 +573,66 @@ mod platform {
                 candidate.error = error.clone();
             }
         }
-        let active_fingerprints = state
+        let active = core
             .candidates
             .iter()
             .map(|candidate| candidate.fingerprint.clone())
             .collect::<std::collections::HashSet<_>>();
-        state
-            .latency_samples
-            .retain(|fingerprint, _| active_fingerprints.contains(fingerprint));
+        core.latency_samples
+            .retain(|fingerprint, _| active.contains(fingerprint));
 
-        for candidate in &state.candidates {
-            let label = wide(&candidate.list_label());
-            let _ = SendMessageW(
-                state.target_list,
-                LB_ADDSTRING,
-                WPARAM(0),
-                LPARAM(label.as_ptr() as isize),
-            );
-        }
-
-        if state.candidates.is_empty() {
-            state.selected_index = None;
-            set_text(
-                state.status_label,
-                &state.i18n.tr("config.selector.no_targets"),
-            );
-            update_header_status(state);
-            let _ = InvalidateRect(state.hwnd, Some(&PREVIEW_RECT), BOOL(1));
+        if core.candidates.is_empty() {
+            core.selected_index = None;
             return;
         }
-
-        let selected =
-            preferred_selection_index(&state.candidates, preferred_fingerprint.as_deref())
-                .unwrap_or(0);
-        let _ = SendMessageW(state.target_list, LB_SETCURSEL, WPARAM(selected), LPARAM(0));
-        state.selected_index = Some(selected);
-        start_probe_workers(state);
-        update_selected_status(state);
+        let selected = preferred_selection_index(&core.candidates, preferred_fingerprint.as_deref())
+            .unwrap_or(0);
+        core.selected_index = Some(selected);
+        start_probe_workers(core);
     }
 
-    unsafe fn select_target_from_list(state: &mut WizardState) {
-        drain_probe_messages(state);
-        let selected = SendMessageW(state.target_list, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
-        state.selected_index = (selected >= 0).then_some(selected as usize);
-        update_selected_status(state);
+    fn start_probe_workers(core: &mut WizardCore) {
+        let probes = core
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.fingerprint.clone(), candidate.config.clone()))
+            .collect::<Vec<_>>();
+        for (fingerprint, config) in probes {
+            let stop = Arc::new(AtomicBool::new(false));
+            match spawn_probe_worker(
+                fingerprint.clone(),
+                config,
+                core.probe_generation,
+                core.probe_tx.clone(),
+                Arc::clone(&stop),
+            ) {
+                Ok(handle) => core.probe_workers.push(ProbeWorker {
+                    stop,
+                    handle: Some(handle),
+                }),
+                Err(error) => {
+                    send_probe_error(&core.probe_tx, core.probe_generation, &fingerprint, error)
+                }
+            }
+        }
     }
 
-    fn preferred_selection_index(
-        candidates: &[TargetCandidate],
-        preferred_fingerprint: Option<&str>,
-    ) -> Option<usize> {
-        preferred_fingerprint
-            .and_then(|fingerprint| {
-                candidates
-                    .iter()
-                    .position(|candidate| candidate.fingerprint == fingerprint)
-            })
-            .or_else(|| {
-                candidates
-                    .iter()
-                    .position(|candidate| candidate.error.is_none())
-            })
-            .or_else(|| (!candidates.is_empty()).then_some(0))
-    }
-
-    unsafe fn drain_probe_messages(state: &mut WizardState) {
-        let mut list_updated = false;
-        let mut selected_updated = false;
-        while let Ok(message) = state.probe_rx.try_recv() {
-            if message.generation != state.probe_generation {
+    fn drain_probe_messages(core: &mut WizardCore) {
+        while let Ok(message) = core.probe_rx.try_recv() {
+            if message.generation != core.probe_generation {
                 continue;
             }
-            let Some(index) = state
+            let Some(index) = core
                 .candidates
                 .iter()
                 .position(|candidate| candidate.fingerprint == message.fingerprint)
             else {
                 continue;
             };
-
             match message.result {
                 Ok((latency, preview)) => {
-                    let average = record_latency_sample(state, &message.fingerprint, latency);
-                    if let Some(candidate) = state.candidates.get_mut(index) {
+                    let average = record_latency_sample(core, &message.fingerprint, latency);
+                    if let Some(candidate) = core.candidates.get_mut(index) {
                         candidate.latency = Some(average);
                         candidate.latency_class = latency_class(average);
                         candidate.preview = Some(preview);
@@ -541,32 +640,21 @@ mod platform {
                     }
                 }
                 Err(error) => {
-                    if let Some(candidate) = state.candidates.get_mut(index) {
+                    if let Some(candidate) = core.candidates.get_mut(index) {
                         candidate.error = Some(error);
                         candidate.latency_class = LatencyClass::Unknown;
                     }
                 }
             }
-            list_updated = true;
-            selected_updated |= state.selected_index == Some(index);
-        }
-
-        if list_updated {
-            let _ = InvalidateRect(state.target_list, None, BOOL(1));
-        }
-        if selected_updated {
-            update_selected_status(state);
-        } else if list_updated {
-            update_header_status(state);
         }
     }
 
     fn record_latency_sample(
-        state: &mut WizardState,
+        core: &mut WizardCore,
         fingerprint: &str,
         sample: Duration,
     ) -> Duration {
-        let samples = state
+        let samples = core
             .latency_samples
             .entry(fingerprint.to_string())
             .or_default();
@@ -588,37 +676,22 @@ mod platform {
         Duration::from_nanos(average.min(u64::MAX as u128) as u64)
     }
 
-    fn start_probe_workers(state: &mut WizardState) {
-        let probes = state
-            .candidates
-            .iter()
-            .map(|candidate| (candidate.fingerprint.clone(), candidate.config.clone()))
-            .collect::<Vec<_>>();
-
-        for (fingerprint, config) in probes {
-            let stop = Arc::new(AtomicBool::new(false));
-            match spawn_probe_worker(
-                fingerprint.clone(),
-                config,
-                state.probe_generation,
-                state.probe_tx.clone(),
-                Arc::clone(&stop),
-            ) {
-                Ok(handle) => {
-                    state.probe_workers.push(ProbeWorker {
-                        stop,
-                        handle: Some(handle),
-                    });
-                }
-                Err(error) => {
-                    send_probe_error(&state.probe_tx, state.probe_generation, &fingerprint, error);
-                }
-            }
-        }
-    }
-
-    fn stop_probe_workers(state: &mut WizardState) {
-        stop_probe_worker_list(&mut state.probe_workers);
+    fn preferred_selection_index(
+        candidates: &[TargetCandidate],
+        preferred_fingerprint: Option<&str>,
+    ) -> Option<usize> {
+        preferred_fingerprint
+            .and_then(|fingerprint| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.fingerprint == fingerprint)
+            })
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.error.is_none())
+            })
+            .or_else(|| (!candidates.is_empty()).then_some(0))
     }
 
     fn spawn_probe_worker(
@@ -631,9 +704,7 @@ mod platform {
         let name = format!("ruler-target-probe-{fingerprint}");
         thread::Builder::new()
             .name(name)
-            .spawn(move || {
-                run_probe_worker(fingerprint, config, generation, tx, stop);
-            })
+            .spawn(move || run_probe_worker(fingerprint, config, generation, tx, stop))
             .map_err(|error| format!("failed to start probe worker: {error}"))
     }
 
@@ -729,289 +800,60 @@ mod platform {
         }
     }
 
-    unsafe fn update_selected_status(state: &mut WizardState) {
-        update_header_status(state);
-        if let Some(candidate) = state.selected_candidate() {
-            let status = if let Some(error) = &candidate.error {
-                state.i18n.tr_with(
-                    "config.selector.selected_error",
-                    &[("error", error.clone())],
-                )
-            } else {
-                state.i18n.tr_with(
-                    "config.selector.selected_ok",
-                    &[
-                        ("name", candidate.name.clone()),
-                        ("latency", candidate.latency_text()),
-                    ],
-                )
-            };
-            set_text(state.status_label, &status);
-        } else {
-            set_text(
-                state.status_label,
-                &state.i18n.tr("config.selector.no_selection"),
-            );
-        }
-        let _ = InvalidateRect(state.hwnd, Some(&PREVIEW_RECT), BOOL(1));
-    }
+    // ===================== preview pixel conversion =====================
 
-    unsafe fn update_header_status(state: &mut WizardState) {
-        let text = state
-            .selected_candidate()
-            .and_then(|candidate| candidate.latency.map(|_| candidate.latency_text()))
-            .map(|latency| {
-                state.i18n.tr_with(
-                    "config.selector.header_with_latency",
-                    &[("latency", latency)],
-                )
-            })
-            .unwrap_or_else(|| state.i18n.tr("config.selector.header"));
-        set_text(state.header_label, &text);
-    }
-
-    unsafe fn draw_target_list_item(state: &WizardState, lparam: LPARAM) {
-        let draw = &*(lparam.0 as *const DRAWITEMSTRUCT);
-        if draw.itemID == u32::MAX {
-            return;
-        }
-        let Some(candidate) = state.candidates.get(draw.itemID as usize) else {
-            return;
-        };
-
-        let selected = (draw.itemState.0 & ODS_SELECTED.0) != 0;
-        let background = if selected {
-            COLORREF(0x00E8F2FF)
-        } else {
-            COLORREF(0x00FFFFFF)
-        };
-        let brush = CreateSolidBrush(background);
-        if !brush.0.is_null() {
-            let _ = FillRect(draw.hDC, &draw.rcItem, brush);
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-        }
-
-        let mut text_rect = draw.rcItem;
-        text_rect.left += 8;
-        text_rect.right -= 8;
-        let _ = SetBkMode(draw.hDC, TRANSPARENT);
-        let _ = SetTextColor(draw.hDC, latency_text_color(candidate));
-        let mut text = candidate.list_label().encode_utf16().collect::<Vec<_>>();
-        let _ = DrawTextW(
-            draw.hDC,
-            &mut text,
-            &mut text_rect,
-            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER,
-        );
-    }
-
-    fn latency_text_color(candidate: &TargetCandidate) -> COLORREF {
-        if candidate.error.is_some() {
-            return COLORREF(0x003030D8);
-        }
-        match candidate.latency_class {
-            LatencyClass::PaleGreen => COLORREF(0x0060A060),
-            LatencyClass::Green => COLORREF(0x00208020),
-            LatencyClass::Yellow => COLORREF(0x0000A0B8),
-            LatencyClass::Orange => COLORREF(0x000070D8),
-            LatencyClass::Red => COLORREF(0x002020D8),
-            LatencyClass::Unknown => COLORREF(0x00505050),
-        }
-    }
-
-    unsafe fn save_selected_target(state: &mut WizardState) {
-        let Some(candidate) = state.selected_candidate() else {
-            show_error(
-                state.hwnd,
-                &state.i18n.tr("config.selector.error.no_target.title"),
-                &state.i18n.tr("config.selector.error.no_target"),
-            );
-            return;
-        };
-        if let Some(error) = &candidate.error {
-            show_error(
-                state.hwnd,
-                &state.i18n.tr("config.selector.error.unavailable.title"),
-                &state.i18n.tr_with(
-                    "config.selector.error.unavailable",
-                    &[("error", error.clone())],
-                ),
-            );
-            return;
-        }
-        if candidate.preview.is_none() {
-            show_error(
-                state.hwnd,
-                &state.i18n.tr("config.selector.error.unavailable.title"),
-                &state.i18n.tr_with(
-                    "config.selector.error.unavailable",
-                    &[(
-                        "error",
-                        state.i18n.tr("config.selector.error.waiting_probe"),
-                    )],
-                ),
-            );
-            return;
-        }
-
-        let mut config = candidate.config.clone();
-        config.language = state
-            .previous_config
-            .as_ref()
-            .and_then(|previous| previous.language.clone())
-            .or_else(|| Some(state.i18n.locale().to_string()));
-        config.auto_select_target =
-            SendMessageW(state.auto_checkbox, BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1;
-        config.target_fingerprint = Some(candidate.fingerprint.clone());
-
-        state.result = Some(config);
-        stop_probe_workers(state);
-        state.done = true;
-        let _ = DestroyWindow(state.hwnd);
-    }
-
-    unsafe fn paint_preview(hwnd: HWND, state: &WizardState) {
-        let mut paint = PAINTSTRUCT::default();
-        let hdc = BeginPaint(hwnd, &mut paint);
-        if !hdc.0.is_null() {
-            draw_preview(
-                hdc,
-                state
-                    .selected_candidate()
-                    .and_then(|candidate| candidate.preview.as_ref()),
-                &state.i18n,
-            );
-        }
-        let _ = EndPaint(hwnd, &paint);
-    }
-
-    unsafe fn draw_preview(hdc: HDC, frame: Option<&PreviewFrame>, i18n: &I18n) {
-        let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-        if !brush.0.is_null() {
-            let _ = FillRect(hdc, &PREVIEW_RECT, brush);
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-        }
-
-        let Some(frame) = frame else {
-            draw_preview_placeholder(hdc, &i18n.tr("config.window.preview.unavailable"));
-            return;
-        };
+    /// Build a Slint RGBA image from a captured (bottom-up) preview frame.
+    fn preview_image(frame: &PreviewFrame) -> Option<Image> {
         if frame.width == 0 || frame.height == 0 {
-            draw_preview_placeholder(hdc, &i18n.tr("config.window.preview.unavailable"));
-            return;
+            return None;
         }
-        let Ok(buffer) = preview_bgr24_top_down(frame) else {
-            draw_preview_placeholder(hdc, &i18n.tr("config.window.preview.error"));
-            return;
-        };
-
-        let mut bitmap_info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: frame.width as i32,
-                biHeight: -(frame.height as i32),
-                biPlanes: 1,
-                biBitCount: 24,
-                biCompression: BI_RGB.0,
-                biSizeImage: buffer.len() as u32,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [Default::default(); 1],
-        };
-
-        let target_width = PREVIEW_RECT.right - PREVIEW_RECT.left;
-        let target_height = PREVIEW_RECT.bottom - PREVIEW_RECT.top;
-        let source_ratio = frame.width as f64 / frame.height as f64;
-        let target_ratio = target_width as f64 / target_height as f64;
-        let (draw_width, draw_height) = if source_ratio >= target_ratio {
-            (
-                target_width,
-                (target_width as f64 / source_ratio).round() as i32,
-            )
-        } else {
-            (
-                (target_height as f64 * source_ratio).round() as i32,
-                target_height,
-            )
-        };
-        let x = PREVIEW_RECT.left + (target_width - draw_width) / 2;
-        let y = PREVIEW_RECT.top + (target_height - draw_height) / 2;
-
-        // The preview always downscales the captured frame. A fresh paint DC defaults to
-        // BLACKONWHITE (STRETCH_ANDSCANS), which bitwise-ANDs discarded pixels into the
-        // survivors, collapsing light areas to black with banded artifacts. HALFTONE
-        // downsamples cleanly; it requires a SetBrushOrgEx call afterward.
-        let _ = SetStretchBltMode(hdc, HALFTONE);
-        let _ = SetBrushOrgEx(hdc, 0, 0, None);
-
-        let _ = StretchDIBits(
-            hdc,
-            x,
-            y,
-            draw_width,
-            draw_height,
-            0,
-            0,
-            frame.width as i32,
-            frame.height as i32,
-            Some(buffer.as_ptr() as *const c_void),
-            &mut bitmap_info,
-            DIB_RGB_COLORS,
-            SRCCOPY,
-        );
+        let bytes = preview_rgba_top_down(frame).ok()?;
+        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(frame.width, frame.height);
+        let dst = buffer.make_mut_bytes();
+        if dst.len() != bytes.len() {
+            return None;
+        }
+        dst.copy_from_slice(&bytes);
+        Some(Image::from_rgba8(buffer))
     }
 
-    unsafe fn draw_preview_placeholder(hdc: HDC, text: &str) {
-        let text = wide(text);
-        let _ = TextOutW(
-            hdc,
-            PREVIEW_RECT.left + 12,
-            PREVIEW_RECT.top + 58,
-            &text[..text.len() - 1],
-        );
-    }
-
-    fn preview_bgr24_top_down(frame: &PreviewFrame) -> Result<Vec<u8>, String> {
+    /// Convert a captured frame (bottom-up, RGBA or BGR) into tightly-packed,
+    /// top-down RGBA8 bytes (`width * height * 4`).
+    fn preview_rgba_top_down(frame: &PreviewFrame) -> Result<Vec<u8>, String> {
         let source_stride = frame
             .width
             .checked_mul(match frame.format {
                 PixelFormat::Rgba => 4,
                 PixelFormat::Bgr => 3,
             })
-            .ok_or_else(|| "preview source stride overflow".to_string())?
-            as usize;
-        let packed_stride = frame
-            .width
-            .checked_mul(3)
-            .ok_or_else(|| "preview stride overflow".to_string())?
-            as usize;
-        let stride = (packed_stride + 3) & !3;
-        let mut output = vec![0u8; stride * frame.height as usize];
-        for y in 0..frame.height as usize {
-            let src_y = frame.height as usize - 1 - y;
-            for x in 0..frame.width as usize {
-                let dst = y * stride + x * 3;
+            .ok_or_else(|| "preview source stride overflow".to_string())? as usize;
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let mut output = vec![0u8; width * height * 4];
+        for y in 0..height {
+            let src_y = height - 1 - y; // flip bottom-up -> top-down
+            for x in 0..width {
+                let dst = (y * width + x) * 4;
                 match frame.format {
                     PixelFormat::Rgba => {
                         let src = src_y * source_stride + x * 4;
                         if src + 3 >= frame.data.len() {
                             return Err("preview RGBA buffer is too short".to_string());
                         }
-                        output[dst] = frame.data[src + 2];
+                        output[dst] = frame.data[src];
                         output[dst + 1] = frame.data[src + 1];
-                        output[dst + 2] = frame.data[src];
+                        output[dst + 2] = frame.data[src + 2];
+                        output[dst + 3] = 255;
                     }
                     PixelFormat::Bgr => {
                         let src = src_y * source_stride + x * 3;
                         if src + 2 >= frame.data.len() {
                             return Err("preview BGR buffer is too short".to_string());
                         }
-                        output[dst] = frame.data[src];
+                        output[dst] = frame.data[src + 2];
                         output[dst + 1] = frame.data[src + 1];
-                        output[dst + 2] = frame.data[src + 2];
+                        output[dst + 2] = frame.data[src];
+                        output[dst + 3] = 255;
                     }
                 }
             }
@@ -1019,144 +861,162 @@ mod platform {
         Ok(output)
     }
 
-    unsafe fn close_without_result(state: &mut WizardState) {
-        stop_probe_workers(state);
-        state.result = None;
-        state.done = true;
-        let _ = DestroyWindow(state.hwnd);
+    // ===================== window plumbing =====================
+
+    fn wizard_scale() -> f32 {
+        unsafe { ((GetSystemMetrics(SM_CYSCREEN) as f32) / 720.0).clamp(1.25, 2.5) }
     }
 
-    unsafe fn create_static(
+    unsafe extern "system" fn window_proc(
         hwnd: HWND,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-        text: &str,
-    ) -> HWND {
-        create_static_id(hwnd, 0, x, y, width, height, text)
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match message {
+            WM_NCCREATE => {
+                let create_struct = lparam.0 as *const CREATESTRUCTW;
+                let state_ptr = (*create_struct).lpCreateParams as *mut WizardWindow;
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
+                LRESULT(1)
+            }
+            WM_TIMER => {
+                tick(hwnd);
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                handle_mouse_move(hwnd, lparam);
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                handle_left_down(hwnd, lparam);
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                handle_left_up(hwnd);
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                if wparam.0 as u16 == VK_ESCAPE.0 {
+                    if let Some(state) = wizard_window(hwnd) {
+                        state.closing.set(true);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WizardWindow;
+                if !state_ptr.is_null() {
+                    let _ = Box::from_raw(state_ptr);
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
     }
 
-    unsafe fn create_static_id(
-        hwnd: HWND,
-        id: i32,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-        text: &str,
-    ) -> HWND {
-        create_control(
-            hwnd,
-            "STATIC",
-            text,
-            id,
-            x,
-            y,
-            width,
-            height,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
-            WINDOW_EX_STYLE::default(),
-        )
-    }
-
-    unsafe fn create_control(
-        parent: HWND,
-        class_name: &str,
-        text: &str,
-        id: i32,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-        style: WINDOW_STYLE,
-        ex_style: WINDOW_EX_STYLE,
-    ) -> HWND {
-        let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
-            return HWND::default();
+    unsafe fn handle_left_down(hwnd: HWND, lparam: LPARAM) {
+        let Some(state) = wizard_window_mut(hwnd) else {
+            return;
         };
-        let class_name = wide(class_name);
-        let text = wide(text);
-        CreateWindowExW(
-            ex_style,
-            PCWSTR(class_name.as_ptr()),
-            PCWSTR(text.as_ptr()),
-            style,
-            x,
-            y,
-            width,
-            height,
-            parent,
-            child_id(id),
-            HINSTANCE(module.0),
-            None,
-        )
-        .unwrap_or_default()
+        let mut cursor = POINT::default();
+        let _ = GetCursorPos(&mut cursor);
+        let mut rect = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut rect);
+        state.mouse_down = true;
+        state.moved = false;
+        state.drag_on_title.set(false);
+        state.drag_origin = cursor;
+        state.window_origin = POINT {
+            x: rect.left,
+            y: rect.top,
+        };
+        let _ = SetCapture(hwnd);
+        let position = logical_pos(lparam, state.scale);
+        let _ = state
+            .window
+            .window()
+            .try_dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
     }
 
-    unsafe fn center_window(hwnd: HWND, width: i32, height: i32) {
-        let screen_width = GetSystemMetrics(SM_CXSCREEN);
-        let screen_height = GetSystemMetrics(SM_CYSCREEN);
-        let x = (screen_width - width).max(0) / 2;
-        let y = (screen_height - height).max(0) / 2;
-        let _ = SetWindowPos(hwnd, HWND::default(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-    }
-
-    unsafe fn set_text(hwnd: HWND, text: &str) {
-        let text = wide(text);
-        let _ = SetWindowTextW(hwnd, PCWSTR(text.as_ptr()));
-    }
-
-    unsafe fn show_error(hwnd: HWND, title: &str, message: &str) {
-        let title = wide(title);
-        let message = wide(message);
-        let _ = MessageBoxW(
-            hwnd,
-            PCWSTR(message.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OK | MB_ICONERROR,
-        );
-    }
-
-    unsafe fn state_mut<'a>(hwnd: HWND) -> Option<&'a mut WizardState> {
-        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WizardState;
-        if state_ptr.is_null() {
-            None
-        } else {
-            Some(&mut *state_ptr)
+    unsafe fn handle_mouse_move(hwnd: HWND, lparam: LPARAM) {
+        let Some(state) = wizard_window_mut(hwnd) else {
+            return;
+        };
+        if state.mouse_down && state.drag_on_title.get() {
+            let mut cursor = POINT::default();
+            let _ = GetCursorPos(&mut cursor);
+            let dx = cursor.x - state.drag_origin.x;
+            let dy = cursor.y - state.drag_origin.y;
+            if dx.abs() > 2 || dy.abs() > 2 {
+                state.moved = true;
+            }
+            if state.moved {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND::default(),
+                    state.window_origin.x + dx,
+                    state.window_origin.y + dy,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER,
+                );
+                return;
+            }
         }
+        let position = logical_pos(lparam, state.scale);
+        let _ = state
+            .window
+            .window()
+            .try_dispatch_event(WindowEvent::PointerMoved { position });
     }
 
-    fn child_id(id: i32) -> HMENU {
-        if id == 0 {
-            HMENU::default()
-        } else {
-            HMENU(id as isize as *mut c_void)
+    unsafe fn handle_left_up(hwnd: HWND) {
+        let Some(state) = wizard_window_mut(hwnd) else {
+            return;
+        };
+        let moved = state.moved && state.drag_on_title.get();
+        state.mouse_down = false;
+        state.moved = false;
+        state.drag_on_title.set(false);
+        let _ = ReleaseCapture();
+
+        if moved {
+            // Finished a title-bar drag; cancel Slint's press grab so it is not
+            // read as a click.
+            let _ = state
+                .window
+                .window()
+                .try_dispatch_event(WindowEvent::PointerExited);
+            return;
         }
+        let mut cursor = POINT::default();
+        let _ = GetCursorPos(&mut cursor);
+        let mut client = cursor;
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
+        let position =
+            slint::LogicalPosition::new(client.x as f32 / state.scale, client.y as f32 / state.scale);
+        let _ = state
+            .window
+            .window()
+            .try_dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
     }
 
-    fn wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(iter::once(0)).collect()
+    unsafe fn wizard_window<'a>(hwnd: HWND) -> Option<&'a WizardWindow> {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WizardWindow;
+        (!state_ptr.is_null()).then(|| &*state_ptr)
     }
 
-    #[allow(dead_code)]
-    unsafe fn edit_text(hwnd: HWND) -> String {
-        let len = GetWindowTextLengthW(hwnd);
-        let mut buf = vec![0u16; len.max(0) as usize + 1];
-        let count = GetWindowTextW(hwnd, &mut buf);
-        String::from_utf16_lossy(&buf[..count as usize])
-    }
-
-    #[allow(dead_code)]
-    fn latency_color_class(class: LatencyClass) -> &'static str {
-        match class {
-            LatencyClass::PaleGreen => "pale-green",
-            LatencyClass::Green => "green",
-            LatencyClass::Yellow => "yellow",
-            LatencyClass::Orange => "orange",
-            LatencyClass::Red => "red",
-            LatencyClass::Unknown => "unknown",
-        }
+    unsafe fn wizard_window_mut<'a>(hwnd: HWND) -> Option<&'a mut WizardWindow> {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WizardWindow;
+        (!state_ptr.is_null()).then(|| &mut *state_ptr)
     }
 
     #[cfg(test)]
@@ -1170,7 +1030,6 @@ mod platform {
                 candidate("mumu:selected", None),
                 candidate("ld:last", None),
             ];
-
             assert_eq!(
                 preferred_selection_index(&candidates, Some("mumu:selected")),
                 Some(1)
@@ -1184,7 +1043,6 @@ mod platform {
                 candidate("good", None),
                 candidate("later", None),
             ];
-
             assert_eq!(
                 preferred_selection_index(&candidates, Some("missing")),
                 Some(1)
@@ -1198,7 +1056,6 @@ mod platform {
                 Duration::from_millis(20),
                 Duration::from_millis(30),
             ]);
-
             assert_eq!(average_duration(&samples), Duration::from_millis(20));
         }
 
@@ -1218,51 +1075,48 @@ mod platform {
                 stop,
                 handle: Some(handle),
             }];
-
             stop_probe_worker_list(&mut workers);
-
             assert!(workers.is_empty());
             assert!(observed_stop.load(Ordering::Relaxed));
         }
 
         #[test]
-        fn preview_rgba_bottom_up_to_bgr24_top_down_keeps_channels() {
+        fn preview_rgba_bottom_up_keeps_channels_top_down() {
             let frame = PreviewFrame {
                 width: 2,
                 height: 2,
                 format: PixelFormat::Rgba,
                 data: vec![
-                    255, 0, 0, 255, 0, 255, 0, 255, //
-                    0, 0, 255, 255, 255, 255, 255, 255,
+                    255, 0, 0, 255, 0, 255, 0, 255, // bottom row (src y0)
+                    0, 0, 255, 255, 255, 255, 255, 255, // top row (src y1)
                 ],
             };
-
+            // Output is top-down: first the source's last row, then its first.
             assert_eq!(
-                preview_bgr24_top_down(&frame).unwrap(),
+                preview_rgba_top_down(&frame).unwrap(),
                 vec![
-                    255, 0, 0, 255, 255, 255, 0, 0, //
-                    0, 0, 255, 0, 255, 0, 0, 0,
+                    0, 0, 255, 255, 255, 255, 255, 255, //
+                    255, 0, 0, 255, 0, 255, 0, 255,
                 ]
             );
         }
 
         #[test]
-        fn preview_bgr_bottom_up_to_bgr24_top_down_keeps_channels() {
+        fn preview_bgr_bottom_up_converts_to_rgba_top_down() {
             let frame = PreviewFrame {
                 width: 2,
                 height: 2,
                 format: PixelFormat::Bgr,
                 data: vec![
-                    0, 0, 255, 0, 255, 0, //
-                    255, 0, 0, 255, 255, 255,
+                    0, 0, 255, 0, 255, 0, // bottom row: blue, green (BGR)
+                    255, 0, 0, 255, 255, 255, // top row: red, white (BGR)
                 ],
             };
-
             assert_eq!(
-                preview_bgr24_top_down(&frame).unwrap(),
+                preview_rgba_top_down(&frame).unwrap(),
                 vec![
-                    255, 0, 0, 255, 255, 255, 0, 0, //
-                    0, 0, 255, 0, 255, 0, 0, 0,
+                    0, 0, 255, 255, 255, 255, 255, 255, // blue, white (image top row)
+                    255, 0, 0, 255, 0, 255, 0, 255, // red, green (image bottom row)
                 ]
             );
         }

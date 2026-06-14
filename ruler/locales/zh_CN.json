@@ -41,6 +41,7 @@
     "config.label.adb_id_optional": "ADB Device ID (可选):",
     "config.label.adb_id_auto": "ADB Device ID (可选, 留空则自动检测):",
     "config.btn.save_start": "保存并启动",
+    "config.btn.cancel": "取消",
     "config.browse.title.mumu": "请选择MuMu模拟器12的安装根目录",
     "config.browse.title.ldplayer": "请选择雷电模拟器的安装根目录",
     "config.error.mumu_path_empty": "保存失败：MuMu模拟器安装路径为空。",

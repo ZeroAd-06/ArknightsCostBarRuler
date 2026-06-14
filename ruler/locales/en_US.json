@@ -41,6 +41,7 @@
     "config.label.adb_id_optional": "ADB Device ID (Optional):",
     "config.label.adb_id_auto": "ADB Device ID (Optional, auto-detect if empty):",
     "config.btn.save_start": "Save and Start",
+    "config.btn.cancel": "Cancel",
     "config.browse.title.mumu": "Please select MuMu Player 12 installation root directory",
     "config.browse.title.ldplayer": "Please select LDPlayer installation root directory",
     "config.error.mumu_path_empty": "Save failed: MuMu installation path is empty.",

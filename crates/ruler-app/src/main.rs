@@ -11,6 +11,8 @@ mod menu;
 mod overlay;
 mod profiles;
 mod resources;
+#[cfg(windows)]
+mod slint_win;
 mod target_discovery;
 mod tray;
 mod ui;

@@ -122,9 +122,7 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use std::{
-        cell::{Cell, RefCell},
-        ffi::c_void,
-        iter,
+        cell::Cell,
         rc::Rc,
         sync::{
             atomic::{AtomicIsize, Ordering},
@@ -137,14 +135,10 @@ mod platform {
     use ruler_core::analysis::roi::find_cost_bar_roi;
     use slint::{
         platform::{
-            software_renderer::{
-                MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, SoftwareRenderer,
-                TargetPixel,
-            },
-            Key, Platform, PointerEventButton, WindowAdapter, WindowEvent,
+            software_renderer::{MinimalSoftwareWindow, SoftwareRenderer},
+            Key, PointerEventButton, WindowAdapter, WindowEvent,
         },
-        ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, PlatformError, SharedString,
-        VecModel,
+        ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel,
     };
 
     use super::OverlayError;
@@ -153,6 +147,10 @@ mod platform {
         i18n::I18n,
         icons::IconSet,
         menu,
+        slint_win::{
+            client_xy, create_dib, ensure_platform, logical_pos, present_layered, wide, PreBgra,
+            WindowSlot,
+        },
         tray,
         ui::{Hud, HudMode, ProfileRow, RulerMenu},
         ui_state::{FrameDisplayMode, OverlayMode},
@@ -161,12 +159,8 @@ mod platform {
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
-            Graphics::Gdi::{
-                CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-                SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-                BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
-            },
+            Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+            Graphics::Gdi::{DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ},
             System::LibraryLoader::GetModuleHandleW,
             UI::{
                 Controls::WM_MOUSELEAVE,
@@ -180,9 +174,9 @@ mod platform {
                     GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
                     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
                     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                    TranslateMessage, UpdateLayeredWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+                    TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
                     GWLP_USERDATA, HICON, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN,
-                    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, ULW_ALPHA, WINDOW_EX_STYLE,
+                    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
                     WINDOW_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
                     WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN,
                     WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
@@ -192,11 +186,6 @@ mod platform {
         },
     };
 
-    /// Shared slot the platform writes each freshly-created window into, so the
-    /// caller can claim it right after instantiating a component (single-threaded
-    /// UI thread, so this is race-free).
-    type WindowSlot = Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>;
-
     const OVERLAY_TIMER_ID: usize = 1;
     const OVERLAY_TIMER_INTERVAL_MS: u32 = 16;
     const WM_OVERLAY_WAKE: u32 = WM_APP + 2;
@@ -205,65 +194,6 @@ mod platform {
     // Fixed logical design size of `hud.slint`. Physical size = logical * scale.
     const LOGICAL_W: f32 = 210.0;
     const LOGICAL_H: f32 = 56.0;
-
-    /// Premultiplied BGRA pixel, the exact layout `UpdateLayeredWindow` expects
-    /// for a per-pixel-alpha layered window (32bpp top-down DIB, AC_SRC_ALPHA).
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct PreBgra {
-        b: u8,
-        g: u8,
-        r: u8,
-        a: u8,
-    }
-
-    impl TargetPixel for PreBgra {
-        fn blend(&mut self, color: PremultipliedRgbaColor) {
-            let inv = (u8::MAX - color.alpha) as u16;
-            self.r = (self.r as u16 * inv / 255) as u8 + color.red;
-            self.g = (self.g as u16 * inv / 255) as u8 + color.green;
-            self.b = (self.b as u16 * inv / 255) as u8 + color.blue;
-            self.a = (self.a as u16 * inv / 255) as u8 + color.alpha;
-        }
-
-        fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
-            Self {
-                b: blue,
-                g: green,
-                r: red,
-                a: 255,
-            }
-        }
-
-        // Uncovered / transparent areas of the (transparent) Slint window.
-        fn background() -> Self {
-            Self {
-                b: 0,
-                g: 0,
-                r: 0,
-                a: 0,
-            }
-        }
-    }
-
-    struct RulerPlatform {
-        /// Each `create_window_adapter` call mints a fresh window and parks it here
-        /// so the caller can claim it (HUD on startup; menu/dialog popups later).
-        slot: WindowSlot,
-        start: Instant,
-    }
-
-    impl Platform for RulerPlatform {
-        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-            let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-            *self.slot.borrow_mut() = Some(window.clone());
-            Ok(window)
-        }
-
-        fn duration_since_start(&self) -> core::time::Duration {
-            self.start.elapsed()
-        }
-    }
 
     struct WindowState {
         hud: Hud,
@@ -312,16 +242,10 @@ mod platform {
         icons: Arc<IconSet>,
         placement: super::OverlayPlacement,
     ) -> Result<(), OverlayError> {
-        // NewBuffer = full repaint each frame. The HUD is tiny, and it avoids
-        // partial-repaint residue (stale glyph fragments when text shrinks)
-        // that ReusedBuffer can leave on a per-pixel-alpha layered window.
-        let slot: WindowSlot = Rc::new(RefCell::new(None));
-        slint::platform::set_platform(Box::new(RulerPlatform {
-            slot: Rc::clone(&slot),
-            start: Instant::now(),
-        }))
-        .map_err(|error| OverlayError::new(format!("set_platform failed: {error:?}")))?;
-        crate::fonts::register_bundled_fonts();
+        // Shared, idempotent platform init: the config wizard may have already
+        // installed it (set_platform is once-per-process). NewBuffer repaint and
+        // bundled fonts are configured there.
+        let slot: WindowSlot = ensure_platform();
 
         let hud = Hud::new()
             .map_err(|error| OverlayError::new(format!("failed to build HUD component: {error}")))?;
@@ -838,71 +762,6 @@ mod platform {
                     button: PointerEventButton::Left,
                 });
         }
-    }
-
-    fn logical_pos(lparam: LPARAM, scale: f32) -> LogicalPosition {
-        let x = (lparam.0 as u32 & 0xffff) as i16 as f32;
-        let y = ((lparam.0 as u32 >> 16) & 0xffff) as i16 as f32;
-        LogicalPosition::new(x / scale, y / scale)
-    }
-
-    unsafe fn create_dib(width: i32, height: i32) -> Option<(HDC, HBITMAP, *mut PreBgra)> {
-        let screen = GetDC(HWND::default());
-        let mem_dc = CreateCompatibleDC(screen);
-        let _ = ReleaseDC(HWND::default(), screen);
-        if mem_dc.0.is_null() {
-            return None;
-        }
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height, // top-down to match Slint's row order
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let Ok(dib) = CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) else {
-            let _ = DeleteDC(mem_dc);
-            return None;
-        };
-        if dib.0.is_null() || bits.is_null() {
-            let _ = DeleteDC(mem_dc);
-            return None;
-        }
-        SelectObject(mem_dc, HGDIOBJ(dib.0));
-        Some((mem_dc, dib, bits.cast::<PreBgra>()))
-    }
-
-    unsafe fn present_layered(hwnd: HWND, mem_dc: HDC, width: i32, height: i32) {
-        let screen = GetDC(HWND::default());
-        let size = SIZE {
-            cx: width,
-            cy: height,
-        };
-        let src = POINT { x: 0, y: 0 };
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        let _ = UpdateLayeredWindow(
-            hwnd,
-            screen,
-            None,
-            Some(&size as *const SIZE),
-            mem_dc,
-            Some(&src as *const POINT),
-            COLORREF(0),
-            Some(&blend as *const BLENDFUNCTION),
-            ULW_ALPHA,
-        );
-        let _ = ReleaseDC(HWND::default(), screen);
     }
 
     // ===================== context menu (Slint popup) =====================
@@ -1517,12 +1376,6 @@ mod platform {
         );
     }
 
-    fn client_xy(lparam: LPARAM) -> (i32, i32) {
-        let x = (lparam.0 as u32 & 0xffff) as i16 as i32;
-        let y = ((lparam.0 as u32 >> 16) & 0xffff) as i16 as i32;
-        (x, y)
-    }
-
     unsafe fn menu_state<'a>(hwnd: HWND) -> Option<&'a MenuState> {
         let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuState;
         if state_ptr.is_null() {
@@ -1595,9 +1448,5 @@ mod platform {
             };
             (left, top, width, height, base_scale)
         }
-    }
-
-    fn wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(iter::once(0)).collect()
     }
 }

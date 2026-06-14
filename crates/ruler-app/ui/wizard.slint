@@ -1,0 +1,349 @@
+// Arknights Cost Bar Ruler — first-run configuration wizard.
+// Replaces the native Win32 target selector. Cold / sharp / minimal, rendered by
+// the software renderer into a per-pixel-alpha layered window. A custom title
+// strip provides drag + close (no OS chrome). All user-facing strings are
+// localized in Rust and pushed in as properties.
+//
+// Fixed logical size — mirror WIZARD_LOGICAL_W / WIZARD_LOGICAL_H in
+// config_wizard.rs so the native window matches.
+
+import { Palette, Icons, IconBtn } from "theme.slint";
+
+export struct TargetRow {
+    name: string,
+    detail: string,
+    latency: string,       // "12.3 ms", "measuring...", or an error message
+    latency-class: int,    // 0 pale-green 1 green 2 yellow 3 orange 4 red 5 unknown
+    error: bool,
+    selected: bool,
+}
+
+export component Wizard inherits Window {
+    // ---- inputs ----
+    in property <[TargetRow]> rows;
+    in property <string> title-text;
+    in property <string> header-text;
+    in property <string> status-text;
+    in property <bool> status-error;
+    in property <image> preview;
+    in property <bool> has-preview;
+    in property <bool> scanning;          // true while a refresh is in flight / list empty
+    in property <string> cap-preview;
+    in property <string> cap-empty;       // scanning / no-targets placeholder
+    in property <string> cap-auto;
+    in property <string> cap-refresh;
+    in property <string> cap-start;
+    in property <string> cap-cancel;
+    in property <string> preview-placeholder;
+
+    in-out property <bool> auto-checked;
+
+    // ---- outputs ----
+    callback select-target(int);
+    callback refresh();
+    callback confirm();
+    callback cancel();
+    callback close();
+    callback title-pressed();
+    callback title-released();
+
+    background: transparent;
+    default-font-family: "Bender";
+
+    // Map a latency class to its badge color.
+    function latency-color(cls: int) -> color {
+        return cls == 0 ? #69d6a0
+            : cls == 1 ? #36d05a
+            : cls == 2 ? #ffd23f
+            : cls == 3 ? #ff9d3f
+            : cls == 4 ? #ff6b5e
+            : Palette.text-faint;
+    }
+
+    // ---- panel + top accent ----
+    Rectangle {
+        background: #0b1016f8;
+        border-width: 1px;
+        border-color: Palette.hairline;
+    }
+    Rectangle {
+        x: 0; y: 0;
+        width: 100%;
+        height: 2px;
+        background: Palette.accent;
+        opacity: 0.9;
+    }
+
+    VerticalLayout {
+        padding: 14px;
+        padding-top: 10px;
+        spacing: 10px;
+
+        // ===== title strip (drag + close) =====
+        Rectangle {
+            height: 26px;
+            drag := TouchArea {
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) { root.title-pressed(); }
+                    if (ev.kind == PointerEventKind.up) { root.title-released(); }
+                }
+            }
+            HorizontalLayout {
+                Text {
+                    text: root.title-text;
+                    color: Palette.text-primary;
+                    font-size: 15px;
+                    font-weight: 700;
+                    letter-spacing: 0.5px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                IconBtn {
+                    icon: Icons.cross;
+                    glyph: 15px;
+                    clicked => { root.close(); }
+                }
+            }
+        }
+
+        // ===== header description (with rolling latency) =====
+        Text {
+            text: root.header-text;
+            color: Palette.text-secondary;
+            font-size: 11px;
+            wrap: word-wrap;
+            horizontal-alignment: left;
+        }
+
+        // ===== body: target list (left) + live preview (right) =====
+        HorizontalLayout {
+            spacing: 12px;
+            height: 168px;
+
+            // ---- target list ----
+            Rectangle {
+                horizontal-stretch: 1;
+                border-width: 1px;
+                border-color: Palette.hairline-faint;
+                background: #00000040;
+                clip: true;
+
+                // empty / scanning placeholder
+                if (root.rows.length == 0): Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: 100%;
+                    text: root.cap-empty;
+                    color: Palette.text-faint;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                VerticalLayout {
+                    padding: 3px;
+                    spacing: 1px;
+                    alignment: start;
+                    for row[idx] in root.rows: Rectangle {
+                        height: 38px;
+                        background: row.selected ? Palette.accent-dim
+                            : (rta.has-hover ? Palette.hover-fill : transparent);
+                        animate background { duration: 90ms; }
+                        rta := TouchArea {
+                            clicked => { root.select-target(idx); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            // selection dot
+                            Rectangle {
+                                width: 8px;
+                                Rectangle {
+                                    width: 6px;
+                                    height: 6px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 3px;
+                                    background: row.selected ? Palette.accent : transparent;
+                                }
+                            }
+                            // name + detail (two stacked lines)
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 1px;
+                                Text {
+                                    text: row.name;
+                                    color: row.error ? Palette.danger : Palette.text-primary;
+                                    font-size: 13px;
+                                    font-weight: row.selected ? 700 : 500;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: row.detail;
+                                    color: Palette.text-faint;
+                                    font-size: 9px;
+                                    overflow: elide;
+                                }
+                            }
+                            // latency badge
+                            Text {
+                                text: row.latency;
+                                color: row.error ? Palette.danger : root.latency-color(row.latency-class);
+                                font-size: 11px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- live preview ----
+            VerticalLayout {
+                width: 224px;
+                spacing: 5px;
+                Text {
+                    text: root.cap-preview;
+                    color: Palette.text-faint;
+                    font-size: 10px;
+                    letter-spacing: 1px;
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-width: 1px;
+                    border-color: Palette.hairline-faint;
+                    background: #000000;
+                    clip: true;
+                    if (root.has-preview): Image {
+                        width: 100%;
+                        height: 100%;
+                        source: root.preview;
+                        image-fit: contain;
+                    }
+                    if (!root.has-preview): Text {
+                        width: 100%;
+                        height: 100%;
+                        text: root.preview-placeholder;
+                        color: Palette.text-faint;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ===== auto-select toggle =====
+        Rectangle {
+            height: 22px;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                check := Rectangle {
+                    width: 18px;
+                    height: 18px;
+                    y: (parent.height - self.height) / 2;
+                    border-width: 1px;
+                    border-color: root.auto-checked ? Palette.accent : Palette.hairline-faint;
+                    background: root.auto-checked ? Palette.accent-dim : transparent;
+                    animate background, border-color { duration: 110ms; }
+                    if (root.auto-checked): Path {
+                        width: 14px;
+                        height: 14px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.check;
+                        stroke: Palette.text-primary;
+                        stroke-width: 2.5px;
+                        fill: transparent;
+                    }
+                    cta := TouchArea {
+                        clicked => { root.auto-checked = !root.auto-checked; }
+                    }
+                }
+                Text {
+                    text: root.cap-auto;
+                    color: Palette.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ===== status line =====
+        Text {
+            text: root.status-text;
+            color: root.status-error ? Palette.danger : Palette.text-secondary;
+            font-size: 11px;
+            wrap: word-wrap;
+            min-height: 28px;
+            vertical-stretch: 1;
+            vertical-alignment: top;
+        }
+
+        // ===== footer buttons =====
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+
+            // refresh
+            ref-btn := Rectangle {
+                width: 84px;
+                height: 30px;
+                border-width: 1px;
+                border-color: Palette.hairline-faint;
+                background: refa.has-hover ? Palette.hover-fill : transparent;
+                animate background { duration: 110ms; }
+                Text {
+                    text: root.cap-refresh;
+                    color: Palette.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                refa := TouchArea { clicked => { root.refresh(); } }
+            }
+            // cancel
+            cancel-btn := Rectangle {
+                width: 84px;
+                height: 30px;
+                border-width: 1px;
+                border-color: Palette.hairline-faint;
+                background: cana.has-hover ? Palette.hover-fill : transparent;
+                animate background { duration: 110ms; }
+                Text {
+                    text: root.cap-cancel;
+                    color: Palette.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                cana := TouchArea { clicked => { root.cancel(); } }
+            }
+            // save & start (primary)
+            start-btn := Rectangle {
+                width: 120px;
+                height: 30px;
+                border-width: 1px;
+                border-color: Palette.accent;
+                background: sta.has-hover ? Palette.accent.with-alpha(0.30) : Palette.accent-dim;
+                animate background { duration: 110ms; }
+                Text {
+                    text: root.cap-start;
+                    color: Palette.text-primary;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                sta := TouchArea { clicked => { root.confirm(); } }
+            }
+        }
+    }
+}

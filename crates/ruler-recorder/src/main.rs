@@ -302,8 +302,6 @@ fn main() {
             "60",
             "-i",
             "pipe:0",
-            "-vf",
-            "vflip",
             "-c:v",
             "libx265",
             "-crf",

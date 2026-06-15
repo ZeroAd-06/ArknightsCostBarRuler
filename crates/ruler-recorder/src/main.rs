@@ -245,9 +245,14 @@ fn main() {
     });
 
     // ---- locate calibration -----------------------------------------------
-    let cal_dir = config_path.parent().unwrap_or(Path::new("."));
-    let cal_path = cal_dir.join("calibration_data.json");
-    let has_cal = cal_path.exists();
+    // Calibration files live in `calibration/` subdirectory; the config
+    // stores the filename in `active_calibration_profile`.
+    let cal_dir = config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("calibration");
+    let cal_filename = ruler_config.active_calibration_profile.as_deref();
+    let cal_path = cal_filename.map(|name| cal_dir.join(name));
 
     // ---- init engine ------------------------------------------------------
     let mut engine = RulerEngine::new();
@@ -257,14 +262,14 @@ fn main() {
     });
     eprintln!("  connected  : {width}x{height}");
 
-    if has_cal {
-        engine.load_calibration(&cal_path).unwrap_or_else(|e| {
+    if let Some(ref p) = cal_path {
+        engine.load_calibration(p).unwrap_or_else(|e| {
             eprintln!("FATAL: calibration failed: {e}");
             std::process::exit(1);
         });
-        eprintln!("  calibr.    : loaded");
+        eprintln!("  calibr.    : {}", p.display());
     } else {
-        eprintln!("  warning    : no calibration_data.json — analysis fields empty");
+        eprintln!("  warning    : no calibration specified in config — analysis fields empty");
     }
 
     engine.set_roi(width as i32, height as i32);

@@ -587,11 +587,10 @@ mod platform {
             overlay_pos_x: previous.and_then(|config| config.overlay_pos_x),
             overlay_pos_y: previous.and_then(|config| config.overlay_pos_y),
             overlay_scale: previous.and_then(|config| config.overlay_scale),
-            // Debug recording — never inherited from previous; starts disabled.
-            debug_recording_enabled: false,
-            debug_recording_video: false,
-            debug_recording_csv: false,
-            debug_recording_output_dir: None,
+            debug_recording_enabled: previous.map(|c| c.debug_recording_enabled).unwrap_or(false),
+            debug_recording_video: previous.map(|c| c.debug_recording_video).unwrap_or(false),
+            debug_recording_csv: previous.map(|c| c.debug_recording_csv).unwrap_or(false),
+            debug_recording_output_dir: previous.and_then(|c| c.debug_recording_output_dir.clone()),
         }
     }
 

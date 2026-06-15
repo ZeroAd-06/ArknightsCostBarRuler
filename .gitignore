@@ -23,6 +23,9 @@ logs/
 calibration/
 calibration_data_*.json
 
+# --- Debug recording output ---
+recordings/
+
 # --- HUD preview output (examples/hud_preview) ---
 hud_*.png
 wizard.png

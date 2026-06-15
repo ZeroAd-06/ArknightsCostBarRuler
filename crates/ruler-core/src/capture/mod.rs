@@ -3,11 +3,13 @@ use crate::analysis::scanner::PixelFormat;
 pub mod adb;
 pub mod ldplayer;
 pub mod mumu;
+pub mod replay;
 pub mod windows;
 
 pub use adb::AdbController;
 pub use ldplayer::LDPlayerController;
 pub use mumu::MuMuController;
+pub use replay::ReplayCaptureBackend;
 pub use windows::WindowsController;
 
 pub struct CapturedFrame {
@@ -33,6 +35,8 @@ pub struct CaptureConfig {
     pub window_handle: Option<isize>,
     pub window_title: Option<String>,
     pub window_class: Option<String>,
+    pub replay_hevc_path: Option<String>,
+    pub replay_fps: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +45,7 @@ pub enum CaptureType {
     MuMu,
     LDPlayer,
     Windows,
+    Replay,
 }
 
 pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, String> {
@@ -70,5 +75,18 @@ pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, 
             config.window_title,
             config.window_class,
         ))),
+        CaptureType::Replay => {
+            let hevc_path = config
+                .replay_hevc_path
+                .ok_or_else(|| "Replay capture requires replay_hevc_path".to_string())?;
+            let fps = config.replay_fps.unwrap_or(60.0);
+            Ok(Box::new(ReplayCaptureBackend::new(
+                &hevc_path,
+                fps,
+                0,
+                0,
+                PixelFormat::Rgba,
+            )))
+        }
     }
 }

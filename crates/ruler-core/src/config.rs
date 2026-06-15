@@ -60,6 +60,16 @@ pub struct RulerConfig {
     /// Defaults to "recordings" when not set.
     #[serde(default)]
     pub debug_recording_output_dir: Option<String>,
+
+    // -- Replay (virtual capture from HEVC file) ---------------------------
+
+    /// Path to a pre-recorded HEVC file for replay (type: "replay").
+    #[serde(default)]
+    pub replay_hevc_path: Option<String>,
+
+    /// Target playback frame rate for replay (default 60).
+    #[serde(default)]
+    pub replay_fps: Option<f64>,
 }
 
 impl RulerConfig {
@@ -98,6 +108,7 @@ impl RulerConfig {
             "mumu" => CaptureType::MuMu,
             "ldplayer" => CaptureType::LDPlayer,
             "window" => CaptureType::Windows,
+            "replay" => CaptureType::Replay,
             other => return Err(RulerConfigError::UnsupportedCaptureType(other.to_string())),
         };
 
@@ -109,6 +120,8 @@ impl RulerConfig {
             window_handle: self.window_handle,
             window_title: self.window_title.clone(),
             window_class: self.window_class.clone(),
+            replay_hevc_path: self.replay_hevc_path.clone(),
+            replay_fps: self.replay_fps,
         })
     }
 }

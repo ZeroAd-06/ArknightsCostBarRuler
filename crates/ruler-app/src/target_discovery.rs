@@ -591,6 +591,8 @@ mod platform {
             debug_recording_video: previous.map(|c| c.debug_recording_video).unwrap_or(false),
             debug_recording_csv: previous.map(|c| c.debug_recording_csv).unwrap_or(false),
             debug_recording_output_dir: previous.and_then(|c| c.debug_recording_output_dir.clone()),
+            replay_hevc_path: previous.and_then(|c| c.replay_hevc_path.clone()),
+            replay_fps: previous.and_then(|c| c.replay_fps),
         }
     }
 

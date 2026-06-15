@@ -167,7 +167,11 @@ fn resolve_startup_config(
     let config_path_text = resources.config_path().display().to_string();
     let previous_config = initial_status.loaded_config.clone();
 
+    // Replay mode doesn't need target discovery or config wizard.
     if let Some(config) = previous_config.as_ref() {
+        if config.capture_type == "replay" {
+            return Ok(StartupStatus::ready(config_path_text, config.clone()));
+        }
         if config.auto_select_target {
             match try_auto_select_config(config) {
                 Ok(Some(config)) => {

@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod commands;
 mod config_wizard;
+mod debug_recorder;
 mod fonts;
 mod i18n;
 mod icons;

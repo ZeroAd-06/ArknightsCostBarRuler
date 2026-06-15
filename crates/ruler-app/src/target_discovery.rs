@@ -587,6 +587,11 @@ mod platform {
             overlay_pos_x: previous.and_then(|config| config.overlay_pos_x),
             overlay_pos_y: previous.and_then(|config| config.overlay_pos_y),
             overlay_scale: previous.and_then(|config| config.overlay_scale),
+            // Debug recording — never inherited from previous; starts disabled.
+            debug_recording_enabled: false,
+            debug_recording_video: false,
+            debug_recording_csv: false,
+            debug_recording_output_dir: None,
         }
     }
 

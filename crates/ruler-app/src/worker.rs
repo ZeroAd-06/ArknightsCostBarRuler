@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, TryRecvError},
@@ -16,6 +17,7 @@ use ruler_core::{
 
 use crate::{
     commands::UiCommand,
+    debug_recorder::DebugRecorder,
     profiles::{calibration_basename, ProfileStore},
     resources::ResourceLocator,
     ui_state::{
@@ -251,7 +253,7 @@ impl Drop for WorkerRuntime {
 
 struct WorkerContext {
     config: RulerConfig,
-    config_path: std::path::PathBuf,
+    config_path: PathBuf,
     profiles: ProfileStore,
     engine: RulerEngine,
     connected: bool,
@@ -262,6 +264,8 @@ struct WorkerContext {
     last_total_frames: i32,
     last_cost_is_negative: bool,
     sample_index: u64,
+    debug_recorder: Option<DebugRecorder>,
+    debug_recording_dir: PathBuf,
 }
 
 fn run_worker_loop(
@@ -280,6 +284,14 @@ fn run_worker_loop(
     };
 
     let profiles = ProfileStore::new(&resources);
+
+    // Resolve debug recording output directory
+    let debug_recording_dir = config
+        .debug_recording_output_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("recordings"));
+
     let mut context = WorkerContext {
         display_mode: FrameDisplayMode::from_config(config.frame_display_mode.as_deref()),
         active_profile: config.active_calibration_profile.clone(),
@@ -293,6 +305,8 @@ fn run_worker_loop(
         last_total_frames: 0,
         last_cost_is_negative: false,
         sample_index: 0,
+        debug_recorder: None,
+        debug_recording_dir,
     };
 
     if let Err(error) = bootstrap_engine(&mut context, &state) {
@@ -617,53 +631,95 @@ fn collect_calibration_samples(
 
 fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
     context.sample_index += 1;
+
+    // Time the capture for debug recording
+    let capture_start = Instant::now();
+
     match context.engine.capture_frame() {
-        Ok(frame_data) => match context.engine.analyze_captured_frame(&frame_data) {
-            Ok(result) => {
-                let worker_timing = WorkerTimingSnapshot {
-                    sample_index: context.sample_index,
-                };
-                context.last_total_frames = result.total_frames_in_cycle;
-                context.last_cost_is_negative = result.cost_is_negative;
-                if result.logical_frame.is_some() {
-                    context.last_elapsed_frames = result.elapsed_frames;
+        Ok(frame_data) => {
+            let capture_dur_us = capture_start.elapsed().as_micros();
+
+            // Debug recording: lazy-init on first frame
+            if context.debug_recorder.is_none()
+                && context.config.debug_recording_enabled
+                && context.connected
+            {
+                let record_video = context.config.debug_recording_video;
+                let record_csv = context.config.debug_recording_csv;
+                if record_video || record_csv {
+                    // Ensure output directory exists
+                    let _ = std::fs::create_dir_all(&context.debug_recording_dir);
+                    match DebugRecorder::start(
+                        &context.debug_recording_dir,
+                        record_video,
+                        record_csv,
+                        frame_data.width,
+                        frame_data.height,
+                        frame_data.format,
+                    ) {
+                        Ok(recorder) => {
+                            log::info!("debug recording started");
+                            context.debug_recorder = Some(recorder);
+                        }
+                        Err(e) => {
+                            log::error!("debug recording failed to start: {e}");
+                        }
+                    }
                 }
-                let display_frame = context.display_mode.display_frame(result.logical_frame);
-                let display_total = display_total_with_cost_marker(
-                    context.display_mode,
-                    result.total_frames_in_cycle,
-                    result.cost_is_negative,
-                );
-                let lap_frames = context
-                    .lap_start_frame
-                    .map(|start| context.last_elapsed_frames - start);
-                let active_profile = context.active_profile.clone();
-                let active_basename = active_profile.as_deref().map(calibration_basename);
-                state.update_ui(|ui, api| {
-                    ui.mode = OverlayMode::Running;
-                    ui.message.clear();
-                    ui.display_mode = context.display_mode;
-                    ui.display_frame = display_frame;
-                    ui.display_total = display_total;
-                    ui.time_str = format_time_from_frames(context.last_elapsed_frames);
-                    ui.lap_frames = lap_frames;
-                    ui.total_frames_in_cycle = result.total_frames_in_cycle;
-                    ui.active_profile = active_profile.clone();
-                    ui.profiles = context.profiles.list(active_profile.as_deref());
-                    api.is_running = result.logical_frame.is_some();
-                    api.current_frame = result.logical_frame;
-                    api.total_frames_in_cycle = if result.logical_frame.is_some() {
-                        result.total_frames_in_cycle
-                    } else {
-                        0
-                    };
-                    api.total_elapsed_frames = context.last_elapsed_frames;
-                    api.active_profile = active_basename.clone();
-                });
-                state.update_timing(worker_timing);
             }
-            Err(error) => publish_error(state, context, format!("analyze error: {error}")),
-        },
+
+            match context.engine.analyze_captured_frame(&frame_data) {
+                Ok(result) => {
+                    // Debug recording: write frame + analysis
+                    if let Some(ref mut recorder) = context.debug_recorder {
+                        recorder.record_frame(&frame_data, &result, capture_dur_us);
+                    }
+
+                    let worker_timing = WorkerTimingSnapshot {
+                        sample_index: context.sample_index,
+                    };
+                    context.last_total_frames = result.total_frames_in_cycle;
+                    context.last_cost_is_negative = result.cost_is_negative;
+                    if result.logical_frame.is_some() {
+                        context.last_elapsed_frames = result.elapsed_frames;
+                    }
+                    let display_frame = context.display_mode.display_frame(result.logical_frame);
+                    let display_total = display_total_with_cost_marker(
+                        context.display_mode,
+                        result.total_frames_in_cycle,
+                        result.cost_is_negative,
+                    );
+                    let lap_frames = context
+                        .lap_start_frame
+                        .map(|start| context.last_elapsed_frames - start);
+                    let active_profile = context.active_profile.clone();
+                    let active_basename = active_profile.as_deref().map(calibration_basename);
+                    state.update_ui(|ui, api| {
+                        ui.mode = OverlayMode::Running;
+                        ui.message.clear();
+                        ui.display_mode = context.display_mode;
+                        ui.display_frame = display_frame;
+                        ui.display_total = display_total;
+                        ui.time_str = format_time_from_frames(context.last_elapsed_frames);
+                        ui.lap_frames = lap_frames;
+                        ui.total_frames_in_cycle = result.total_frames_in_cycle;
+                        ui.active_profile = active_profile.clone();
+                        ui.profiles = context.profiles.list(active_profile.as_deref());
+                        api.is_running = result.logical_frame.is_some();
+                        api.current_frame = result.logical_frame;
+                        api.total_frames_in_cycle = if result.logical_frame.is_some() {
+                            result.total_frames_in_cycle
+                        } else {
+                            0
+                        };
+                        api.total_elapsed_frames = context.last_elapsed_frames;
+                        api.active_profile = active_basename.clone();
+                    });
+                    state.update_timing(worker_timing);
+                }
+                Err(error) => publish_error(state, context, format!("analyze error: {error}")),
+            }
+        }
         Err(error) => publish_error(state, context, format!("capture error: {error}")),
     }
 }

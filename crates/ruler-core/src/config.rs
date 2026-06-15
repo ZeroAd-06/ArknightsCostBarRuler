@@ -41,6 +41,25 @@ pub struct RulerConfig {
     /// Overlay scale multiplier (1.0 == 100%, the height-aligned default).
     #[serde(default)]
     pub overlay_scale: Option<f32>,
+
+    // -- Debug recording (not exposed in UI) --------------------------------
+
+    /// Master switch: enable background recording of capture + analysis data.
+    #[serde(default)]
+    pub debug_recording_enabled: bool,
+
+    /// Record lossless HEVC video when debug_recording_enabled.
+    #[serde(default)]
+    pub debug_recording_video: bool,
+
+    /// Record analysis CSV when debug_recording_enabled.
+    #[serde(default)]
+    pub debug_recording_csv: bool,
+
+    /// Output directory for debug recordings (relative to project root).
+    /// Defaults to "recordings" when not set.
+    #[serde(default)]
+    pub debug_recording_output_dir: Option<String>,
 }
 
 impl RulerConfig {

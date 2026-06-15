@@ -29,6 +29,7 @@ use ruler_core::PixelFormat;
 // ---------------------------------------------------------------------------
 
 static STOP_NOW: AtomicBool = AtomicBool::new(false);
+static ANALYSE_WARNED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -218,6 +219,10 @@ fn main() {
     let duration = Duration::from_secs(duration_secs);
 
     // ---- prepare output paths ---------------------------------------------
+    std::fs::create_dir_all(&output_dir).unwrap_or_else(|e| {
+        eprintln!("FATAL: cannot create output dir '{}': {e}", output_dir.display());
+        std::process::exit(1);
+    });
     let ts = timestamp_for_filename();
     let csv_path = output_dir.join(format!("recording_{ts}.csv"));
     let video_path = output_dir.join(format!("recording_{ts}.hevc"));
@@ -377,17 +382,20 @@ fn main() {
         };
         let cap_us = t0.elapsed().as_micros();
 
-        // 2. Analyse
+        // 2. Analyse (best-effort — missing calibration still records video + partial CSV)
         let result = match engine.analyze_captured_frame(&frame) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("\nWARN: analysis failed: {e}");
-                // Still write the frame to video even if analysis fails
-                let mut buf = frame.data;
-                flip_rows(&mut buf, width, height, bpp);
-                let _ = ffmpeg_writer.write_all(&buf);
-                dropped += 1;
-                continue;
+                if !ANALYSE_WARNED.swap(true, Ordering::Relaxed) {
+                    eprintln!("\nWARN: analysis failed (will retry silently): {e}");
+                }
+                ruler_core::engine::FrameResult {
+                    logical_frame: None,
+                    total_frames_in_cycle: 0,
+                    raw_pixel_width: None,
+                    elapsed_frames: 0,
+                    cost_is_negative: false,
+                }
             }
         };
 
@@ -399,7 +407,7 @@ fn main() {
             break;
         }
 
-        // 4. Write CSV
+        // 4. Write CSV (always — sync with video frames)
         if let Err(e) = csv.write_row(
             result.raw_pixel_width,
             result.logical_frame,

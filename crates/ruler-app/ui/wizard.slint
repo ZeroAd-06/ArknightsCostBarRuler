@@ -38,6 +38,23 @@ export component Wizard inherits Window {
 
     in-out property <bool> auto-checked;
 
+    // debug-mode overrides
+    in property <bool> debug-mode;
+    in-out property <bool> record-video;
+    in-out property <bool> record-csv;
+    in-out property <bool> replay-mode;
+    in-out property <string> replay-path;
+    in-out property <string> replay-fps-text;
+    in property <string> cap-replay-path;
+    in property <string> cap-replay-fps-label;
+    in property <string> cap-debug-header;
+    in property <string> cap-debug-video;
+    in property <string> cap-debug-csv;
+    in property <string> cap-mode-header;
+    in property <string> cap-mode-real;
+    in property <string> cap-mode-replay;
+    in property <string> cap-replay-fps;
+
     // ---- outputs ----
     callback select-target(int);
     callback refresh();
@@ -106,7 +123,7 @@ export component Wizard inherits Window {
             }
         }
 
-        // ===== header description (with rolling latency) =====
+        // ===== header description =====
         Text {
             text: root.header-text;
             color: Palette.text-secondary;
@@ -272,6 +289,244 @@ export component Wizard inherits Window {
                     color: Palette.text-secondary;
                     font-size: 11px;
                     vertical-alignment: center;
+                }
+            }
+        }
+
+        // ===== DEBUG PANEL (only visible in debug mode) =====
+        if (root.debug-mode): VerticalLayout {
+            spacing: 8px;
+
+            // ---- Debug Recording section ----
+            Rectangle {
+                height: 20px;
+                Text {
+                    text: root.cap-debug-header;
+                    color: Palette.text-secondary;
+                    font-size: 11px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+
+            // record-video checkbox
+            Rectangle {
+                height: 18px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        y: (parent.height - self.height) / 2;
+                        border-width: 1px;
+                        border-color: root.record-video ? Palette.accent : Palette.hairline-faint;
+                        background: root.record-video ? Palette.accent-dim : transparent;
+                        animate background, border-color { duration: 110ms; }
+                        if (root.record-video): Path {
+                            width: 12px;
+                            height: 12px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: Icons.check;
+                            stroke: Palette.text-primary;
+                            stroke-width: 2.5px;
+                            fill: transparent;
+                        }
+                        rva := TouchArea {
+                            clicked => { root.record-video = !root.record-video; }
+                        }
+                    }
+                    Text {
+                        text: root.cap-debug-video;
+                        color: Palette.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // record-csv checkbox
+            Rectangle {
+                height: 18px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        y: (parent.height - self.height) / 2;
+                        border-width: 1px;
+                        border-color: root.record-csv ? Palette.accent : Palette.hairline-faint;
+                        background: root.record-csv ? Palette.accent-dim : transparent;
+                        animate background, border-color { duration: 110ms; }
+                        if (root.record-csv): Path {
+                            width: 12px;
+                            height: 12px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: Icons.check;
+                            stroke: Palette.text-primary;
+                            stroke-width: 2.5px;
+                            fill: transparent;
+                        }
+                        rca := TouchArea {
+                            clicked => { root.record-csv = !root.record-csv; }
+                        }
+                    }
+                    Text {
+                        text: root.cap-debug-csv;
+                        color: Palette.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ---- Capture Mode section ----
+            Rectangle {
+                height: 22px;
+                Text {
+                    y: 4px;
+                    text: root.cap-mode-header;
+                    color: Palette.text-secondary;
+                    font-size: 11px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Real capture radio
+            Rectangle {
+                height: 18px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 14px;
+                        height: 14px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 7px;
+                        border-width: 1px;
+                        border-color: !root.replay-mode ? Palette.accent : Palette.hairline-faint;
+                        background: !root.replay-mode ? Palette.accent : transparent;
+                        animate background, border-color { duration: 110ms; }
+                        real-ta := TouchArea {
+                            clicked => { root.replay-mode = false; }
+                        }
+                    }
+                    Text {
+                        text: root.cap-mode-real;
+                        color: Palette.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Replay radio
+            Rectangle {
+                height: 18px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 14px;
+                        height: 14px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 7px;
+                        border-width: 1px;
+                        border-color: root.replay-mode ? Palette.accent : Palette.hairline-faint;
+                        background: root.replay-mode ? Palette.accent : transparent;
+                        animate background, border-color { duration: 110ms; }
+                        play-ta := TouchArea {
+                            clicked => { root.replay-mode = true; }
+                        }
+                    }
+                    Text {
+                        text: root.cap-mode-replay;
+                        color: Palette.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Replay path + FPS (visible only when replay-mode is on)
+            if (root.replay-mode): VerticalLayout {
+                spacing: 6px;
+                padding-left: 22px;
+
+                // HEVC file path
+                Rectangle {
+                    height: 24px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: root.cap-replay-path;
+                            color: Palette.text-faint;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-width: 1px;
+                            border-color: Palette.hairline-faint;
+                            background: #00000060;
+                            height: 22px;
+                            TextInput {
+                                x: 4px;
+                                width: parent.width - 8px;
+                                height: 100%;
+                                text <=> root.replay-path;
+                                color: Palette.text-primary;
+                                font-size: 11px;
+                                single-line: true;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // FPS
+                Rectangle {
+                    height: 24px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: root.cap-replay-fps-label;
+                            color: Palette.text-faint;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            width: 60px;
+                            border-width: 1px;
+                            border-color: Palette.hairline-faint;
+                            background: #00000060;
+                            height: 22px;
+                            TextInput {
+                                x: 4px;
+                                width: parent.width - 8px;
+                                height: 100%;
+                                text <=> root.replay-fps-text;
+                                color: Palette.text-primary;
+                                font-size: 11px;
+                                single-line: true;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            text: "fps";
+                            color: Palette.text-faint;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
         }

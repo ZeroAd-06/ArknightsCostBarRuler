@@ -6,8 +6,9 @@ pub fn run_config_wizard(
     _resources: &ResourceLocator,
     i18n: &I18n,
     previous_config: Option<&RulerConfig>,
+    debug: bool,
 ) -> Option<RulerConfig> {
-    platform::run_config_wizard(i18n, previous_config)
+    platform::run_config_wizard(i18n, previous_config, debug)
 }
 
 #[cfg(not(windows))]
@@ -16,7 +17,7 @@ mod platform {
 
     use crate::i18n::I18n;
 
-    pub fn run_config_wizard(_: &I18n, _: Option<&RulerConfig>) -> Option<RulerConfig> {
+    pub fn run_config_wizard(_: &I18n, _: Option<&RulerConfig>, _debug: bool) -> Option<RulerConfig> {
         None
     }
 }
@@ -169,6 +170,7 @@ mod platform {
     pub fn run_config_wizard(
         i18n: &I18n,
         previous_config: Option<&RulerConfig>,
+        debug: bool,
     ) -> Option<RulerConfig> {
         let slot = ensure_platform();
         let Ok(wizard) = Wizard::new() else {
@@ -194,7 +196,7 @@ mod platform {
         let closing = Rc::new(Cell::new(false));
         let drag_on_title = Rc::new(Cell::new(false));
 
-        populate_captions(&wizard, i18n);
+        populate_captions(&wizard, i18n, debug);
         wire_callbacks(&wizard, &core, &result, &closing, &drag_on_title);
 
         // Initial discovery + probe.
@@ -202,7 +204,8 @@ mod platform {
 
         let scale = wizard_scale();
         let width = (WIZARD_LOGICAL_W * scale).round() as i32;
-        let height = (WIZARD_LOGICAL_H * scale).round() as i32;
+        let logical_h = if debug { WIZARD_LOGICAL_H + 220.0 } else { WIZARD_LOGICAL_H };
+        let height = (logical_h * scale).round() as i32;
         let _ = window
             .window()
             .try_dispatch_event(WindowEvent::ScaleFactorChanged {
@@ -300,7 +303,7 @@ mod platform {
         config
     }
 
-    fn populate_captions(wizard: &Wizard, i18n: &I18n) {
+    fn populate_captions(wizard: &Wizard, i18n: &I18n, debug: bool) {
         wizard.set_title_text(i18n.tr("config.window.title").into());
         wizard.set_header_text(i18n.tr("config.selector.header").into());
         wizard.set_status_text(i18n.tr("config.selector.scanning").into());
@@ -315,6 +318,22 @@ mod platform {
         wizard.set_cap_cancel(i18n.tr("config.btn.cancel").into());
         wizard.set_preview_placeholder(i18n.tr("config.window.preview.unavailable").into());
         wizard.set_auto_checked(false);
+
+        // Debug panel captions
+        wizard.set_debug_mode(debug);
+        wizard.set_cap_debug_header(i18n.tr("config.selector.debug_header").into());
+        wizard.set_cap_debug_video(i18n.tr("config.selector.debug_video").into());
+        wizard.set_cap_debug_csv(i18n.tr("config.selector.debug_csv").into());
+        wizard.set_cap_mode_header(i18n.tr("config.selector.mode_header").into());
+        wizard.set_cap_mode_real(i18n.tr("config.selector.mode_real").into());
+        wizard.set_cap_mode_replay(i18n.tr("config.selector.mode_replay").into());
+        wizard.set_cap_replay_path(i18n.tr("config.selector.replay_path").into());
+        wizard.set_cap_replay_fps_label(i18n.tr("config.selector.replay_fps").into());
+        wizard.set_record_video(false);
+        wizard.set_record_csv(false);
+        wizard.set_replay_mode(false);
+        wizard.set_replay_path(slint::SharedString::default());
+        wizard.set_replay_fps_text(slint::SharedString::default());
     }
 
     fn wire_callbacks(
@@ -357,25 +376,74 @@ mod platform {
             let closing = Rc::clone(closing);
             let weak = wizard.as_weak();
             move || {
-                let auto = weak
-                    .upgrade()
-                    .map(|wizard| wizard.get_auto_checked())
-                    .unwrap_or(false);
-                let core = core.borrow();
-                let Some(candidate) = core.selected_candidate() else {
-                    return;
+                let wizard = weak.upgrade().expect("wizard dropped");
+                let auto = wizard.get_auto_checked();
+                let record_video = wizard.get_record_video();
+                let record_csv = wizard.get_record_csv();
+                let replay_mode = wizard.get_replay_mode();
+                let replay_path = wizard.get_replay_path();
+                let replay_fps_text = wizard.get_replay_fps_text();
+
+                let config = if replay_mode {
+                    // Build a replay config from scratch
+                    let fps: f64 = replay_fps_text.parse().unwrap_or(60.0);
+                    RulerConfig {
+                        capture_type: "replay".to_string(),
+                        install_path: None,
+                        instance_index: None,
+                        device_id: None,
+                        window_handle: None,
+                        window_title: None,
+                        window_class: None,
+                        active_calibration_profile: core
+                            .borrow()
+                            .previous_config
+                            .as_ref()
+                            .and_then(|p| p.active_calibration_profile.clone()),
+                        frame_display_mode: core
+                            .borrow()
+                            .previous_config
+                            .as_ref()
+                            .and_then(|p| p.frame_display_mode.clone()),
+                        language: core
+                            .borrow()
+                            .previous_config
+                            .as_ref()
+                            .and_then(|p| p.language.clone())
+                            .or_else(|| Some(core.borrow().i18n.locale().to_string())),
+                        auto_select_target: false,
+                        target_fingerprint: None,
+                        overlay_pos_x: None,
+                        overlay_pos_y: None,
+                        overlay_scale: None,
+                        debug_recording_enabled: record_video || record_csv,
+                        debug_recording_video: record_video,
+                        debug_recording_csv: record_csv,
+                        debug_recording_output_dir: None,
+                        replay_hevc_path: Some(replay_path.to_string()),
+                        replay_fps: Some(fps),
+                    }
+                } else {
+                    let core = core.borrow();
+                    let Some(candidate) = core.selected_candidate() else {
+                        return;
+                    };
+                    if candidate.error.is_some() || candidate.preview.is_none() {
+                        return;
+                    }
+                    let mut config = candidate.config.clone();
+                    config.language = core
+                        .previous_config
+                        .as_ref()
+                        .and_then(|previous| previous.language.clone())
+                        .or_else(|| Some(core.i18n.locale().to_string()));
+                    config.auto_select_target = auto;
+                    config.target_fingerprint = Some(candidate.fingerprint.clone());
+                    config.debug_recording_enabled = record_video || record_csv;
+                    config.debug_recording_video = record_video;
+                    config.debug_recording_csv = record_csv;
+                    config
                 };
-                if candidate.error.is_some() || candidate.preview.is_none() {
-                    return; // status line already explains why; refuse silently
-                }
-                let mut config = candidate.config.clone();
-                config.language = core
-                    .previous_config
-                    .as_ref()
-                    .and_then(|previous| previous.language.clone())
-                    .or_else(|| Some(core.i18n.locale().to_string()));
-                config.auto_select_target = auto;
-                config.target_fingerprint = Some(candidate.fingerprint.clone());
                 *result.borrow_mut() = Some(config);
                 closing.set(true);
             }

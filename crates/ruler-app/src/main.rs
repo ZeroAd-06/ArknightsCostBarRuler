@@ -24,12 +24,13 @@ use app::RulerApp;
 
 fn main() {
     enable_dpi_awareness();
+    let debug = std::env::args().any(|a| a == "--debug" || a == "-d");
     if relaunch_as_admin_if_needed() {
         return;
     }
     init_logging();
 
-    if let Err(error) = run() {
+    if let Err(error) = run(debug) {
         log::error!("ruler-app failed to start: {error}");
         std::process::exit(1);
     }
@@ -139,9 +140,9 @@ fn wide_os(value: &std::ffi::OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-fn run() -> Result<(), app::StartupError> {
-    log::info!("bootstrapping ruler-app for Windows runtime");
+fn run(debug: bool) -> Result<(), app::StartupError> {
+    log::info!("bootstrapping ruler-app for Windows runtime (debug={debug})");
 
-    let app = RulerApp::build()?;
+    let app = RulerApp::build(debug)?;
     app.run()
 }

@@ -25,7 +25,7 @@ pub struct RulerApp {
 }
 
 impl RulerApp {
-    pub fn build() -> Result<Self, StartupError> {
+    pub fn build(debug: bool) -> Result<Self, StartupError> {
         let resources = ResourceLocator::new();
         let initial_status = determine_startup_status(&resources);
         let preferred_locale = initial_status
@@ -34,7 +34,7 @@ impl RulerApp {
             .and_then(|config| config.language.as_deref());
         let i18n = Arc::new(I18n::load(&resources, preferred_locale));
 
-        let startup_status = resolve_startup_config(&resources, &i18n, initial_status)?;
+        let startup_status = resolve_startup_config(&resources, &i18n, initial_status, debug)?;
 
         let state = Arc::new(SharedAppState::default());
         state.update_startup_status(&startup_status);
@@ -163,9 +163,25 @@ fn resolve_startup_config(
     resources: &ResourceLocator,
     i18n: &I18n,
     initial_status: StartupStatus,
+    debug: bool,
 ) -> Result<StartupStatus, StartupError> {
     let config_path_text = resources.config_path().display().to_string();
     let previous_config = initial_status.loaded_config.clone();
+
+    // --debug: force the config wizard regardless of current config.
+    if debug {
+        log::info!("debug mode: forcing config wizard");
+        if let Some(config) = run_config_wizard(resources, i18n, previous_config.as_ref(), true) {
+            config
+                .save_to_path(resources.config_path())
+                .map_err(|error| StartupError::new(error.to_string()))?;
+            return Ok(StartupStatus::ready(config_path_text, config));
+        }
+        return Ok(StartupStatus::invalid(
+            config_path_text,
+            "debug wizard cancelled".to_string(),
+        ));
+    }
 
     // Replay mode doesn't need target discovery or config wizard.
     if let Some(config) = previous_config.as_ref() {
@@ -190,7 +206,7 @@ fn resolve_startup_config(
         }
     }
 
-    if let Some(config) = run_config_wizard(resources, i18n, previous_config.as_ref()) {
+    if let Some(config) = run_config_wizard(resources, i18n, previous_config.as_ref(), false) {
         config
             .save_to_path(resources.config_path())
             .map_err(|error| StartupError::new(error.to_string()))?;

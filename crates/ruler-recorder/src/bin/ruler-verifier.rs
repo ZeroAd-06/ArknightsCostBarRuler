@@ -1,23 +1,23 @@
-//! ruler-verifier — offline per-frame analysis of a recorded HEVC file
+//! ruler-verifier — offline per-frame analysis of a recorded video file
 //!
-//! Reads an existing `.hevc`, decodes it sequentially through ffmpeg, runs the
-//! standard `RulerEngine` analysis on every frame, and writes the results to a
-//! CSV file using the same schema as `ruler-recorder`.
+//! Reads an existing recorded video file, decodes it sequentially through ffmpeg,
+//! runs the standard `RulerEngine` analysis on every frame, and writes the
+//! results to a CSV file using the same schema as `ruler-recorder`.
 //!
 //! Usage:
-//!   ruler-verifier -i <input.hevc> [-c <config>] [-o <output.csv>]
+//!   ruler-verifier -i <input.video> [-c <config>] [-o <output.csv>]
 //!                   [--fps <value>] [--calibration <path>]
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 
 use ruler_core::config::RulerConfig;
 use ruler_core::engine::RulerEngine;
 use ruler_core::PixelFormat;
-use ruler_recorder::{
-    bytes_per_pixel, flip_rows, resolve_calibration_path, CsvWriter,
-};
+use ruler_recorder::{bytes_per_pixel, flip_rows, resolve_calibration_path, CsvWriter};
 
 // ---------------------------------------------------------------------------
 // CLI options
@@ -34,9 +34,9 @@ struct Options {
 fn print_help() {
     eprintln!("Usage: ruler-verifier [OPTIONS]");
     eprintln!("  -c, --config PATH         Config file (default: config.json)");
-    eprintln!("  -i, --input PATH          Input HEVC file (required)");
+    eprintln!("  -i, --input PATH          Input recorded video file (required)");
     eprintln!("  -o, --output PATH         Output CSV path (default: <input>_verify.csv)");
-    eprintln!("      --fps VALUE           Override replay FPS from config");
+    eprintln!("      --fps VALUE           Fallback FPS if stream timestamps are unavailable");
     eprintln!("      --calibration PATH    Override calibration file path");
     eprintln!("  -h, --help               Print help");
 }
@@ -128,7 +128,7 @@ fn parse_args() -> Result<Options, String> {
 // ---------------------------------------------------------------------------
 
 enum ReadFrame {
-    Frame,
+    Frame { timestamp_ms: u128 },
     Eof,
 }
 
@@ -136,6 +136,115 @@ struct RawVideoDecoder {
     child: Option<Child>,
     stdout: Option<ChildStdout>,
     frame_size: usize,
+    timestamps: Receiver<Result<u128, String>>,
+    stderr_thread: Option<JoinHandle<Result<String, String>>>,
+    fallback_fps: Option<f64>,
+    frames_read: u64,
+    warned_timestamp_fallback: bool,
+}
+
+fn parse_showinfo_time_base(line: &str) -> Option<(u128, u128)> {
+    let (_, rest) = line.split_once("config in time_base:")?;
+    let token = rest.trim().split(',').next()?.trim();
+    let (num, den) = token.split_once('/')?;
+    let num = num.trim().parse::<u128>().ok()?;
+    let den = den.trim().parse::<u128>().ok()?;
+    if den == 0 {
+        return None;
+    }
+    Some((num, den))
+}
+
+fn parse_showinfo_pts(line: &str) -> Option<i128> {
+    let (_, rest) = line.split_once(" pts:")?;
+    let token = rest.split_whitespace().next()?;
+    token.parse::<i128>().ok()
+}
+
+fn parse_showinfo_pts_time_ms(line: &str) -> Option<u128> {
+    let (_, rest) = line.split_once(" pts_time:")?;
+    let token = rest.split_whitespace().next()?;
+    let pts_time = token.parse::<f64>().ok()?;
+    if !pts_time.is_finite() || pts_time < 0.0 {
+        return None;
+    }
+    Some((pts_time * 1000.0).round() as u128)
+}
+
+fn timestamp_ms_from_pts(pts: i128, time_base_num: u128, time_base_den: u128) -> Option<u128> {
+    if pts < 0 || time_base_den == 0 {
+        return None;
+    }
+
+    let pts = pts as u128;
+    let numerator = pts.checked_mul(time_base_num)?.checked_mul(1000)?;
+    Some((numerator + time_base_den / 2) / time_base_den)
+}
+
+fn is_showinfo_frame_line(line: &str) -> bool {
+    line.contains(" pts:") && line.contains(" pts_time:")
+}
+
+fn parse_showinfo_frame_timestamp_ms(
+    line: &str,
+    time_base: Option<(u128, u128)>,
+) -> Result<u128, String> {
+    if let Some((time_base_num, time_base_den)) = time_base {
+        if let Some(pts) = parse_showinfo_pts(line) {
+            return timestamp_ms_from_pts(pts, time_base_num, time_base_den).ok_or_else(|| {
+                format!("failed to convert ffmpeg pts to milliseconds: {line}")
+            });
+        }
+    }
+
+    parse_showinfo_pts_time_ms(line)
+        .ok_or_else(|| format!("failed to parse ffmpeg pts_time: {line}"))
+}
+
+fn spawn_timestamp_reader(
+    stderr: ChildStderr,
+) -> (
+    Receiver<Result<u128, String>>,
+    JoinHandle<Result<String, String>>,
+) {
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut stderr_log = String::new();
+        let mut time_base: Option<(u128, u128)> = None;
+
+        for line_result in BufReader::new(stderr).lines() {
+            let line = line_result
+                .map_err(|e| format!("failed to read ffmpeg stderr: {e}"))?;
+
+            stderr_log.push_str(&line);
+            stderr_log.push('\n');
+
+            if let Some(parsed) = parse_showinfo_time_base(&line) {
+                time_base = Some(parsed);
+                continue;
+            }
+
+            if !is_showinfo_frame_line(&line) {
+                continue;
+            }
+
+            let timestamp_ms = match parse_showinfo_frame_timestamp_ms(&line, time_base) {
+                Ok(timestamp_ms) => timestamp_ms,
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return Ok(stderr_log);
+                }
+            };
+
+            if tx.send(Ok(timestamp_ms)).is_err() {
+                return Ok(stderr_log);
+            }
+        }
+
+        Ok(stderr_log)
+    });
+
+    (rx, handle)
 }
 
 impl RawVideoDecoder {
@@ -190,6 +299,7 @@ impl RawVideoDecoder {
         width: u32,
         height: u32,
         format: PixelFormat,
+        fallback_fps: Option<f64>,
     ) -> Result<Self, String> {
         let frame_size = (width * height * bytes_per_pixel(format)) as usize;
         let pix_fmt = match format {
@@ -199,10 +309,16 @@ impl RawVideoDecoder {
 
         let mut child = Command::new("ffmpeg")
             .args([
+                "-hide_banner",
+                "-nostats",
                 "-v",
-                "error",
+                "info",
                 "-i",
                 &input_path.to_string_lossy(),
+                "-vf",
+                "showinfo",
+                "-fps_mode",
+                "passthrough",
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -222,11 +338,21 @@ impl RawVideoDecoder {
             .stdout
             .take()
             .ok_or_else(|| "ffmpeg stdout not available".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "ffmpeg stderr not available".to_string())?;
+        let (timestamps, stderr_thread) = spawn_timestamp_reader(stderr);
 
         Ok(Self {
             child: Some(child),
             stdout: Some(stdout),
             frame_size,
+            timestamps,
+            stderr_thread: Some(stderr_thread),
+            fallback_fps,
+            frames_read: 0,
+            warned_timestamp_fallback: false,
         })
     }
 
@@ -260,24 +386,61 @@ impl RawVideoDecoder {
             }
         }
 
-        Ok(ReadFrame::Frame)
+        let timestamp_ms = match self.timestamps.recv() {
+            Ok(Ok(timestamp_ms)) => timestamp_ms,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                let fps = self.fallback_fps.ok_or_else(|| {
+                    "decoder produced a frame without timestamp metadata".to_string()
+                })?;
+                if !self.warned_timestamp_fallback {
+                    eprintln!(
+                        "WARNING: ffmpeg timestamp stream ended early; falling back to {:.3} fps",
+                        fps
+                    );
+                    self.warned_timestamp_fallback = true;
+                }
+                ((self.frames_read as f64) * 1000.0 / fps).round() as u128
+            }
+        };
+
+        self.frames_read += 1;
+        Ok(ReadFrame::Frame { timestamp_ms })
     }
 
     fn finish(&mut self) -> Result<(), String> {
         self.stdout.take();
-        if let Some(child) = self.child.take() {
-            let output = child
-                .wait_with_output()
-                .map_err(|e| format!("failed to wait for ffmpeg: {e}"))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let detail = stderr.trim();
+
+        let status = if let Some(mut child) = self.child.take() {
+            Some(
+                child
+                    .wait()
+                    .map_err(|e| format!("failed to wait for ffmpeg: {e}"))?,
+            )
+        } else {
+            None
+        };
+
+        let stderr_log = if let Some(handle) = self.stderr_thread.take() {
+            match handle.join() {
+                Ok(Ok(stderr_log)) => stderr_log,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err("ffmpeg stderr reader panicked".to_string()),
+            }
+        } else {
+            String::new()
+        };
+
+        if let Some(status) = status {
+            if !status.success() {
+                let detail = stderr_log.trim();
                 if detail.is_empty() {
                     return Err("ffmpeg decoder exited with a failure status".to_string());
                 }
                 return Err(format!("ffmpeg decoder failed: {detail}"));
             }
         }
+
         Ok(())
     }
 }
@@ -288,6 +451,9 @@ impl Drop for RawVideoDecoder {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
         }
     }
 }
@@ -306,7 +472,7 @@ fn main() {
 
     if !options.input_path.is_file() {
         eprintln!(
-            "FATAL: input HEVC file does not exist: {}",
+            "FATAL: input video file does not exist: {}",
             options.input_path.display()
         );
         std::process::exit(1);
@@ -345,11 +511,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let fps = options
-        .fps_override
-        .or(ruler_config.replay_fps)
-        .unwrap_or(60.0);
-    if fps <= 0.0 {
+    let fallback_fps = options.fps_override.or(ruler_config.replay_fps).unwrap_or(60.0);
+    if fallback_fps <= 0.0 {
         eprintln!("FATAL: replay FPS must be positive");
         std::process::exit(1);
     }
@@ -359,11 +522,17 @@ fn main() {
         std::process::exit(1);
     });
 
-    let mut decoder = RawVideoDecoder::spawn(&options.input_path, width, height, PixelFormat::Bgr)
-        .unwrap_or_else(|e| {
-            eprintln!("FATAL: {e}");
-            std::process::exit(1);
-        });
+    let mut decoder = RawVideoDecoder::spawn(
+        &options.input_path,
+        width,
+        height,
+        PixelFormat::Bgr,
+        Some(fallback_fps),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("FATAL: {e}");
+        std::process::exit(1);
+    });
 
     let mut engine = RulerEngine::new();
     engine.load_calibration(&calibration_path).unwrap_or_else(|e| {
@@ -386,11 +555,12 @@ fn main() {
     eprintln!("  calibration : {}", calibration_path.display());
     eprintln!("  output      : {}", options.output_path.display());
     eprintln!("  dimensions  : {width}x{height}");
-    eprintln!("  fps         : {fps}");
+    eprintln!("  timestamps  : ffmpeg/showinfo PTS");
+    eprintln!("  fps fallback: {fallback_fps}");
 
     loop {
         match decoder.read_frame(&mut frame_buf) {
-            Ok(ReadFrame::Frame) => {
+            Ok(ReadFrame::Frame { timestamp_ms }) => {
                 flip_rows(&mut frame_buf, width, height, bytes_per_pixel(PixelFormat::Bgr));
 
                 let result = engine
@@ -403,8 +573,6 @@ fn main() {
                         std::process::exit(1);
                     });
 
-                let frame_index = csv.frame_count();
-                let timestamp_ms = ((frame_index as f64) * 1000.0 / fps).round() as u128;
                 csv.write_row(
                     timestamp_ms,
                     result.raw_pixel_width,

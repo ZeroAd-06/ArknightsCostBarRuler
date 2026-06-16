@@ -61,13 +61,17 @@ pub struct RulerConfig {
     #[serde(default)]
     pub debug_recording_output_dir: Option<String>,
 
-    // -- Replay (virtual capture from HEVC file) ---------------------------
+    // -- Replay (virtual capture from a recorded video file) ---------------
 
-    /// Path to a pre-recorded HEVC file for replay (type: "replay").
+    /// Path to a pre-recorded video file for replay (type: "replay").
+    ///
+    /// The field name remains `replay_hevc_path` for backward compatibility,
+    /// but ffmpeg-supported container video files are accepted as well.
     #[serde(default)]
     pub replay_hevc_path: Option<String>,
 
-    /// Target playback frame rate for replay (default 60).
+    /// Fallback playback frame rate for replay when the input file does not
+    /// expose usable per-frame timestamps (default 60).
     #[serde(default)]
     pub replay_fps: Option<f64>,
 }

@@ -668,11 +668,15 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                 }
             }
 
+            if let Some(ref mut recorder) = context.debug_recorder {
+                recorder.record_video_frame(&frame_data);
+            }
+
             match context.engine.analyze_captured_frame(&frame_data) {
                 Ok(result) => {
-                    // Debug recording: write frame + analysis
+                    // Debug recording: write analysis row after the video frame has already been queued.
                     if let Some(ref mut recorder) = context.debug_recorder {
-                        recorder.record_frame(&frame_data, &result, capture_dur_us);
+                        recorder.record_analysis_row(&result, capture_dur_us);
                     }
 
                     let worker_timing = WorkerTimingSnapshot {

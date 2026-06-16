@@ -78,7 +78,10 @@ pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, 
         CaptureType::Replay => {
             let hevc_path = config
                 .replay_hevc_path
-                .ok_or_else(|| "Replay capture requires replay_hevc_path".to_string())?;
+                .ok_or_else(|| {
+                    "Replay capture requires replay_hevc_path (recorded video file path)"
+                        .to_string()
+                })?;
             let fps = config.replay_fps.unwrap_or(60.0);
             Ok(Box::new(ReplayCaptureBackend::new(
                 &hevc_path,

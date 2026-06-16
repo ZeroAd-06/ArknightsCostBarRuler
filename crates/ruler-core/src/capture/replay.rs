@@ -33,9 +33,9 @@ fn flip_rows(buf: &mut [u8], width: u32, height: u32, bpp: u32) {
 // ReplayCaptureBackend
 // ---------------------------------------------------------------------------
 
-/// Virtual capture backend that replays frames from a pre-recorded HEVC file.
+/// Virtual capture backend that replays frames from a pre-recorded video file.
 ///
-/// On `connect()` it spawns `ffmpeg` to decode the HEVC file to raw video
+/// On `connect()` it spawns `ffmpeg` to decode the recorded video file to raw video
 /// frames via pipe.  Each `capture_frame()` call:
 ///
 /// 1. Computes the expected frame index: `elapsed_seconds × target_fps`
@@ -63,7 +63,7 @@ pub struct ReplayCaptureBackend {
 impl ReplayCaptureBackend {
     /// Create a new replay backend.
     ///
-    /// * `hevc_path` – path to the `.hevc` file to replay
+    /// * `hevc_path` – path to the recorded video file to replay
     /// * `target_fps` – playback frame rate (e.g. `60.0`)
     /// * `width`, `height` – video dimensions (obtain e.g. via `ffprobe`)
     /// * `pix_fmt` – pixel format to decode to (default: `Rgba`)
@@ -134,6 +134,8 @@ impl CaptureBackend for ReplayCaptureBackend {
             .args([
                 "-i",
                 &self.hevc_path,
+                "-fps_mode",
+                "passthrough",
                 "-f",
                 "rawvideo",
                 "-pixel_format",
@@ -177,7 +179,7 @@ impl CaptureBackend for ReplayCaptureBackend {
 
         // Read the frame at the expected position
         if !self.read_into_buf() {
-            return Err("replay: end of HEVC file reached".to_string());
+            return Err("replay: end of recorded video file reached".to_string());
         }
         self.frames_read += 1;
 

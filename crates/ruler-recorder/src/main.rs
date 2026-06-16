@@ -1,7 +1,7 @@
 //! ruler-recorder — debug helper that records ruler video + analysis data
 //!
 //! Captures frames at the maximum rate the backend supports, simultaneously:
-//!   - Writing a lossless HEVC video file (via ffmpeg pipe)
+//!   - Writing a timestamped lossless HEVC video file in MKV (via ffmpeg pipe)
 //!   - Writing a CSV table with per-frame analysis data
 //!
 //! Usage:
@@ -14,9 +14,9 @@
 //!
 //! Press Ctrl+C to stop early.
 
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,13 @@ use ruler_recorder::{
 static STOP_NOW: AtomicBool = AtomicBool::new(false);
 static ANALYSE_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Rawvideo stdin packets have no embedded timestamps, so ffmpeg quantizes
+/// wallclock capture time to the input stream time base. 60 fps is too coarse
+/// once the backend captures faster than ~16.7 ms/frame, which causes repeated
+/// PTS values and later frame drops in verifier/replay. Use a 1 kHz nominal
+/// input rate so wallclock timestamps are preserved at millisecond precision.
+const FFMPEG_WALLCLOCK_INPUT_FPS: &str = "1000";
+
 fn empty_frame_result() -> FrameResult {
     FrameResult {
         logical_frame: None,
@@ -42,6 +49,19 @@ fn empty_frame_result() -> FrameResult {
         elapsed_frames: 0,
         cost_is_negative: false,
     }
+}
+
+fn write_video_frame(
+    ffmpeg_stdin: &mut ChildStdin,
+    frame_data: &[u8],
+    width: u32,
+    height: u32,
+    bpp: u32,
+) -> std::io::Result<()> {
+    let mut buf = frame_data.to_vec();
+    flip_rows(&mut buf, width, height, bpp);
+    ffmpeg_stdin.write_all(&buf)?;
+    ffmpeg_stdin.flush()
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +117,7 @@ fn main() {
     });
     let ts = timestamp_for_filename();
     let csv_path = output_dir.join(format!("recording_{ts}.csv"));
-    let video_path = output_dir.join(format!("recording_{ts}.hevc"));
+    let video_path = output_dir.join(format!("recording_{ts}.mkv"));
 
     eprintln!("=== ruler-recorder ===");
     eprintln!("  config     : {}", config_path.display());
@@ -160,6 +180,8 @@ fn main() {
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
             "-y",
+            "-use_wallclock_as_timestamps",
+            "1",
             "-f",
             "rawvideo",
             "-pixel_format",
@@ -167,9 +189,16 @@ fn main() {
             "-video_size",
             &format!("{width}x{height}"),
             "-framerate",
-            "60",
+            FFMPEG_WALLCLOCK_INPUT_FPS,
             "-i",
             "pipe:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-copyts",
+            "-start_at_zero",
+            "-fps_mode",
+            "passthrough",
             "-c:v",
             "libx265",
             "-crf",
@@ -178,8 +207,6 @@ fn main() {
             "ultrafast",
             "-pix_fmt",
             "yuv444p",
-            "-tag:v",
-            "hvc1",
             &video_path.to_string_lossy(),
         ])
         .stdin(Stdio::piped())
@@ -192,8 +219,7 @@ fn main() {
             std::process::exit(1);
         });
 
-    let ffmpeg_stdin = ffmpeg.stdin.take().expect("ffmpeg stdin not piped");
-    let mut ffmpeg_writer = BufWriter::new(ffmpeg_stdin);
+    let mut ffmpeg_stdin = ffmpeg.stdin.take().expect("ffmpeg stdin not piped");
 
     // ---- open CSV ---------------------------------------------------------
     let mut csv = CsvWriter::new(&csv_path).unwrap_or_else(|e| {
@@ -203,15 +229,12 @@ fn main() {
     let csv_start = Instant::now();
 
     // ---- write first frame ------------------------------------------------
+    write_video_frame(&mut ffmpeg_stdin, &first_frame.data, width, height, bpp)
+        .expect("ffmpeg write failed");
     let result = engine.analyze_captured_frame(&first_frame).unwrap_or_else(|e| {
         eprintln!("WARNING: first frame analysis failed: {e}");
         empty_frame_result()
     });
-    {
-        let mut buf = first_frame.data;
-        flip_rows(&mut buf, width, height, bpp);
-        ffmpeg_writer.write_all(&buf).expect("ffmpeg write failed");
-    }
     csv.write_row(
         csv_start.elapsed().as_millis(),
         result.raw_pixel_width,
@@ -246,7 +269,13 @@ fn main() {
         };
         let cap_us = t0.elapsed().as_micros();
 
-        // 2. Analyse (best-effort — missing calibration still records video + partial CSV)
+        // 2. Pipe to ffmpeg as early as possible so wallclock timestamps track capture timing.
+        if let Err(e) = write_video_frame(&mut ffmpeg_stdin, &frame.data, width, height, bpp) {
+            eprintln!("\nFATAL: ffmpeg pipe error: {e}");
+            break;
+        }
+
+        // 3. Analyse (best-effort — missing calibration still records video + partial CSV)
         let result = match engine.analyze_captured_frame(&frame) {
             Ok(r) => r,
             Err(e) => {
@@ -256,14 +285,6 @@ fn main() {
                 empty_frame_result()
             }
         };
-
-        // 3. Pipe to ffmpeg
-        let mut buf = frame.data;
-        flip_rows(&mut buf, width, height, bpp);
-        if let Err(e) = ffmpeg_writer.write_all(&buf) {
-            eprintln!("\nFATAL: ffmpeg pipe error: {e}");
-            break;
-        }
 
         // 4. Write CSV (always — sync with video frames)
         if let Err(e) = csv.write_row(
@@ -295,8 +316,8 @@ fn main() {
     }
 
     // ---- cleanup ----------------------------------------------------------
-    ffmpeg_writer.flush().ok();
-    drop(ffmpeg_writer);
+    let _ = ffmpeg_stdin.flush();
+    drop(ffmpeg_stdin);
     let _ = ffmpeg.wait();
     csv.flush().ok();
 

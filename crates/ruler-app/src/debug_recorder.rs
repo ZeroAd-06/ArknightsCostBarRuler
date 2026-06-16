@@ -2,9 +2,9 @@
 //!
 //! Controlled exclusively via config.json (no UI).  When `debug_recording_enabled`
 //! is true, the worker thread pipes every captured frame through ffmpeg to a
-//! lossless HEVC file and/or logs analysis results to a CSV file.
+//! timestamped lossless HEVC video file in MKV and/or logs analysis results to a CSV file.
 //!
-//! Both outputs are written to `{output_dir}/debug_{timestamp}.hevc` and
+//! Both outputs are written to `{output_dir}/debug_{timestamp}.mkv` and
 //! `{output_dir}/debug_{timestamp}.csv` respectively.
 
 use std::{
@@ -161,9 +161,16 @@ impl CsvWriter {
 
 use std::process::ChildStdin;
 
+/// Rawvideo stdin packets have no embedded timestamps, so ffmpeg quantizes
+/// wallclock capture time to the input stream time base. 60 fps is too coarse
+/// once the backend captures faster than ~16.7 ms/frame, which causes repeated
+/// PTS values and later frame drops in verifier/replay. Use a 1 kHz nominal
+/// input rate so wallclock timestamps are preserved at millisecond precision.
+const FFMPEG_WALLCLOCK_INPUT_FPS: &str = "1000";
+
 struct FfmpegPipe {
     /// Option so we can move out and drop stdin *before* waiting on the child.
-    stdin: Option<BufWriter<ChildStdin>>,
+    stdin: Option<ChildStdin>,
     child: Option<Child>,
 }
 
@@ -177,6 +184,8 @@ impl FfmpegPipe {
         let mut child = Command::new("ffmpeg")
             .args([
                 "-y",
+                "-use_wallclock_as_timestamps",
+                "1",
                 "-f",
                 "rawvideo",
                 "-pixel_format",
@@ -184,9 +193,16 @@ impl FfmpegPipe {
                 "-video_size",
                 &format!("{width}x{height}"),
                 "-framerate",
-                "60",
+                FFMPEG_WALLCLOCK_INPUT_FPS,
                 "-i",
                 "pipe:0",
+                "-an",
+                "-sn",
+                "-dn",
+                "-copyts",
+                "-start_at_zero",
+                "-fps_mode",
+                "passthrough",
                 "-c:v",
                 "libx265",
                 "-crf",
@@ -195,8 +211,6 @@ impl FfmpegPipe {
                 "ultrafast",
                 "-pix_fmt",
                 "yuv444p",
-                "-tag:v",
-                "hvc1",
                 &output_path.to_string_lossy(),
             ])
             .stdin(Stdio::piped())
@@ -211,14 +225,17 @@ impl FfmpegPipe {
             .ok_or_else(|| "ffmpeg stdin not available".to_string())?;
 
         Ok(Self {
-            stdin: Some(BufWriter::new(stdin)),
+            stdin: Some(stdin),
             child: Some(child),
         })
     }
 
     fn write_frame(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self.stdin {
-            Some(ref mut w) => w.write_all(buf),
+            Some(ref mut w) => {
+                w.write_all(buf)?;
+                w.flush()
+            }
             None => Ok(()),
         }
     }
@@ -267,7 +284,7 @@ impl DebugRecorder {
         let bpp = bytes_per_pixel(fmt);
 
         let ffmpeg = if record_video {
-            let video_path = output_dir.join(format!("debug_{ts}.hevc"));
+            let video_path = output_dir.join(format!("debug_{ts}.mkv"));
             let pix_fmt = pix_fmt_str(fmt);
             log::info!("debug recording: video -> {}", video_path.display());
             Some(FfmpegPipe::spawn(pix_fmt, width, height, &video_path)?)
@@ -295,14 +312,9 @@ impl DebugRecorder {
         })
     }
 
-    /// Record one captured+analyzed frame.
-    pub fn record_frame(
-        &mut self,
-        frame: &CapturedFrame,
-        result: &FrameResult,
-        capture_dur_us: u128,
-    ) {
-        // Video
+    /// Record the video payload for one captured frame as early as possible so
+    /// ffmpeg's wallclock timestamps track capture timing instead of post-analysis delay.
+    pub fn record_video_frame(&mut self, frame: &CapturedFrame) {
         if let Some(ref mut pipe) = self.ffmpeg {
             let mut buf = frame.data.clone();
             flip_rows(&mut buf, self.width, self.height, self.bpp);
@@ -311,8 +323,10 @@ impl DebugRecorder {
                 self.ffmpeg = None;
             }
         }
+    }
 
-        // CSV
+    /// Record the analysis CSV row for one frame.
+    pub fn record_analysis_row(&mut self, result: &FrameResult, capture_dur_us: u128) {
         if let Some(ref mut csv) = self.csv {
             if let Err(e) = csv.write_row(
                 result.raw_pixel_width,

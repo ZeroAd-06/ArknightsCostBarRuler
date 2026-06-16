@@ -8,6 +8,33 @@ pub enum PixelFormat {
     Bgr,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BattleState {
+    PointTwoXRunning,
+    OneXRunning,
+    TwoXRunning,
+    PointTwoXPaused,
+    OneXPaused,
+    TwoXPaused,
+    BeforeOrAfterBattle,
+    NotInBattle,
+}
+
+impl BattleState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PointTwoXRunning => "0.2x_running",
+            Self::OneXRunning => "1x_running",
+            Self::TwoXRunning => "2x_running",
+            Self::PointTwoXPaused => "0.2x_paused",
+            Self::OneXPaused => "1x_paused",
+            Self::TwoXPaused => "2x_paused",
+            Self::BeforeOrAfterBattle => "before_or_after_battle",
+            Self::NotInBattle => "not_in_battle",
+        }
+    }
+}
+
 const WHITE_THRESHOLD: u8 = 250;
 const MASKED_WHITE_THRESHOLD: u8 = 150;
 const MASKED_MAX_BRIGHTNESS: u8 = 165;
@@ -27,6 +54,34 @@ const COST_SIGN_MIN_RUN_REF: f64 = 14.0;
 // At 720p the pure-white core of the minus sign is only a single row tall; it
 // thickens with resolution. Keep the floor at one row so 720p still detects.
 const COST_SIGN_MIN_ROWS_REF: f64 = 1.0;
+
+const BATTLE_BUTTON_REF_WIDTH: f64 = 1280.0;
+const BATTLE_BUTTON_REF_HEIGHT: f64 = 720.0;
+const BATTLE_BUTTON_REF_ASPECT_RATIO: f64 = BATTLE_BUTTON_REF_WIDTH / BATTLE_BUTTON_REF_HEIGHT;
+
+const SPEED_GLYPH_LEFT_FROM_RIGHT_REF: f64 = 207.0;
+const SPEED_GLYPH_RIGHT_FROM_RIGHT_REF: f64 = 153.0;
+const SPEED_GLYPH_TOP_REF: f64 = 28.0;
+const SPEED_GLYPH_BOTTOM_REF: f64 = 79.0;
+
+const PAUSE_GLYPH_LEFT_FROM_RIGHT_REF: f64 = 92.0;
+const PAUSE_GLYPH_RIGHT_FROM_RIGHT_REF: f64 = 50.0;
+const PAUSE_GLYPH_TOP_REF: f64 = 38.0;
+const PAUSE_GLYPH_BOTTOM_REF: f64 = 69.0;
+
+const BATTLE_BUTTON_BRIGHT_THRESHOLD: u8 = 180;
+const BATTLE_BUTTON_DIM_THRESHOLD: u8 = 120;
+const SPEED_0_2X_MAX: f64 = 420.0;
+const SPEED_1X_MIN: f64 = 430.0;
+const SPEED_1X_MAX: f64 = 570.0;
+const SPEED_2X_MIN: f64 = 620.0;
+const SPEED_2X_MAX: f64 = 760.0;
+const PAUSE_RUNNING_MIN: f64 = 590.0;
+const PAUSE_RUNNING_MAX: f64 = 780.0;
+const PAUSE_PAUSED_MIN: f64 = 380.0;
+const PAUSE_PAUSED_MAX: f64 = 500.0;
+const DIM_BUTTON_BRIGHT_MAX: f64 = 40.0;
+const DIM_BUTTON_GLYPH_MIN: f64 = 150.0;
 
 #[inline(always)]
 fn read_pixel(
@@ -82,10 +137,7 @@ fn is_pixel_grayscale(r: u8, g: u8, b: u8) -> bool {
 /// runs but never a wide *pure-white* run across the bar's vertical centre.
 #[inline(always)]
 fn is_cost_sign_pixel(r: u8, g: u8, b: u8, a: u8) -> bool {
-    a == ALPHA_OPAQUE
-        && r > WHITE_THRESHOLD
-        && g > WHITE_THRESHOLD
-        && b > WHITE_THRESHOLD
+    a == ALPHA_OPAQUE && r > WHITE_THRESHOLD && g > WHITE_THRESHOLD && b > WHITE_THRESHOLD
 }
 
 #[inline]
@@ -119,6 +171,256 @@ fn cost_sign_scan_rect(width: u32, height: u32) -> Option<(i32, i32, i32, i32, f
     }
 
     Some((left, right, top, bottom, scale))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+}
+
+impl Rect {
+    fn is_empty(self) -> bool {
+        self.left >= self.right || self.top >= self.bottom
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SpeedButtonState {
+    OneX,
+    TwoX,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PauseButtonState {
+    Running,
+    Paused,
+}
+
+#[inline]
+fn battle_button_scale(width: u32, height: u32) -> f64 {
+    let aspect_ratio = width as f64 / height as f64;
+    if aspect_ratio >= BATTLE_BUTTON_REF_ASPECT_RATIO {
+        height as f64 / BATTLE_BUTTON_REF_HEIGHT
+    } else {
+        width as f64 / BATTLE_BUTTON_REF_WIDTH
+    }
+}
+
+#[inline]
+fn glyph_rect_from_right(
+    width: u32,
+    height: u32,
+    scale: f64,
+    left_from_right_ref: f64,
+    right_from_right_ref: f64,
+    top_ref: f64,
+    bottom_ref: f64,
+) -> Rect {
+    let left = (width as f64 - left_from_right_ref * scale).round() as i32;
+    let right = (width as f64 - right_from_right_ref * scale).round() as i32;
+    let top = (top_ref * scale).round() as i32;
+    let bottom = (bottom_ref * scale).round() as i32;
+
+    Rect {
+        left: left.clamp(0, width as i32),
+        right: right.clamp(0, width as i32),
+        top: top.clamp(0, height as i32),
+        bottom: bottom.clamp(0, height as i32),
+    }
+}
+
+#[inline]
+fn is_bright_enough(r: u8, g: u8, b: u8, threshold: u8) -> bool {
+    r as u16 + g as u16 + b as u16 >= threshold as u16 * 3
+}
+
+fn count_bright_pixels(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    rect: Rect,
+    threshold: u8,
+) -> u32 {
+    if rect.is_empty() {
+        return 0;
+    }
+
+    let bytes_per_pixel = match format {
+        PixelFormat::Rgba => 4,
+        PixelFormat::Bgr => 3,
+    };
+    let stride = width as usize * bytes_per_pixel;
+    let min_len = stride.saturating_mul(height as usize);
+    if buffer.len() < min_len {
+        return 0;
+    }
+
+    let mut count = 0;
+    for y in rect.top..rect.bottom {
+        let row = (height as i32 - 1 - y) as usize;
+        let mut offset = row * stride + rect.left as usize * bytes_per_pixel;
+        for _ in rect.left..rect.right {
+            let is_bright = match format {
+                PixelFormat::Rgba => is_bright_enough(
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    threshold,
+                ),
+                PixelFormat::Bgr => is_bright_enough(
+                    buffer[offset + 2],
+                    buffer[offset + 1],
+                    buffer[offset],
+                    threshold,
+                ),
+            };
+            if is_bright {
+                count += 1;
+            }
+            offset += bytes_per_pixel;
+        }
+    }
+
+    count
+}
+
+#[inline]
+fn normalized_count(count: u32, scale: f64) -> f64 {
+    if scale <= 0.0 {
+        0.0
+    } else {
+        count as f64 / (scale * scale)
+    }
+}
+
+#[inline]
+fn classify_speed(count: f64) -> Option<SpeedButtonState> {
+    if (SPEED_1X_MIN..=SPEED_1X_MAX).contains(&count) {
+        Some(SpeedButtonState::OneX)
+    } else if (SPEED_2X_MIN..=SPEED_2X_MAX).contains(&count) {
+        Some(SpeedButtonState::TwoX)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn classify_pause(count: f64) -> Option<PauseButtonState> {
+    if (PAUSE_RUNNING_MIN..=PAUSE_RUNNING_MAX).contains(&count) {
+        Some(PauseButtonState::Running)
+    } else if (PAUSE_PAUSED_MIN..=PAUSE_PAUSED_MAX).contains(&count) {
+        Some(PauseButtonState::Paused)
+    } else {
+        None
+    }
+}
+
+pub fn detect_battle_state(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+) -> BattleState {
+    if width == 0 || height == 0 {
+        return BattleState::NotInBattle;
+    }
+
+    let scale = battle_button_scale(width, height);
+    let speed_rect = glyph_rect_from_right(
+        width,
+        height,
+        scale,
+        SPEED_GLYPH_LEFT_FROM_RIGHT_REF,
+        SPEED_GLYPH_RIGHT_FROM_RIGHT_REF,
+        SPEED_GLYPH_TOP_REF,
+        SPEED_GLYPH_BOTTOM_REF,
+    );
+    let pause_rect = glyph_rect_from_right(
+        width,
+        height,
+        scale,
+        PAUSE_GLYPH_LEFT_FROM_RIGHT_REF,
+        PAUSE_GLYPH_RIGHT_FROM_RIGHT_REF,
+        PAUSE_GLYPH_TOP_REF,
+        PAUSE_GLYPH_BOTTOM_REF,
+    );
+
+    let speed_bright = normalized_count(
+        count_bright_pixels(
+            buffer,
+            width,
+            height,
+            format,
+            speed_rect,
+            BATTLE_BUTTON_BRIGHT_THRESHOLD,
+        ),
+        scale,
+    );
+    let pause_bright = normalized_count(
+        count_bright_pixels(
+            buffer,
+            width,
+            height,
+            format,
+            pause_rect,
+            BATTLE_BUTTON_BRIGHT_THRESHOLD,
+        ),
+        scale,
+    );
+
+    if let (Some(speed), Some(pause)) = (classify_speed(speed_bright), classify_pause(pause_bright))
+    {
+        return match (speed, pause) {
+            (SpeedButtonState::OneX, PauseButtonState::Running) => BattleState::OneXRunning,
+            (SpeedButtonState::TwoX, PauseButtonState::Running) => BattleState::TwoXRunning,
+            (SpeedButtonState::OneX, PauseButtonState::Paused) => BattleState::OneXPaused,
+            (SpeedButtonState::TwoX, PauseButtonState::Paused) => BattleState::TwoXPaused,
+        };
+    }
+
+    if speed_bright <= SPEED_0_2X_MAX {
+        if let Some(pause) = classify_pause(pause_bright) {
+            return match pause {
+                PauseButtonState::Running => BattleState::PointTwoXRunning,
+                PauseButtonState::Paused => BattleState::PointTwoXPaused,
+            };
+        }
+    }
+
+    if speed_bright <= DIM_BUTTON_BRIGHT_MAX && pause_bright <= DIM_BUTTON_BRIGHT_MAX {
+        let speed_dim = normalized_count(
+            count_bright_pixels(
+                buffer,
+                width,
+                height,
+                format,
+                speed_rect,
+                BATTLE_BUTTON_DIM_THRESHOLD,
+            ),
+            scale,
+        );
+        let pause_dim = normalized_count(
+            count_bright_pixels(
+                buffer,
+                width,
+                height,
+                format,
+                pause_rect,
+                BATTLE_BUTTON_DIM_THRESHOLD,
+            ),
+            scale,
+        );
+
+        if speed_dim >= DIM_BUTTON_GLYPH_MIN || pause_dim >= DIM_BUTTON_GLYPH_MIN {
+            return BattleState::BeforeOrAfterBattle;
+        }
+    }
+
+    BattleState::NotInBattle
 }
 
 pub fn get_raw_filled_pixel_width(

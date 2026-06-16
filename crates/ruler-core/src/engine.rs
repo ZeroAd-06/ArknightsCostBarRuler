@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::analysis::calibration::LoadedCalibration;
 use crate::analysis::roi::{self, Roi};
-use crate::analysis::scanner::{self, PixelFormat};
+use crate::analysis::scanner::{self, BattleState, PixelFormat};
 use crate::capture::{create_backend, CaptureBackend, CaptureConfig, CapturedFrame};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12,6 +12,7 @@ pub struct FrameResult {
     pub raw_pixel_width: Option<i32>,
     pub elapsed_frames: i32,
     pub cost_is_negative: bool,
+    pub battle_state: BattleState,
 }
 
 pub struct RulerEngine {
@@ -208,6 +209,7 @@ impl RulerEngine {
 
         let pixel_width = scanner::get_raw_filled_pixel_width(buffer, width, height, format, roi);
         let cost_is_negative = scanner::is_cost_negative(buffer, width, height, format);
+        let battle_state = scanner::detect_battle_state(buffer, width, height, format);
 
         let num_profiles = calibration.tables.len();
         let base_profile = if num_profiles == 0 {
@@ -268,6 +270,7 @@ impl RulerEngine {
             raw_pixel_width: pixel_width,
             elapsed_frames: self.last_known_total_frames,
             cost_is_negative,
+            battle_state,
         })
     }
 }

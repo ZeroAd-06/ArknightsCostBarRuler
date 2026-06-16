@@ -191,9 +191,8 @@ fn parse_showinfo_frame_timestamp_ms(
 ) -> Result<u128, String> {
     if let Some((time_base_num, time_base_den)) = time_base {
         if let Some(pts) = parse_showinfo_pts(line) {
-            return timestamp_ms_from_pts(pts, time_base_num, time_base_den).ok_or_else(|| {
-                format!("failed to convert ffmpeg pts to milliseconds: {line}")
-            });
+            return timestamp_ms_from_pts(pts, time_base_num, time_base_den)
+                .ok_or_else(|| format!("failed to convert ffmpeg pts to milliseconds: {line}"));
         }
     }
 
@@ -213,8 +212,7 @@ fn spawn_timestamp_reader(
         let mut time_base: Option<(u128, u128)> = None;
 
         for line_result in BufReader::new(stderr).lines() {
-            let line = line_result
-                .map_err(|e| format!("failed to read ffmpeg stderr: {e}"))?;
+            let line = line_result.map_err(|e| format!("failed to read ffmpeg stderr: {e}"))?;
 
             stderr_log.push_str(&line);
             stderr_log.push('\n');
@@ -511,16 +509,20 @@ fn main() {
         std::process::exit(1);
     }
 
-    let fallback_fps = options.fps_override.or(ruler_config.replay_fps).unwrap_or(60.0);
+    let fallback_fps = options
+        .fps_override
+        .or(ruler_config.replay_fps)
+        .unwrap_or(60.0);
     if fallback_fps <= 0.0 {
         eprintln!("FATAL: replay FPS must be positive");
         std::process::exit(1);
     }
 
-    let (width, height) = RawVideoDecoder::probe_dimensions(&options.input_path).unwrap_or_else(|e| {
-        eprintln!("FATAL: {e}");
-        std::process::exit(1);
-    });
+    let (width, height) =
+        RawVideoDecoder::probe_dimensions(&options.input_path).unwrap_or_else(|e| {
+            eprintln!("FATAL: {e}");
+            std::process::exit(1);
+        });
 
     let mut decoder = RawVideoDecoder::spawn(
         &options.input_path,
@@ -535,14 +537,19 @@ fn main() {
     });
 
     let mut engine = RulerEngine::new();
-    engine.load_calibration(&calibration_path).unwrap_or_else(|e| {
-        eprintln!("FATAL: failed to load calibration: {e}");
-        std::process::exit(1);
-    });
+    engine
+        .load_calibration(&calibration_path)
+        .unwrap_or_else(|e| {
+            eprintln!("FATAL: failed to load calibration: {e}");
+            std::process::exit(1);
+        });
     engine.set_roi(width as i32, height as i32);
 
     let mut csv = CsvWriter::new(&options.output_path).unwrap_or_else(|e| {
-        eprintln!("FATAL: cannot create CSV '{}': {e}", options.output_path.display());
+        eprintln!(
+            "FATAL: cannot create CSV '{}': {e}",
+            options.output_path.display()
+        );
         std::process::exit(1);
     });
 
@@ -561,15 +568,17 @@ fn main() {
     loop {
         match decoder.read_frame(&mut frame_buf) {
             Ok(ReadFrame::Frame { timestamp_ms }) => {
-                flip_rows(&mut frame_buf, width, height, bytes_per_pixel(PixelFormat::Bgr));
+                flip_rows(
+                    &mut frame_buf,
+                    width,
+                    height,
+                    bytes_per_pixel(PixelFormat::Bgr),
+                );
 
                 let result = engine
                     .analyze_raw_buffer(&frame_buf, width, height, PixelFormat::Bgr)
                     .unwrap_or_else(|e| {
-                        eprintln!(
-                            "FATAL: analysis failed at frame {}: {e}",
-                            csv.frame_count()
-                        );
+                        eprintln!("FATAL: analysis failed at frame {}: {e}", csv.frame_count());
                         std::process::exit(1);
                     });
 
@@ -581,6 +590,7 @@ fn main() {
                     result.cost_is_negative,
                     result.elapsed_frames,
                     0,
+                    result.battle_state,
                 )
                 .unwrap_or_else(|e| {
                     eprintln!("FATAL: csv write failed: {e}");

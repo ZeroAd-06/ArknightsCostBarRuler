@@ -17,6 +17,8 @@ pub struct PyFrameResult {
     pub elapsed_frames: i32,
     #[pyo3(get)]
     pub cost_is_negative: bool,
+    #[pyo3(get)]
+    pub battle_state: String,
 }
 
 impl From<FrameResult> for PyFrameResult {
@@ -27,6 +29,7 @@ impl From<FrameResult> for PyFrameResult {
             raw_pixel_width: value.raw_pixel_width,
             elapsed_frames: value.elapsed_frames,
             cost_is_negative: value.cost_is_negative,
+            battle_state: value.battle_state.as_str().to_string(),
         }
     }
 }
@@ -76,6 +79,8 @@ impl RulerEngine {
                 window_handle,
                 window_title: window_title.map(str::to_owned),
                 window_class: window_class.map(str::to_owned),
+                replay_hevc_path: None,
+                replay_fps: None,
             })
             .map_err(PyRuntimeError::new_err)
     }

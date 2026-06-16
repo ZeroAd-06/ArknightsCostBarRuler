@@ -22,9 +22,10 @@ use std::time::{Duration, Instant};
 
 use ruler_core::config::RulerConfig;
 use ruler_core::engine::{FrameResult, RulerEngine};
+use ruler_core::BattleState;
 use ruler_recorder::{
-    bytes_per_pixel, calibration_path_from_config, flip_rows, pix_fmt_str,
-    timestamp_for_filename, CsvWriter,
+    bytes_per_pixel, calibration_path_from_config, flip_rows, pix_fmt_str, timestamp_for_filename,
+    CsvWriter,
 };
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,7 @@ fn empty_frame_result() -> FrameResult {
         raw_pixel_width: None,
         elapsed_frames: 0,
         cost_is_negative: false,
+        battle_state: BattleState::NotInBattle,
     }
 }
 
@@ -112,7 +114,10 @@ fn main() {
 
     // ---- prepare output paths ---------------------------------------------
     std::fs::create_dir_all(&output_dir).unwrap_or_else(|e| {
-        eprintln!("FATAL: cannot create output dir '{}': {e}", output_dir.display());
+        eprintln!(
+            "FATAL: cannot create output dir '{}': {e}",
+            output_dir.display()
+        );
         std::process::exit(1);
     });
     let ts = timestamp_for_filename();
@@ -231,10 +236,12 @@ fn main() {
     // ---- write first frame ------------------------------------------------
     write_video_frame(&mut ffmpeg_stdin, &first_frame.data, width, height, bpp)
         .expect("ffmpeg write failed");
-    let result = engine.analyze_captured_frame(&first_frame).unwrap_or_else(|e| {
-        eprintln!("WARNING: first frame analysis failed: {e}");
-        empty_frame_result()
-    });
+    let result = engine
+        .analyze_captured_frame(&first_frame)
+        .unwrap_or_else(|e| {
+            eprintln!("WARNING: first frame analysis failed: {e}");
+            empty_frame_result()
+        });
     csv.write_row(
         csv_start.elapsed().as_millis(),
         result.raw_pixel_width,
@@ -243,6 +250,7 @@ fn main() {
         result.cost_is_negative,
         result.elapsed_frames,
         0,
+        result.battle_state,
     )
     .expect("csv write failed");
 
@@ -295,6 +303,7 @@ fn main() {
             result.cost_is_negative,
             result.elapsed_frames,
             cap_us,
+            result.battle_state,
         ) {
             eprintln!("\nFATAL: csv write error: {e}");
             break;
@@ -331,7 +340,10 @@ fn main() {
 
     eprintln!("\n\n=== complete ===");
     eprintln!("  frames     : {total} recorded (+ {dropped} dropped)");
-    eprintln!("  duration   : {:.1}s  @ {fps:.0} fps", elapsed.as_secs_f64());
+    eprintln!(
+        "  duration   : {:.1}s  @ {fps:.0} fps",
+        elapsed.as_secs_f64()
+    );
     eprintln!("  video      : {}", video_path.display());
     eprintln!("  csv        : {}", csv_path.display());
 }

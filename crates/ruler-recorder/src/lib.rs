@@ -2,7 +2,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ruler_core::PixelFormat;
+use ruler_core::{BattleState, PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Timestamp helpers
@@ -130,7 +130,7 @@ impl CsvWriter {
         inner.write_all(
             b"frame_index,timestamp_ms,raw_pixel_width,logical_frame,\
               total_frames_in_cycle,cost_is_negative,elapsed_frames,\
-              capture_duration_us,phase\n",
+              capture_duration_us,phase,battle_state\n",
         )?;
         Ok(Self {
             inner,
@@ -148,6 +148,7 @@ impl CsvWriter {
         cost_is_negative: bool,
         elapsed_frames: i32,
         capture_dur_us: u128,
+        battle_state: BattleState,
     ) -> std::io::Result<()> {
         let phase = match (logical_frame, total_frames_in_cycle) {
             (Some(lf), tfc) if tfc > 0 => Some(lf as f64 / tfc as f64),
@@ -156,7 +157,7 @@ impl CsvWriter {
 
         writeln!(
             self.inner,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{}",
             self.frame_count,
             timestamp_ms,
             raw_pixel_width.map_or(String::new(), |v| v.to_string()),
@@ -166,6 +167,7 @@ impl CsvWriter {
             elapsed_frames,
             capture_dur_us,
             phase.map_or(String::new(), |p| format!("{:.6}", p)),
+            battle_state.as_str(),
         )?;
         self.frame_count += 1;
         Ok(())
@@ -186,15 +188,10 @@ mod tests {
 
     #[test]
     fn calibration_path_from_config_uses_sibling_directory() {
-        let path = calibration_path_from_config(
-            Path::new("C:/repo/config.json"),
-            Some("profile_01.json"),
-        )
-        .unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from("C:/repo/calibration/profile_01.json")
-        );
+        let path =
+            calibration_path_from_config(Path::new("C:/repo/config.json"), Some("profile_01.json"))
+                .unwrap();
+        assert_eq!(path, PathBuf::from("C:/repo/calibration/profile_01.json"));
     }
 
     #[test]

@@ -15,11 +15,7 @@ use std::{
     time::Instant,
 };
 
-use ruler_core::{
-    capture::CapturedFrame,
-    engine::FrameResult,
-    PixelFormat,
-};
+use ruler_core::{capture::CapturedFrame, engine::FrameResult, PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Helpers (shared with ruler-recorder)
@@ -111,7 +107,7 @@ impl CsvWriter {
         inner.write_all(
             b"frame_index,timestamp_ms,raw_pixel_width,logical_frame,\
               total_frames_in_cycle,cost_is_negative,elapsed_frames,\
-              capture_duration_us,phase\n",
+              capture_duration_us,phase,battle_state\n",
         )?;
         Ok(Self {
             inner,
@@ -128,6 +124,7 @@ impl CsvWriter {
         cost_is_negative: bool,
         elapsed_frames: i32,
         capture_dur_us: u128,
+        battle_state: ruler_core::BattleState,
     ) -> std::io::Result<()> {
         let ts_us = self.start.elapsed().as_micros();
         let phase = match (logical_frame, total_frames_in_cycle) {
@@ -137,7 +134,7 @@ impl CsvWriter {
 
         writeln!(
             self.inner,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{}",
             self.frame_count,
             ts_us / 1000,
             raw_pixel_width.map_or(String::new(), |v| v.to_string()),
@@ -147,13 +144,12 @@ impl CsvWriter {
             elapsed_frames,
             capture_dur_us,
             phase.map_or(String::new(), |p| format!("{:.6}", p)),
+            battle_state.as_str(),
         )?;
         self.frame_count += 1;
         Ok(())
     }
-
 }
-
 
 // ---------------------------------------------------------------------------
 // FFmpeg child wrapper — ensures proper shutdown on Drop
@@ -175,12 +171,7 @@ struct FfmpegPipe {
 }
 
 impl FfmpegPipe {
-    fn spawn(
-        pix_fmt: &str,
-        width: u32,
-        height: u32,
-        output_path: &Path,
-    ) -> Result<Self, String> {
+    fn spawn(pix_fmt: &str, width: u32, height: u32, output_path: &Path) -> Result<Self, String> {
         let mut child = Command::new("ffmpeg")
             .args([
                 "-y",
@@ -335,6 +326,7 @@ impl DebugRecorder {
                 result.cost_is_negative,
                 result.elapsed_frames,
                 capture_dur_us,
+                result.battle_state,
             ) {
                 log::error!("debug recording: csv write error, stopping csv: {e}");
                 self.csv = None;

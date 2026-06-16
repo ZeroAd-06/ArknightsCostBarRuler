@@ -7,6 +7,11 @@ use std::{
 
 use ruler_core::{analysis::scanner::detect_battle_state, BattleState, PixelFormat};
 
+struct Fixture {
+    path: PathBuf,
+    expected: BattleState,
+}
+
 struct Sample {
     path: PathBuf,
     width: u32,
@@ -17,13 +22,14 @@ struct Sample {
 
 #[test]
 fn battle_button_detector_classifies_all_capture_samples() {
-    let samples = load_capture_samples();
+    let fixtures = load_fixture_paths();
     assert!(
-        !samples.is_empty(),
-        "expected PNG samples under recordings/captures"
+        !fixtures.is_empty(),
+        "expected PNG samples under tests/fixtures/battle_buttons"
     );
 
-    for sample in samples {
+    for fixture in fixtures {
+        let sample = load_sample(&fixture.path, fixture.expected);
         let actual =
             detect_battle_state(&sample.data, sample.width, sample.height, PixelFormat::Rgba);
         assert_eq!(
@@ -41,17 +47,18 @@ fn battle_button_detector_stays_under_100us_in_release() {
         return;
     }
 
-    let samples = load_capture_samples();
+    let fixtures = load_fixture_paths();
     assert!(
-        !samples.is_empty(),
-        "expected PNG samples under recordings/captures"
+        !fixtures.is_empty(),
+        "expected PNG samples under tests/fixtures/battle_buttons"
     );
 
     let iterations = 1_000u128;
     let mut worst_avg_ns = 0u128;
     let mut worst_path = PathBuf::new();
 
-    for sample in &samples {
+    for fixture in fixtures {
+        let sample = load_sample(&fixture.path, fixture.expected);
         let start = Instant::now();
         for _ in 0..iterations {
             black_box(detect_battle_state(
@@ -81,8 +88,11 @@ fn battle_button_detector_stays_under_100us_in_release() {
     );
 }
 
-fn load_capture_samples() -> Vec<Sample> {
-    let root = workspace_root().join("recordings").join("captures");
+fn load_fixture_paths() -> Vec<Fixture> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("battle_buttons");
     let expected_dirs = [
         ("0.2x", BattleState::PointTwoXRunning),
         ("0.2xpause", BattleState::PointTwoXPaused),
@@ -94,40 +104,79 @@ fn load_capture_samples() -> Vec<Sample> {
         ("garbage", BattleState::NotInBattle),
     ];
 
-    let mut samples = Vec::new();
+    let mut fixtures = Vec::new();
     for (dir_name, expected) in expected_dirs {
         let dir = root.join(dir_name);
         assert!(dir.is_dir(), "missing sample directory: {}", dir.display());
-        for entry in fs::read_dir(&dir).expect("failed to list capture samples") {
-            let entry = entry.expect("failed to read capture sample entry");
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("png") {
-                continue;
-            }
-            samples.push(load_sample(&path, expected));
+        let mut paths = fs::read_dir(&dir)
+            .expect("failed to list battle button fixtures")
+            .map(|entry| entry.expect("failed to read fixture entry").path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+            .collect::<Vec<_>>();
+        paths.sort();
+
+        for path in paths {
+            fixtures.push(Fixture { path, expected });
         }
     }
 
-    samples
+    fixtures
 }
 
 fn load_sample(path: &Path, expected: BattleState) -> Sample {
+    let (frame_width, frame_height) = parse_frame_size(path);
     let image = image::ImageReader::open(path)
         .unwrap_or_else(|e| panic!("failed to open {}: {e}", path.display()))
         .decode()
         .unwrap_or_else(|e| panic!("failed to decode {}: {e}", path.display()))
         .to_rgba8();
-    let (width, height) = image.dimensions();
-    let mut data = image.into_raw();
-    flip_rows(&mut data, width, height, 4);
+    let (crop_width, crop_height) = image.dimensions();
+    assert!(
+        crop_width <= frame_width && crop_height <= frame_height,
+        "fixture crop exceeds declared frame size: {}",
+        path.display()
+    );
+
+    let crop = image.into_raw();
+    let mut data = vec![0; frame_width as usize * frame_height as usize * 4];
+    let dst_x = frame_width - crop_width;
+    let dst_row_bytes = frame_width as usize * 4;
+    let src_row_bytes = crop_width as usize * 4;
+    for y in 0..crop_height as usize {
+        let src = y * src_row_bytes;
+        let dst = y * dst_row_bytes + dst_x as usize * 4;
+        data[dst..dst + src_row_bytes].copy_from_slice(&crop[src..src + src_row_bytes]);
+    }
+
+    flip_rows(&mut data, frame_width, frame_height, 4);
 
     Sample {
         path: path.to_path_buf(),
-        width,
-        height,
+        width: frame_width,
+        height: frame_height,
         data,
         expected,
     }
+}
+
+fn parse_frame_size(path: &Path) -> (u32, u32) {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_else(|| panic!("invalid fixture file name: {}", path.display()));
+    let (size, _) = stem
+        .split_once("__")
+        .unwrap_or_else(|| panic!("fixture name must start with WIDTHxHEIGHT__: {stem}"));
+    let (width, height) = size
+        .split_once('x')
+        .unwrap_or_else(|| panic!("fixture size must be WIDTHxHEIGHT: {stem}"));
+    let width = width
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid fixture width in {stem}: {e}"));
+    let height = height
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid fixture height in {stem}: {e}"));
+    (width, height)
 }
 
 fn flip_rows(buf: &mut [u8], width: u32, height: u32, bpp: u32) {
@@ -138,10 +187,4 @@ fn flip_rows(buf: &mut [u8], width: u32, height: u32, bpp: u32) {
         let (left, right) = buf.split_at_mut(bottom);
         left[top..top + row_bytes].swap_with_slice(&mut right[..row_bytes]);
     }
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
 }

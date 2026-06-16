@@ -15,14 +15,17 @@
 //! Press Ctrl+C to stop early.
 
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use ruler_core::config::RulerConfig;
-use ruler_core::engine::RulerEngine;
-use ruler_core::PixelFormat;
+use ruler_core::engine::{FrameResult, RulerEngine};
+use ruler_recorder::{
+    bytes_per_pixel, calibration_path_from_config, flip_rows, pix_fmt_str,
+    timestamp_for_filename, CsvWriter,
+};
 
 // ---------------------------------------------------------------------------
 // Global stop flag (set by signal handler, polled by main loop)
@@ -31,144 +34,13 @@ use ruler_core::PixelFormat;
 static STOP_NOW: AtomicBool = AtomicBool::new(false);
 static ANALYSE_WARNED: AtomicBool = AtomicBool::new(false);
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn timestamp_for_filename() -> String {
-    let d = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = d / 86400;
-    let time_secs = d % 86400;
-    let h = time_secs / 3600;
-    let m = (time_secs % 3600) / 60;
-    let s = time_secs % 60;
-    let (y, mo, day) = days_since_epoch_to_ymd(days as i64);
-    format!("{y:04}{mo:02}{day:02}_{h:02}{m:02}{s:02}")
-}
-
-fn days_since_epoch_to_ymd(days: i64) -> (i64, u32, u32) {
-    let mut y = 1970i64;
-    let mut d = days;
-    loop {
-        let yd = if is_leap(y) { 366 } else { 365 };
-        if d < yd {
-            break;
-        }
-        d -= yd;
-        y += 1;
-    }
-    let mon_days: &[u32] = if is_leap(y) {
-        &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 1u32;
-    for &md in mon_days {
-        if d < md as i64 {
-            break;
-        }
-        d -= md as i64;
-        m += 1;
-    }
-    (y, m, (d + 1) as u32)
-}
-
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
-fn pix_fmt_str(fmt: PixelFormat) -> &'static str {
-    match fmt {
-        PixelFormat::Rgba => "rgba",
-        PixelFormat::Bgr => "bgr24",
-    }
-}
-
-fn bytes_per_pixel(fmt: PixelFormat) -> u32 {
-    match fmt {
-        PixelFormat::Rgba => 4,
-        PixelFormat::Bgr => 3,
-    }
-}
-
-/// Flip bottom-up rows to top-down (ffmpeg expects top-down).
-fn flip_rows(buf: &mut [u8], width: u32, height: u32, bpp: u32) {
-    let row_bytes = (width * bpp) as usize;
-    for r in 0..(height as usize / 2) {
-        let top = r * row_bytes;
-        let bot = (height as usize - 1 - r) * row_bytes;
-        let (left, right) = buf.split_at_mut(bot);
-        left[top..top + row_bytes].swap_with_slice(&mut right[..row_bytes]);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CSV writer
-// ---------------------------------------------------------------------------
-
-struct CsvWriter {
-    inner: BufWriter<std::fs::File>,
-    frame_count: u64,
-    start: Instant,
-}
-
-impl CsvWriter {
-    fn new(path: &Path) -> std::io::Result<Self> {
-        let file = std::fs::File::create(path)?;
-        let mut inner = BufWriter::new(file);
-        inner.write_all(
-            b"frame_index,timestamp_ms,raw_pixel_width,logical_frame,\
-              total_frames_in_cycle,cost_is_negative,elapsed_frames,\
-              capture_duration_us,phase\n",
-        )?;
-        Ok(Self {
-            inner,
-            frame_count: 0,
-            start: Instant::now(),
-        })
-    }
-
-    fn write_row(
-        &mut self,
-        raw_pixel_width: Option<i32>,
-        logical_frame: Option<i32>,
-        total_frames_in_cycle: i32,
-        cost_is_negative: bool,
-        elapsed_frames: i32,
-        capture_dur_us: u128,
-    ) -> std::io::Result<()> {
-        let ts_us = self.start.elapsed().as_micros();
-        let phase = match (logical_frame, total_frames_in_cycle) {
-            (Some(lf), tfc) if tfc > 0 => Some(lf as f64 / tfc as f64),
-            _ => None,
-        };
-
-        writeln!(
-            self.inner,
-            "{},{},{},{},{},{},{},{},{}",
-            self.frame_count,
-            ts_us / 1000,
-            raw_pixel_width.map_or(String::new(), |v| v.to_string()),
-            logical_frame.map_or(String::new(), |v| v.to_string()),
-            total_frames_in_cycle,
-            if cost_is_negative { 1 } else { 0 },
-            elapsed_frames,
-            capture_dur_us,
-            phase.map_or(String::new(), |p| format!("{:.6}", p)),
-        )?;
-        self.frame_count += 1;
-        Ok(())
-    }
-
-    fn frame_count(&self) -> u64 {
-        self.frame_count
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
+fn empty_frame_result() -> FrameResult {
+    FrameResult {
+        logical_frame: None,
+        total_frames_in_cycle: 0,
+        raw_pixel_width: None,
+        elapsed_frames: 0,
+        cost_is_negative: false,
     }
 }
 
@@ -245,14 +117,10 @@ fn main() {
     });
 
     // ---- locate calibration -----------------------------------------------
-    // Calibration files live in `calibration/` subdirectory; the config
-    // stores the filename in `active_calibration_profile`.
-    let cal_dir = config_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("calibration");
-    let cal_filename = ruler_config.active_calibration_profile.as_deref();
-    let cal_path = cal_filename.map(|name| cal_dir.join(name));
+    let cal_path = calibration_path_from_config(
+        &config_path,
+        ruler_config.active_calibration_profile.as_deref(),
+    );
 
     // ---- init engine ------------------------------------------------------
     let mut engine = RulerEngine::new();
@@ -332,26 +200,20 @@ fn main() {
         eprintln!("FATAL: cannot create CSV: {e}");
         std::process::exit(1);
     });
+    let csv_start = Instant::now();
 
     // ---- write first frame ------------------------------------------------
-    let result = engine
-        .analyze_captured_frame(&first_frame)
-        .unwrap_or_else(|e| {
-            eprintln!("WARNING: first frame analysis failed: {e}");
-            ruler_core::engine::FrameResult {
-                logical_frame: None,
-                total_frames_in_cycle: 0,
-                raw_pixel_width: None,
-                elapsed_frames: 0,
-                cost_is_negative: false,
-            }
-        });
+    let result = engine.analyze_captured_frame(&first_frame).unwrap_or_else(|e| {
+        eprintln!("WARNING: first frame analysis failed: {e}");
+        empty_frame_result()
+    });
     {
         let mut buf = first_frame.data;
         flip_rows(&mut buf, width, height, bpp);
         ffmpeg_writer.write_all(&buf).expect("ffmpeg write failed");
     }
     csv.write_row(
+        csv_start.elapsed().as_millis(),
         result.raw_pixel_width,
         result.logical_frame,
         result.total_frames_in_cycle,
@@ -360,7 +222,6 @@ fn main() {
         0,
     )
     .expect("csv write failed");
-    let first_frame_count = csv.frame_count();
 
     // ---- main loop --------------------------------------------------------
     let start_time = Instant::now();
@@ -392,13 +253,7 @@ fn main() {
                 if !ANALYSE_WARNED.swap(true, Ordering::Relaxed) {
                     eprintln!("\nWARN: analysis failed (will retry silently): {e}");
                 }
-                ruler_core::engine::FrameResult {
-                    logical_frame: None,
-                    total_frames_in_cycle: 0,
-                    raw_pixel_width: None,
-                    elapsed_frames: 0,
-                    cost_is_negative: false,
-                }
+                empty_frame_result()
             }
         };
 
@@ -412,6 +267,7 @@ fn main() {
 
         // 4. Write CSV (always — sync with video frames)
         if let Err(e) = csv.write_row(
+            csv_start.elapsed().as_millis(),
             result.raw_pixel_width,
             result.logical_frame,
             result.total_frames_in_cycle,
@@ -445,7 +301,7 @@ fn main() {
     csv.flush().ok();
 
     let elapsed = start_time.elapsed();
-    let total = csv.frame_count() - first_frame_count + 1; // account for first frame
+    let total = csv.frame_count();
     let fps = if elapsed.as_secs_f64() > 0.0 {
         total as f64 / elapsed.as_secs_f64()
     } else {
@@ -485,10 +341,7 @@ fn install_ctrlc_handler() {
         // Register via Win32 API (declared inline, no crate needed)
         type HandlerFn = unsafe extern "system" fn(u32) -> i32;
         extern "system" {
-            fn SetConsoleCtrlHandler(
-                handler: Option<HandlerFn>,
-                add: i32,
-            ) -> i32;
+            fn SetConsoleCtrlHandler(handler: Option<HandlerFn>, add: i32) -> i32;
         }
         unsafe {
             SetConsoleCtrlHandler(Some(ctrl_handler), 1);

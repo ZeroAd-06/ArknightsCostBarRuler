@@ -13,6 +13,7 @@ const MASKED_WHITE_THRESHOLD: u8 = 150;
 const MASKED_MAX_BRIGHTNESS: u8 = 165;
 const GRAY_TOLERANCE: u8 = 20;
 const ALPHA_OPAQUE: u8 = 255;
+const VALIDITY_LEFT_INSET_PX: i32 = 1;
 
 const COST_SIGN_REF_WIDTH: f64 = 1280.0;
 const COST_SIGN_REF_HEIGHT: f64 = 720.0;
@@ -133,6 +134,11 @@ pub fn get_raw_filled_pixel_width(
         return None;
     }
 
+    // The leftmost ROI pixel is the most likely to catch transient HUD highlights
+    // during the full→empty wrap. Ignore 1px there when deciding whether the bar
+    // is still valid, but keep measuring widths against the original x1.
+    let validity_x1 = (x1 + VALIDITY_LEFT_INSET_PX).min(x2 - 1);
+
     let (r_end, g_end, b_end, a_end) = read_pixel(buffer, width, height, format, x2 - 1, y_mid)?;
     if a_end != ALPHA_OPAQUE || !is_pixel_grayscale(r_end, g_end, b_end) {
         return None;
@@ -145,7 +151,7 @@ pub fn get_raw_filled_pixel_width(
     if is_end_pixel_white {
         filled_width = total_width;
     } else {
-        for x in (x1..(x2 - 1)).rev() {
+        for x in (validity_x1..(x2 - 1)).rev() {
             let (r, g, b, a) = read_pixel(buffer, width, height, format, x, y_mid)?;
             if a != ALPHA_OPAQUE || !is_pixel_grayscale(r, g, b) {
                 return None;
@@ -153,6 +159,16 @@ pub fn get_raw_filled_pixel_width(
             if r > WHITE_THRESHOLD && g > WHITE_THRESHOLD && b > WHITE_THRESHOLD {
                 filled_width = x - x1 + 1;
                 break;
+            }
+        }
+        if filled_width == 0 && validity_x1 > x1 {
+            let (r, g, b, a) = read_pixel(buffer, width, height, format, x1, y_mid)?;
+            if a == ALPHA_OPAQUE
+                && r > WHITE_THRESHOLD
+                && g > WHITE_THRESHOLD
+                && b > WHITE_THRESHOLD
+            {
+                filled_width = 1;
             }
         }
     }
@@ -170,7 +186,7 @@ pub fn get_raw_filled_pixel_width(
             if is_end_pixel_masked_white {
                 filled_width = total_width;
             } else {
-                for x in (x1..(x2 - 1)).rev() {
+                for x in (validity_x1..(x2 - 1)).rev() {
                     let (r, g, b, a) = read_pixel(buffer, width, height, format, x, y_mid)?;
                     if a != ALPHA_OPAQUE
                         || !is_pixel_grayscale(r, g, b)
@@ -187,6 +203,19 @@ pub fn get_raw_filled_pixel_width(
                     {
                         filled_width = x - x1 + 1;
                         break;
+                    }
+                }
+                if filled_width == 0 && validity_x1 > x1 {
+                    let (r, g, b, a) = read_pixel(buffer, width, height, format, x1, y_mid)?;
+                    if a == ALPHA_OPAQUE
+                        && r > MASKED_WHITE_THRESHOLD
+                        && g > MASKED_WHITE_THRESHOLD
+                        && b > MASKED_WHITE_THRESHOLD
+                        && r <= MASKED_MAX_BRIGHTNESS
+                        && g <= MASKED_MAX_BRIGHTNESS
+                        && b <= MASKED_MAX_BRIGHTNESS
+                    {
+                        filled_width = 1;
                     }
                 }
             }
@@ -296,6 +325,40 @@ mod tests {
         assert!(result.is_some());
         let fw = result.unwrap();
         assert!(fw > 80 && fw < 100, "Half-filled bar: {fw}");
+    }
+
+    #[test]
+    fn left_edge_tint_does_not_invalidate_empty_bar() {
+        let w = 200u32;
+        let h = 100u32;
+        let roi = (10, 190, 50);
+        let buf = make_rgba_buffer(w, h, &|x, _y| {
+            if x == roi.0 as u32 {
+                [67, 66, 44, 255]
+            } else {
+                [54, 54, 54, 255]
+            }
+        });
+
+        let result = get_raw_filled_pixel_width(&buf, w, h, PixelFormat::Rgba, roi);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn left_edge_white_still_counts_as_single_pixel_fill() {
+        let w = 200u32;
+        let h = 100u32;
+        let roi = (10, 190, 50);
+        let buf = make_rgba_buffer(w, h, &|x, _y| {
+            if x == roi.0 as u32 {
+                [252, 252, 252, 255]
+            } else {
+                [54, 54, 54, 255]
+            }
+        });
+
+        let result = get_raw_filled_pixel_width(&buf, w, h, PixelFormat::Rgba, roi);
+        assert_eq!(result, Some(1));
     }
 
     #[test]

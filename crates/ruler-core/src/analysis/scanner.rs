@@ -33,6 +33,7 @@ impl BattleState {
             Self::NotInBattle => "not_in_battle",
         }
     }
+
 }
 
 const WHITE_THRESHOLD: u8 = 250;
@@ -72,9 +73,9 @@ const PAUSE_GLYPH_BOTTOM_REF: f64 = 69.0;
 const BATTLE_BUTTON_BRIGHT_THRESHOLD: u8 = 180;
 const BATTLE_BUTTON_DIM_THRESHOLD: u8 = 120;
 const SPEED_0_2X_MAX: f64 = 420.0;
-const SPEED_1X_MIN: f64 = 430.0;
+const SPEED_1X_MIN: f64 = 410.0;
 const SPEED_1X_MAX: f64 = 570.0;
-const SPEED_2X_MIN: f64 = 620.0;
+const SPEED_2X_MIN: f64 = 580.0;
 const SPEED_2X_MAX: f64 = 760.0;
 const PAUSE_RUNNING_MIN: f64 = 590.0;
 const PAUSE_RUNNING_MAX: f64 = 780.0;
@@ -82,6 +83,12 @@ const PAUSE_PAUSED_MIN: f64 = 380.0;
 const PAUSE_PAUSED_MAX: f64 = 500.0;
 const DIM_BUTTON_BRIGHT_MAX: f64 = 40.0;
 const DIM_BUTTON_GLYPH_MIN: f64 = 150.0;
+const TAKEOVER_OVERLAY_LEFT_REF: f64 = 315.0;
+const TAKEOVER_OVERLAY_RIGHT_REF: f64 = 510.0;
+const TAKEOVER_OVERLAY_TOP_REF: f64 = 610.0;
+const TAKEOVER_OVERLAY_BOTTOM_REF: f64 = 696.0;
+const TAKEOVER_OVERLAY_BRIGHT_THRESHOLD: u8 = 150;
+const TAKEOVER_OVERLAY_BRIGHT_MIN: f64 = 350.0;
 
 #[inline(always)]
 fn read_pixel(
@@ -233,19 +240,96 @@ fn glyph_rect_from_right(
 }
 
 #[inline]
+fn scaled_rect(
+    width: u32,
+    height: u32,
+    scale: f64,
+    left_ref: f64,
+    right_ref: f64,
+    top_ref: f64,
+    bottom_ref: f64,
+) -> Rect {
+    let left = (left_ref * scale).round() as i32;
+    let right = (right_ref * scale).round() as i32;
+    let top = (top_ref * scale).round() as i32;
+    let bottom = (bottom_ref * scale).round() as i32;
+
+    Rect {
+        left: left.clamp(0, width as i32),
+        right: right.clamp(0, width as i32),
+        top: top.clamp(0, height as i32),
+        bottom: bottom.clamp(0, height as i32),
+    }
+}
+
+#[inline]
 fn is_bright_enough(r: u8, g: u8, b: u8, threshold: u8) -> bool {
     r as u16 + g as u16 + b as u16 >= threshold as u16 * 3
 }
 
-fn count_bright_pixels(
+fn count_pixels_at_thresholds(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    rect: Rect,
+    low_threshold: u8,
+    high_threshold: u8,
+) -> (u32, u32) {
+    if rect.is_empty() {
+        return (0, 0);
+    }
+
+    let bytes_per_pixel = match format {
+        PixelFormat::Rgba => 4,
+        PixelFormat::Bgr => 3,
+    };
+    let stride = width as usize * bytes_per_pixel;
+    let min_len = stride.saturating_mul(height as usize);
+    if buffer.len() < min_len {
+        return (0, 0);
+    }
+
+    let low = low_threshold as u16 * 3;
+    let high = high_threshold as u16 * 3;
+    let mut low_count = 0;
+    let mut high_count = 0;
+
+    for y in rect.top..rect.bottom {
+        let row = (height as i32 - 1 - y) as usize;
+        let mut offset = row * stride + rect.left as usize * bytes_per_pixel;
+        for _ in rect.left..rect.right {
+            let brightness = match format {
+                PixelFormat::Rgba => {
+                    buffer[offset] as u16 + buffer[offset + 1] as u16 + buffer[offset + 2] as u16
+                }
+                PixelFormat::Bgr => {
+                    buffer[offset + 2] as u16 + buffer[offset + 1] as u16 + buffer[offset] as u16
+                }
+            };
+            if brightness >= low {
+                low_count += 1;
+                if brightness >= high {
+                    high_count += 1;
+                }
+            }
+            offset += bytes_per_pixel;
+        }
+    }
+
+    (low_count, high_count)
+}
+
+fn estimate_bright_pixels_sampled(
     buffer: &[u8],
     width: u32,
     height: u32,
     format: PixelFormat,
     rect: Rect,
     threshold: u8,
+    step: i32,
 ) -> u32 {
-    if rect.is_empty() {
+    if rect.is_empty() || step <= 0 {
         return 0;
     }
 
@@ -260,10 +344,12 @@ fn count_bright_pixels(
     }
 
     let mut count = 0;
-    for y in rect.top..rect.bottom {
+    let mut y = rect.top;
+    while y < rect.bottom {
         let row = (height as i32 - 1 - y) as usize;
-        let mut offset = row * stride + rect.left as usize * bytes_per_pixel;
-        for _ in rect.left..rect.right {
+        let mut x = rect.left;
+        while x < rect.right {
+            let offset = row * stride + x as usize * bytes_per_pixel;
             let is_bright = match format {
                 PixelFormat::Rgba => is_bright_enough(
                     buffer[offset],
@@ -281,11 +367,12 @@ fn count_bright_pixels(
             if is_bright {
                 count += 1;
             }
-            offset += bytes_per_pixel;
+            x += step;
         }
+        y += step;
     }
 
-    count
+    count * (step as u32 * step as u32)
 }
 
 #[inline]
@@ -319,6 +406,39 @@ fn classify_pause(count: f64) -> Option<PauseButtonState> {
     }
 }
 
+fn has_takeover_overlay(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    scale: f64,
+) -> bool {
+    let takeover_rect = scaled_rect(
+        width,
+        height,
+        scale,
+        TAKEOVER_OVERLAY_LEFT_REF,
+        TAKEOVER_OVERLAY_RIGHT_REF,
+        TAKEOVER_OVERLAY_TOP_REF,
+        TAKEOVER_OVERLAY_BOTTOM_REF,
+    );
+    let sample_step = (scale * 2.0).round().max(2.0) as i32;
+    let takeover_bright = normalized_count(
+        estimate_bright_pixels_sampled(
+            buffer,
+            width,
+            height,
+            format,
+            takeover_rect,
+            TAKEOVER_OVERLAY_BRIGHT_THRESHOLD,
+            sample_step,
+        ),
+        scale,
+    );
+
+    takeover_bright >= TAKEOVER_OVERLAY_BRIGHT_MIN
+}
+
 pub fn detect_battle_state(
     buffer: &[u8],
     width: u32,
@@ -349,28 +469,26 @@ pub fn detect_battle_state(
         PAUSE_GLYPH_BOTTOM_REF,
     );
 
-    let speed_bright = normalized_count(
-        count_bright_pixels(
-            buffer,
-            width,
-            height,
-            format,
-            speed_rect,
-            BATTLE_BUTTON_BRIGHT_THRESHOLD,
-        ),
-        scale,
+    let (speed_dim_count, speed_bright_count) = count_pixels_at_thresholds(
+        buffer,
+        width,
+        height,
+        format,
+        speed_rect,
+        BATTLE_BUTTON_DIM_THRESHOLD,
+        BATTLE_BUTTON_BRIGHT_THRESHOLD,
     );
-    let pause_bright = normalized_count(
-        count_bright_pixels(
-            buffer,
-            width,
-            height,
-            format,
-            pause_rect,
-            BATTLE_BUTTON_BRIGHT_THRESHOLD,
-        ),
-        scale,
+    let (pause_dim_count, pause_bright_count) = count_pixels_at_thresholds(
+        buffer,
+        width,
+        height,
+        format,
+        pause_rect,
+        BATTLE_BUTTON_DIM_THRESHOLD,
+        BATTLE_BUTTON_BRIGHT_THRESHOLD,
     );
+    let speed_bright = normalized_count(speed_bright_count, scale);
+    let pause_bright = normalized_count(pause_bright_count, scale);
 
     if let (Some(speed), Some(pause)) = (classify_speed(speed_bright), classify_pause(pause_bright))
     {
@@ -392,32 +510,17 @@ pub fn detect_battle_state(
     }
 
     if speed_bright <= DIM_BUTTON_BRIGHT_MAX && pause_bright <= DIM_BUTTON_BRIGHT_MAX {
-        let speed_dim = normalized_count(
-            count_bright_pixels(
-                buffer,
-                width,
-                height,
-                format,
-                speed_rect,
-                BATTLE_BUTTON_DIM_THRESHOLD,
-            ),
-            scale,
-        );
-        let pause_dim = normalized_count(
-            count_bright_pixels(
-                buffer,
-                width,
-                height,
-                format,
-                pause_rect,
-                BATTLE_BUTTON_DIM_THRESHOLD,
-            ),
-            scale,
-        );
-
-        if speed_dim >= DIM_BUTTON_GLYPH_MIN || pause_dim >= DIM_BUTTON_GLYPH_MIN {
-            return BattleState::BeforeOrAfterBattle;
+        let speed_dim = normalized_count(speed_dim_count, scale);
+        let pause_dim = normalized_count(pause_dim_count, scale);
+        if speed_dim < DIM_BUTTON_GLYPH_MIN && pause_dim < DIM_BUTTON_GLYPH_MIN {
+            return BattleState::NotInBattle;
         }
+
+        if has_takeover_overlay(buffer, width, height, format, scale) {
+            return BattleState::NotInBattle;
+        }
+
+        return BattleState::BeforeOrAfterBattle;
     }
 
     BattleState::NotInBattle

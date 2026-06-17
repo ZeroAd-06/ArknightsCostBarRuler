@@ -28,21 +28,30 @@ fn battle_button_detector_classifies_all_capture_samples() {
         "expected PNG samples under tests/fixtures/battle_buttons"
     );
 
+    let mut mismatches = Vec::new();
     for fixture in fixtures {
         let sample = load_sample(&fixture.path, fixture.expected);
         let actual =
             detect_battle_state(&sample.data, sample.width, sample.height, PixelFormat::Rgba);
-        assert_eq!(
-            actual,
-            sample.expected,
-            "wrong battle state for {}",
-            sample.path.display()
-        );
+        if actual != sample.expected {
+            mismatches.push(format!(
+                "{}: expected {:?}, got {:?}",
+                sample.path.display(),
+                sample.expected,
+                actual
+            ));
+        }
     }
+
+    assert!(
+        mismatches.is_empty(),
+        "wrong battle state for:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]
-fn battle_button_detector_stays_under_100us_in_release() {
+fn battle_button_detector_stays_under_30us_in_release() {
     if cfg!(debug_assertions) {
         return;
     }
@@ -81,8 +90,8 @@ fn battle_button_detector_stays_under_100us_in_release() {
         worst_path.display()
     );
     assert!(
-        worst_avg_ns < 100_000,
-        "battle button detector exceeded 100us: {:.2}us for {}",
+        worst_avg_ns < 30_000,
+        "battle button detector exceeded 30us: {:.2}us for {}",
         worst_avg_ns as f64 / 1000.0,
         worst_path.display()
     );

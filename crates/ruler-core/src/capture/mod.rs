@@ -1,6 +1,7 @@
 use crate::analysis::scanner::PixelFormat;
 
 pub mod adb;
+pub(crate) mod android_settings;
 pub mod ldplayer;
 pub mod mumu;
 pub mod replay;
@@ -58,6 +59,7 @@ pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, 
             Ok(Box::new(MuMuController::new(
                 install_path,
                 config.instance_index,
+                config.device_id,
             )))
         }
         CaptureType::LDPlayer => {

@@ -4,6 +4,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use libloading::Library;
 
+use super::android_settings::AndroidInputOverlayGuard;
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame};
 
@@ -55,10 +56,13 @@ pub struct MuMuController {
     install_path: String,
     /// Instance index.
     instance_index: u32,
+    /// ADB serial used for Android settings that affect captured frames.
+    device_id: Option<String>,
+    input_overlay_guard: Option<AndroidInputOverlayGuard>,
 }
 
 impl MuMuController {
-    pub fn new(install_path: String, instance_index: u32) -> Self {
+    pub fn new(install_path: String, instance_index: u32, device_id: Option<String>) -> Self {
         // We need dummy values before connect; use a sentinel.
         // In practice, connect() must be called before any capture.
         Self {
@@ -78,6 +82,8 @@ impl MuMuController {
             buffer: Vec::new(),
             install_path,
             instance_index,
+            device_id,
+            input_overlay_guard: None,
         }
     }
 
@@ -180,6 +186,7 @@ unsafe extern "C" fn unsafe_fn_stub_get_id(_: i32, _: *const u8, _: i32) -> i32 
 
 impl CaptureBackend for MuMuController {
     fn connect(&mut self) -> Result<(), String> {
+        self.input_overlay_guard = None;
         let (dll_path, resolved_root) = Self::find_dll(&self.install_path)?;
         self.install_path = resolved_root.to_string_lossy().into_owned();
         let instance_index = i32::try_from(self.instance_index)
@@ -258,6 +265,11 @@ impl CaptureBackend for MuMuController {
         self._dll = dll;
         self.symbols = symbols;
 
+        if let Some(device_id) = self.device_id.as_deref().filter(|id| !id.trim().is_empty()) {
+            self.input_overlay_guard =
+                Some(AndroidInputOverlayGuard::disable_for_device(device_id)?);
+        }
+
         Ok(())
     }
 
@@ -334,6 +346,7 @@ impl CaptureBackend for MuMuController {
         self.width = 0;
         self.height = 0;
         self.buffer.clear();
+        self.input_overlay_guard = None;
     }
 
     fn dimensions(&self) -> (u32, u32) {

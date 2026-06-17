@@ -5,6 +5,7 @@ use std::ptr;
 
 use libloading::{Library, Symbol};
 
+use super::android_settings::AndroidInputOverlayGuard;
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame};
 
@@ -32,6 +33,7 @@ pub struct LDPlayerController {
     pub install_path: String,
     pub instance_index: u32,
     pub device_id: Option<String>,
+    input_overlay_guard: Option<AndroidInputOverlayGuard>,
 }
 
 unsafe impl Send for LDPlayerController {}
@@ -48,6 +50,7 @@ impl LDPlayerController {
             install_path,
             instance_index,
             device_id,
+            input_overlay_guard: None,
         }
     }
 
@@ -179,7 +182,13 @@ fn configure_hidden_command(command: &mut Command) {
 
 impl CaptureBackend for LDPlayerController {
     fn connect(&mut self) -> Result<(), String> {
+        self.input_overlay_guard = None;
         self.resolve_dimensions()?;
+        let device_id = self
+            .device_id
+            .as_deref()
+            .ok_or_else(|| "LDPlayer ADB device id was not resolved".to_string())?;
+        self.input_overlay_guard = Some(AndroidInputOverlayGuard::disable_for_device(device_id)?);
         let pid = self.resolve_pid()?;
 
         let dll_path = PathBuf::from(&self.install_path).join("ldopengl64.dll");
@@ -278,6 +287,7 @@ impl CaptureBackend for LDPlayerController {
         self.height = 0;
         self.buffer.clear();
         self.spare_buffer.clear();
+        self.input_overlay_guard = None;
         let _ = mem::take(&mut self.dll);
     }
 

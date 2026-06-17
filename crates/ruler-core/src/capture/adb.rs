@@ -2,6 +2,7 @@ use std::process::{Command, Stdio};
 
 use image::ImageFormat;
 
+use super::android_settings::AndroidInputOverlayGuard;
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame};
 
@@ -9,6 +10,7 @@ pub struct AdbController {
     device_id: Option<String>,
     width: u32,
     height: u32,
+    input_overlay_guard: Option<AndroidInputOverlayGuard>,
 }
 
 impl AdbController {
@@ -17,6 +19,7 @@ impl AdbController {
             device_id,
             width: 0,
             height: 0,
+            input_overlay_guard: None,
         }
     }
 
@@ -106,11 +109,13 @@ impl AdbController {
 
 impl CaptureBackend for AdbController {
     fn connect(&mut self) -> Result<(), String> {
+        self.input_overlay_guard = None;
         let device_id = self.resolve_device_id()?;
         let state = Self::run_device_text(&device_id, &["get-state"])?;
         if state.trim() != "device" {
             return Err(format!("ADB device '{device_id}' is not ready: {state}"));
         }
+        self.input_overlay_guard = Some(AndroidInputOverlayGuard::disable_for_device(&device_id)?);
 
         match Self::resolve_dimensions_from_wm_size(&device_id) {
             Ok((width, height)) => {
@@ -151,6 +156,7 @@ impl CaptureBackend for AdbController {
     }
 
     fn disconnect(&mut self) {
+        self.input_overlay_guard = None;
         self.width = 0;
         self.height = 0;
     }

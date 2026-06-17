@@ -25,6 +25,7 @@ calibration_data_*.json
 
 # --- AI assistant workspace ---
 .reasonix/
+.claude/
 
 # --- Debug recording output ---
 recordings/

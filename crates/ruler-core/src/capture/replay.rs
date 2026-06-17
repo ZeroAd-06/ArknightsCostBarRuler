@@ -114,7 +114,7 @@ impl ReplayCaptureBackend {
             while rem > 0 {
                 let to_read = rem.min(discard.len());
                 match stdout.read(&mut discard[..to_read]) {
-                    Ok(0) => return,  // EOF
+                    Ok(0) => return, // EOF
                     Ok(got) => rem -= got,
                     Err(_) => return, // I/O error
                 }

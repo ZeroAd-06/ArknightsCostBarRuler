@@ -8,13 +8,7 @@
 //! per process. [`ensure_platform`] makes that initialization idempotent so both
 //! can claim freshly-minted windows from the same factory slot.
 
-use std::{
-    cell::RefCell,
-    ffi::c_void,
-    iter,
-    rc::Rc,
-    time::Instant,
-};
+use std::{cell::RefCell, ffi::c_void, iter, rc::Rc, time::Instant};
 
 use slint::{
     platform::{

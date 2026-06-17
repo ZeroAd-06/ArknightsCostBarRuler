@@ -17,7 +17,11 @@ mod platform {
 
     use crate::i18n::I18n;
 
-    pub fn run_config_wizard(_: &I18n, _: Option<&RulerConfig>, _debug: bool) -> Option<RulerConfig> {
+    pub fn run_config_wizard(
+        _: &I18n,
+        _: Option<&RulerConfig>,
+        _debug: bool,
+    ) -> Option<RulerConfig> {
         None
     }
 }
@@ -72,9 +76,7 @@ mod platform {
 
     use crate::{
         i18n::I18n,
-        slint_win::{
-            create_dib, ensure_platform, logical_pos, present_layered, wide, PreBgra,
-        },
+        slint_win::{create_dib, ensure_platform, logical_pos, present_layered, wide, PreBgra},
         target_discovery::{
             discover_targets, latency_class, LatencyClass, PreviewFrame, TargetCandidate,
         },
@@ -204,7 +206,11 @@ mod platform {
 
         let scale = wizard_scale();
         let width = (WIZARD_LOGICAL_W * scale).round() as i32;
-        let logical_h = if debug { WIZARD_LOGICAL_H + 220.0 } else { WIZARD_LOGICAL_H };
+        let logical_h = if debug {
+            WIZARD_LOGICAL_H + 220.0
+        } else {
+            WIZARD_LOGICAL_H
+        };
         let height = (logical_h * scale).round() as i32;
         let _ = window
             .window()
@@ -541,7 +547,10 @@ mod platform {
             .selected_candidate()
             .and_then(|candidate| candidate.latency.map(|_| candidate.latency_text()))
             .map(|latency| {
-                i18n.tr_with("config.selector.header_with_latency", &[("latency", latency)])
+                i18n.tr_with(
+                    "config.selector.header_with_latency",
+                    &[("latency", latency)],
+                )
             })
             .unwrap_or_else(|| i18n.tr("config.selector.header"));
         wizard.set_header_text(header.into());
@@ -552,7 +561,10 @@ mod platform {
             Some(candidate) => {
                 if let Some(error) = &candidate.error {
                     (
-                        i18n.tr_with("config.selector.selected_error", &[("error", error.clone())]),
+                        i18n.tr_with(
+                            "config.selector.selected_error",
+                            &[("error", error.clone())],
+                        ),
                         true,
                     )
                 } else if candidate.preview.is_none() {
@@ -653,8 +665,9 @@ mod platform {
             core.selected_index = None;
             return;
         }
-        let selected = preferred_selection_index(&core.candidates, preferred_fingerprint.as_deref())
-            .unwrap_or(0);
+        let selected =
+            preferred_selection_index(&core.candidates, preferred_fingerprint.as_deref())
+                .unwrap_or(0);
         core.selected_index = Some(selected);
         start_probe_workers(core);
     }
@@ -894,7 +907,8 @@ mod platform {
                 PixelFormat::Rgba => 4,
                 PixelFormat::Bgr => 3,
             })
-            .ok_or_else(|| "preview source stride overflow".to_string())? as usize;
+            .ok_or_else(|| "preview source stride overflow".to_string())?
+            as usize;
         let width = frame.width as usize;
         let height = frame.height as usize;
         let mut output = vec![0u8; width * height * 4];
@@ -1066,8 +1080,10 @@ mod platform {
         let _ = GetCursorPos(&mut cursor);
         let mut client = cursor;
         let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
-        let position =
-            slint::LogicalPosition::new(client.x as f32 / state.scale, client.y as f32 / state.scale);
+        let position = slint::LogicalPosition::new(
+            client.x as f32 / state.scale,
+            client.y as f32 / state.scale,
+        );
         let _ = state
             .window
             .window()

@@ -43,7 +43,6 @@ pub struct RulerConfig {
     pub overlay_scale: Option<f32>,
 
     // -- Debug recording (not exposed in UI) --------------------------------
-
     /// Master switch: enable background recording of capture + analysis data.
     #[serde(default)]
     pub debug_recording_enabled: bool,
@@ -62,7 +61,6 @@ pub struct RulerConfig {
     pub debug_recording_output_dir: Option<String>,
 
     // -- Replay (virtual capture from a recorded video file) ---------------
-
     /// Path to a pre-recorded video file for replay (type: "replay").
     ///
     /// The field name remains `replay_hevc_path` for backward compatibility,

@@ -170,17 +170,16 @@ mod platform {
                 },
                 Shell::NOTIFYICONDATAW,
                 WindowsAndMessaging::{
-                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-                    GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-                    LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
-                    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                    TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-                    GWLP_USERDATA, HICON, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN,
-                    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
-                    WINDOW_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-                    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN,
-                    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-                    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+                    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, LoadCursorW,
+                    PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
+                    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CREATESTRUCTW,
+                    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HICON, HMENU, IDC_ARROW, MSG,
+                    SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
+                    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_KEYDOWN,
+                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
+                    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+                    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
         },
@@ -247,8 +246,9 @@ mod platform {
         // bundled fonts are configured there.
         let slot: WindowSlot = ensure_platform();
 
-        let hud = Hud::new()
-            .map_err(|error| OverlayError::new(format!("failed to build HUD component: {error}")))?;
+        let hud = Hud::new().map_err(|error| {
+            OverlayError::new(format!("failed to build HUD component: {error}"))
+        })?;
         let window = slot
             .borrow_mut()
             .take()
@@ -269,13 +269,7 @@ mod platform {
 
         let drag_on_bg = Rc::new(Cell::new(false));
         let hwnd_cell = Rc::new(Cell::new(0isize));
-        wire_callbacks(
-            &hud,
-            &shared_state,
-            &command_tx,
-            &drag_on_bg,
-            &hwnd_cell,
-        );
+        wire_callbacks(&hud, &shared_state, &command_tx, &drag_on_bg, &hwnd_cell);
 
         hud.show()
             .map_err(|error| OverlayError::new(format!("failed to show HUD: {error}")))?;
@@ -595,7 +589,9 @@ mod platform {
             .try_dispatch_event(WindowEvent::ScaleFactorChanged {
                 scale_factor: effective,
             });
-        state.window.set_size(PhysicalSize::new(width as u32, height as u32));
+        state
+            .window
+            .set_size(PhysicalSize::new(width as u32, height as u32));
         let _ = SetWindowPos(
             hwnd,
             HWND::default(),
@@ -738,7 +734,8 @@ mod platform {
         let _ = GetCursorPos(&mut cursor);
         let mut client = cursor;
         let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
-        let position = LogicalPosition::new(client.x as f32 / state.scale, client.y as f32 / state.scale);
+        let position =
+            LogicalPosition::new(client.x as f32 / state.scale, client.y as f32 / state.scale);
 
         if moved && dragged_bg {
             // Drag finished — cancel Slint's press grab so it is not read as a click.
@@ -1218,12 +1215,14 @@ mod platform {
                         state.closing.set(true);
                     } else if message == WM_LBUTTONDOWN {
                         let position = logical_pos(lparam, state.scale);
-                        let _ = state.window.window().try_dispatch_event(
-                            WindowEvent::PointerPressed {
-                                position,
-                                button: PointerEventButton::Left,
-                            },
-                        );
+                        let _ =
+                            state
+                                .window
+                                .window()
+                                .try_dispatch_event(WindowEvent::PointerPressed {
+                                    position,
+                                    button: PointerEventButton::Left,
+                                });
                     }
                 }
                 LRESULT(0)
@@ -1422,10 +1421,7 @@ mod platform {
     /// `base_scale` aligns the bar height to the legacy overlay footprint; the
     /// effective scale is `base_scale * scale_mult`. A persisted `pos` is used
     /// when present (clamped on-screen), otherwise it anchors bottom-right.
-    fn initial_geometry(
-        pos: Option<(i32, i32)>,
-        scale_mult: f32,
-    ) -> (i32, i32, i32, i32, f32) {
+    fn initial_geometry(pos: Option<(i32, i32)>, scale_mult: f32) -> (i32, i32, i32, i32, f32) {
         unsafe {
             let screen_width = GetSystemMetrics(SM_CXSCREEN);
             let screen_height = GetSystemMetrics(SM_CYSCREEN);

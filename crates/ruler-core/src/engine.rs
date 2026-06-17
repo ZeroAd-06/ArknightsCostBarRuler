@@ -24,6 +24,9 @@ pub struct RulerEngine {
     elapsed_frames: f64,
     previous_phase: Option<PhaseSample>,
     last_known_total_frames: i32,
+    last_known_cycle_total_frames: i32,
+    last_known_cost_is_negative: bool,
+    reset_timer_on_next_battle: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -71,6 +74,9 @@ impl RulerEngine {
             elapsed_frames: 0.0,
             previous_phase: None,
             last_known_total_frames: 0,
+            last_known_cycle_total_frames: 0,
+            last_known_cost_is_negative: false,
+            reset_timer_on_next_battle: false,
         }
     }
 
@@ -160,7 +166,10 @@ impl RulerEngine {
         self.elapsed_frames = 0.0;
         self.cycle_counter = 0;
         self.last_known_total_frames = 0;
+        self.last_known_cycle_total_frames = 0;
+        self.last_known_cost_is_negative = false;
         self.previous_phase = None;
+        self.reset_timer_on_next_battle = false;
     }
 
     pub fn adjust_timer(&mut self, frames: i32) {
@@ -189,6 +198,8 @@ impl RulerEngine {
         self.current_profile_index = 0;
         self.cycle_counter = 0;
         self.previous_phase = None;
+        self.last_known_cycle_total_frames = 0;
+        self.last_known_cost_is_negative = false;
         self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
     }
 
@@ -199,17 +210,51 @@ impl RulerEngine {
         height: u32,
         format: PixelFormat,
     ) -> Result<FrameResult, String> {
-        let calibration = self
-            .calibration
-            .as_ref()
-            .ok_or_else(|| "No calibration loaded".to_string())?;
+        let battle_state = scanner::detect_battle_state(buffer, width, height, format);
+        self.analyze_frame_with_battle_state(buffer, width, height, format, battle_state)
+    }
+
+    fn analyze_frame_with_battle_state(
+        &mut self,
+        buffer: &[u8],
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        battle_state: BattleState,
+    ) -> Result<FrameResult, String> {
+        if self.calibration.is_none() {
+            return Err("No calibration loaded".to_string());
+        }
         let roi = self.roi.ok_or_else(|| {
             "No ROI set - call connect() first or use set_roi()/set_roi_value()".to_string()
         })?;
 
+        if !battle_state.is_in_battle() {
+            if battle_state == BattleState::BeforeOrAfterBattle {
+                self.reset_timer_on_next_battle = true;
+            }
+
+            return Ok(FrameResult {
+                logical_frame: None,
+                total_frames_in_cycle: self.last_known_cycle_total_frames,
+                raw_pixel_width: None,
+                elapsed_frames: self.last_known_total_frames,
+                cost_is_negative: self.last_known_cost_is_negative,
+                battle_state,
+            });
+        }
+
+        if self.reset_timer_on_next_battle {
+            self.reset_timer();
+        }
+
+        let calibration = self
+            .calibration
+            .as_ref()
+            .ok_or_else(|| "No calibration loaded".to_string())?;
+
         let pixel_width = scanner::get_raw_filled_pixel_width(buffer, width, height, format, roi);
         let cost_is_negative = scanner::is_cost_negative(buffer, width, height, format);
-        let battle_state = scanner::detect_battle_state(buffer, width, height, format);
 
         let num_profiles = calibration.tables.len();
         let base_profile = if num_profiles == 0 {
@@ -237,6 +282,7 @@ impl RulerEngine {
             }
 
             let total_frames = table.total_frames;
+            let effective_total_frames = effective_total_frames(total_frames, cost_is_negative);
             let current_phase = frame_lookup.map(|lookup| PhaseSample {
                 phase: lookup.phase,
                 total_frames,
@@ -257,12 +303,15 @@ impl RulerEngine {
 
             (
                 frame_lookup.map(|lookup| lookup.logical_frame),
-                effective_total_frames(total_frames, cost_is_negative),
+                effective_total_frames,
             )
         } else {
             self.previous_phase = None;
             (None, 0)
         };
+
+        self.last_known_cycle_total_frames = total_frames_in_cycle;
+        self.last_known_cost_is_negative = cost_is_negative;
 
         Ok(FrameResult {
             logical_frame,
@@ -372,7 +421,13 @@ mod tests {
         buffer[5] = 252;
 
         let result = engine
-            .analyze_raw_buffer(&buffer, 20, 1, PixelFormat::Bgr)
+            .analyze_frame_with_battle_state(
+                &buffer,
+                20,
+                1,
+                PixelFormat::Bgr,
+                BattleState::OneXRunning,
+            )
             .unwrap();
 
         assert_eq!(result.raw_pixel_width, Some(2));
@@ -505,6 +560,77 @@ mod tests {
         assert_eq!(result.elapsed_frames, 50);
     }
 
+    #[test]
+    fn not_in_battle_hides_frame_and_preserves_phase_anchor() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 8, false);
+        assert_eq!(result.logical_frame, Some(8));
+        assert_eq!(result.elapsed_frames, 8);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.raw_pixel_width, None);
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 8);
+
+        let result = analyze_width(&mut engine, 8, false);
+        assert_eq!(result.logical_frame, Some(8));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 8);
+    }
+
+    #[test]
+    fn before_or_after_battle_resets_when_battle_starts() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 20, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result =
+            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width(&mut engine, 5, false);
+        assert_eq!(result.logical_frame, Some(5));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 0);
+    }
+
+    #[test]
+    fn exiting_battle_keeps_elapsed_time_until_next_battle() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        analyze_width(&mut engine, 20, false);
+
+        let result =
+            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 20);
+    }
+
+    #[test]
+    fn paused_battle_states_still_analyze_cost_bar() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width_with_state(&mut engine, 6, false, BattleState::OneXPaused);
+
+        assert_eq!(result.logical_frame, Some(6));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 6);
+    }
+
     fn engine_with_profiles(total_frames: &[i32]) -> RulerEngine {
         let mut engine = RulerEngine::new();
         engine
@@ -534,13 +660,28 @@ mod tests {
         raw_width: i32,
         cost_is_negative: bool,
     ) -> FrameResult {
+        analyze_width_with_state(
+            engine,
+            raw_width,
+            cost_is_negative,
+            BattleState::OneXRunning,
+        )
+    }
+
+    fn analyze_width_with_state(
+        engine: &mut RulerEngine,
+        raw_width: i32,
+        cost_is_negative: bool,
+        battle_state: BattleState,
+    ) -> FrameResult {
         let buffer = make_bgr_frame(raw_width, cost_is_negative);
         engine
-            .analyze_raw_buffer(
+            .analyze_frame_with_battle_state(
                 &buffer,
                 TEST_SCREEN_WIDTH,
                 TEST_SCREEN_HEIGHT,
                 PixelFormat::Bgr,
+                battle_state,
             )
             .unwrap()
     }

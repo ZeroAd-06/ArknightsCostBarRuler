@@ -34,6 +34,17 @@ impl BattleState {
         }
     }
 
+    pub fn is_in_battle(self) -> bool {
+        matches!(
+            self,
+            Self::PointTwoXRunning
+                | Self::OneXRunning
+                | Self::TwoXRunning
+                | Self::PointTwoXPaused
+                | Self::OneXPaused
+                | Self::TwoXPaused
+        )
+    }
 }
 
 const WHITE_THRESHOLD: u8 = 250;
@@ -83,12 +94,58 @@ const PAUSE_PAUSED_MIN: f64 = 380.0;
 const PAUSE_PAUSED_MAX: f64 = 500.0;
 const DIM_BUTTON_BRIGHT_MAX: f64 = 40.0;
 const DIM_BUTTON_GLYPH_MIN: f64 = 150.0;
+const INIT_SPEED_DIM_MIN: f64 = 150.0;
+const INIT_PAUSE_DIM_MAX: f64 = 500.0;
+const BUTTON_PROBE_THRESHOLD: u8 = 150;
+const BUTTON_PROBE_MIN_VOTES: u8 = 6;
+const BUTTON_PROBE_MAX_CONFLICT_VOTES: u8 = 2;
 const TAKEOVER_OVERLAY_LEFT_REF: f64 = 315.0;
 const TAKEOVER_OVERLAY_RIGHT_REF: f64 = 510.0;
 const TAKEOVER_OVERLAY_TOP_REF: f64 = 610.0;
 const TAKEOVER_OVERLAY_BOTTOM_REF: f64 = 696.0;
 const TAKEOVER_OVERLAY_BRIGHT_THRESHOLD: u8 = 150;
 const TAKEOVER_OVERLAY_BRIGHT_MIN: f64 = 350.0;
+
+const ONE_X_SPEED_PROBES: &[(f64, f64)] = &[
+    (183.0, 64.0),
+    (178.0, 43.0),
+    (180.0, 46.0),
+    (181.0, 73.0),
+    (194.0, 39.0),
+    (199.0, 34.0),
+    (173.0, 35.0),
+    (181.0, 47.0),
+];
+const TWO_X_SPEED_PROBES: &[(f64, f64)] = &[
+    (175.0, 64.0),
+    (171.0, 66.0),
+    (179.0, 35.0),
+    (171.0, 43.0),
+    (168.0, 36.0),
+    (167.0, 47.0),
+    (201.0, 32.0),
+    (192.0, 66.0),
+];
+const RUNNING_PAUSE_PROBES: &[(f64, f64)] = &[
+    (64.0, 46.0),
+    (68.0, 45.0),
+    (66.0, 47.0),
+    (63.0, 60.0),
+    (88.0, 53.0),
+    (86.0, 63.0),
+    (76.0, 66.0),
+    (60.0, 58.0),
+];
+const PAUSED_PAUSE_PROBES: &[(f64, f64)] = &[
+    (71.0, 52.0),
+    (71.0, 50.0),
+    (70.0, 51.0),
+    (69.0, 56.0),
+    (72.0, 49.0),
+    (75.0, 52.0),
+    (74.0, 53.0),
+    (73.0, 52.0),
+];
 
 #[inline(always)]
 fn read_pixel(
@@ -275,8 +332,9 @@ fn count_pixels_at_thresholds(
     rect: Rect,
     low_threshold: u8,
     high_threshold: u8,
+    step: i32,
 ) -> (u32, u32) {
-    if rect.is_empty() {
+    if rect.is_empty() || step <= 0 {
         return (0, 0);
     }
 
@@ -292,13 +350,16 @@ fn count_pixels_at_thresholds(
 
     let low = low_threshold as u16 * 3;
     let high = high_threshold as u16 * 3;
+    let sample_area = (step * step) as u32;
     let mut low_count = 0;
     let mut high_count = 0;
 
-    for y in rect.top..rect.bottom {
+    let mut y = rect.top;
+    while y < rect.bottom {
         let row = (height as i32 - 1 - y) as usize;
         let mut offset = row * stride + rect.left as usize * bytes_per_pixel;
-        for _ in rect.left..rect.right {
+        let mut x = rect.left;
+        while x < rect.right {
             let brightness = match format {
                 PixelFormat::Rgba => {
                     buffer[offset] as u16 + buffer[offset + 1] as u16 + buffer[offset + 2] as u16
@@ -308,13 +369,15 @@ fn count_pixels_at_thresholds(
                 }
             };
             if brightness >= low {
-                low_count += 1;
+                low_count += sample_area;
                 if brightness >= high {
-                    high_count += 1;
+                    high_count += sample_area;
                 }
             }
-            offset += bytes_per_pixel;
+            x += step;
+            offset += bytes_per_pixel * step as usize;
         }
+        y += step;
     }
 
     (low_count, high_count)
@@ -406,6 +469,103 @@ fn classify_pause(count: f64) -> Option<PauseButtonState> {
     }
 }
 
+fn probe_vote_count(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    scale: f64,
+    probes: &[(f64, f64)],
+) -> u8 {
+    let radius = (scale / 1.5).floor() as i32;
+    let mut votes = 0;
+
+    for &(right_offset_ref, top_ref) in probes {
+        let x = (width as f64 - right_offset_ref * scale).round() as i32;
+        let y = (top_ref * scale).round() as i32;
+        let mut bright = false;
+
+        'probe: for yy in (y - radius)..=(y + radius) {
+            for xx in (x - radius)..=(x + radius) {
+                if let Some((r, g, b, _)) = read_pixel(buffer, width, height, format, xx, yy) {
+                    if is_bright_enough(r, g, b, BUTTON_PROBE_THRESHOLD) {
+                        bright = true;
+                        break 'probe;
+                    }
+                }
+            }
+        }
+
+        if bright {
+            votes += 1;
+        }
+    }
+
+    votes
+}
+
+fn classify_button_probes(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    scale: f64,
+) -> Option<BattleState> {
+    let running_votes = probe_vote_count(
+        buffer,
+        width,
+        height,
+        format,
+        scale,
+        RUNNING_PAUSE_PROBES,
+    );
+    let paused_votes = probe_vote_count(
+        buffer,
+        width,
+        height,
+        format,
+        scale,
+        PAUSED_PAUSE_PROBES,
+    );
+
+    let pause = if running_votes >= BUTTON_PROBE_MIN_VOTES
+        && paused_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
+    {
+        PauseButtonState::Running
+    } else if paused_votes >= BUTTON_PROBE_MIN_VOTES
+        && running_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
+    {
+        PauseButtonState::Paused
+    } else {
+        return None;
+    };
+
+    let one_x_votes =
+        probe_vote_count(buffer, width, height, format, scale, ONE_X_SPEED_PROBES);
+    let two_x_votes =
+        probe_vote_count(buffer, width, height, format, scale, TWO_X_SPEED_PROBES);
+
+    if one_x_votes >= BUTTON_PROBE_MIN_VOTES
+        && two_x_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
+    {
+        return Some(match pause {
+            PauseButtonState::Running => BattleState::OneXRunning,
+            PauseButtonState::Paused => BattleState::OneXPaused,
+        });
+    }
+
+    if two_x_votes >= BUTTON_PROBE_MIN_VOTES
+        && one_x_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
+    {
+        return Some(match pause {
+            PauseButtonState::Running => BattleState::TwoXRunning,
+            PauseButtonState::Paused => BattleState::TwoXPaused,
+        });
+    }
+
+    None
+}
+
 fn has_takeover_overlay(
     buffer: &[u8],
     width: u32,
@@ -450,6 +610,7 @@ pub fn detect_battle_state(
     }
 
     let scale = battle_button_scale(width, height);
+    let count_step = if scale >= 1.5 { 2 } else { 1 };
     let speed_rect = glyph_rect_from_right(
         width,
         height,
@@ -477,6 +638,7 @@ pub fn detect_battle_state(
         speed_rect,
         BATTLE_BUTTON_DIM_THRESHOLD,
         BATTLE_BUTTON_BRIGHT_THRESHOLD,
+        count_step,
     );
     let (pause_dim_count, pause_bright_count) = count_pixels_at_thresholds(
         buffer,
@@ -486,6 +648,7 @@ pub fn detect_battle_state(
         pause_rect,
         BATTLE_BUTTON_DIM_THRESHOLD,
         BATTLE_BUTTON_BRIGHT_THRESHOLD,
+        count_step,
     );
     let speed_bright = normalized_count(speed_bright_count, scale);
     let pause_bright = normalized_count(pause_bright_count, scale);
@@ -500,6 +663,14 @@ pub fn detect_battle_state(
         };
     }
 
+    let speed_dim = normalized_count(speed_dim_count, scale);
+    let pause_dim = normalized_count(pause_dim_count, scale);
+    if pause_bright > DIM_BUTTON_BRIGHT_MAX || pause_dim > INIT_PAUSE_DIM_MAX {
+        if let Some(state) = classify_button_probes(buffer, width, height, format, scale) {
+            return state;
+        }
+    }
+
     if speed_bright <= SPEED_0_2X_MAX {
         if let Some(pause) = classify_pause(pause_bright) {
             return match pause {
@@ -510,9 +681,11 @@ pub fn detect_battle_state(
     }
 
     if speed_bright <= DIM_BUTTON_BRIGHT_MAX && pause_bright <= DIM_BUTTON_BRIGHT_MAX {
-        let speed_dim = normalized_count(speed_dim_count, scale);
-        let pause_dim = normalized_count(pause_dim_count, scale);
         if speed_dim < DIM_BUTTON_GLYPH_MIN && pause_dim < DIM_BUTTON_GLYPH_MIN {
+            return BattleState::NotInBattle;
+        }
+
+        if speed_dim < INIT_SPEED_DIM_MIN || pause_dim > INIT_PAUSE_DIM_MAX {
             return BattleState::NotInBattle;
         }
 

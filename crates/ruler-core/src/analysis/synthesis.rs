@@ -2,7 +2,7 @@
 use super::calibration::ProfileData;
 use std::collections::{BTreeSet, HashMap};
 
-pub const BAR_LENGTH_RATIO: f64 = 1.039;
+pub const BAR_LENGTH_RATIO: f64 = 1.0389;
 pub const BASE_FRAMES_PER_COST: f64 = 30.0;
 pub const MIN_DETECTABLE_WIDTH: i32 = 2;
 

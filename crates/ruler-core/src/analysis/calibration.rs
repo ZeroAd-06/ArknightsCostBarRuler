@@ -292,6 +292,23 @@ mod tests {
     }
 
     #[test]
+    fn infer_calibration_detects_ce5_720p_90f_profile() {
+        let samples = vec![vec![
+            0, 2, 3, 5, 6, 7, 9, 10, 12, 13, 14, 16, 17, 18, 20, 21, 23, 24, 25, 27, 28, 30, 31,
+            32, 34, 35, 37, 38, 39, 41, 42, 43, 45, 46, 48, 49, 50, 52, 53, 55, 56, 57, 59, 60, 61,
+            63, 64, 66, 67, 68, 70, 71, 73, 74, 75, 77, 78, 79, 81, 82, 84, 85, 86, 88, 89, 91, 92,
+            93, 95, 96, 97, 99, 100, 102, 103, 104, 106, 107, 109, 110, 111, 113, 114, 115, 117,
+            118, 120,
+        ]];
+
+        let data = infer_calibration_from_samples(&samples, 1280, 720, 123.0).unwrap();
+
+        assert_eq!(data.detection_mode, Some("single".to_string()));
+        assert_eq!(data.profiles.len(), 1);
+        assert_eq!(data.profiles[0].total_frames, 90);
+    }
+
+    #[test]
     fn infer_calibration_rejects_insufficient_reliable_widths() {
         let samples = vec![vec![0, 1, 180], vec![0]];
         assert!(infer_calibration_from_samples(&samples, 1920, 1080, 123.0).is_err());

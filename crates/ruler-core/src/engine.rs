@@ -26,7 +26,6 @@ pub struct RulerEngine {
     last_known_total_frames: i32,
     last_known_cycle_total_frames: i32,
     last_known_cost_is_negative: bool,
-    reset_timer_on_next_battle: bool,
     /// Consecutive analysed frames spent out of an active battle. A genuine
     /// pre-battle banner only appears after a sustained out-of-battle stretch
     /// (loading / settlement), so this counter separates it from the brief
@@ -88,7 +87,6 @@ impl RulerEngine {
             last_known_total_frames: 0,
             last_known_cycle_total_frames: 0,
             last_known_cost_is_negative: false,
-            reset_timer_on_next_battle: false,
             out_of_battle_frames: 0,
         }
     }
@@ -182,7 +180,6 @@ impl RulerEngine {
         self.last_known_cycle_total_frames = 0;
         self.last_known_cost_is_negative = false;
         self.previous_phase = None;
-        self.reset_timer_on_next_battle = false;
     }
 
     pub fn adjust_timer(&mut self, frames: i32) {
@@ -246,10 +243,6 @@ impl RulerEngine {
         })?;
 
         if !battle_state.is_in_battle() {
-            if battle_state == BattleState::BeforeOrAfterBattle {
-                self.reset_timer_on_next_battle = true;
-            }
-
             return Ok(FrameResult {
                 logical_frame: None,
                 total_frames_in_cycle: self.last_known_cycle_total_frames,
@@ -258,10 +251,6 @@ impl RulerEngine {
                 cost_is_negative: self.last_known_cost_is_negative,
                 battle_state,
             });
-        }
-
-        if self.reset_timer_on_next_battle {
-            self.reset_timer();
         }
 
         let calibration = self
@@ -350,8 +339,7 @@ impl RulerEngine {
         // A genuine pre-battle banner only shows after a sustained out-of-battle
         // stretch (loading / settlement). A `BeforeOrAfterBattle` that appears
         // within a few frames of leaving a battle is a transient overlay
-        // (deployment slow-mo, pause/settings menu); report it as `NotInBattle`
-        // so it does not arm the next-battle timer reset.
+        // (deployment slow-mo, pause/settings menu); report it as `NotInBattle`.
         if battle_state == BattleState::BeforeOrAfterBattle
             && self.out_of_battle_frames < PRE_BATTLE_BANNER_MIN_OUT_FRAMES
         {
@@ -620,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_battle_banner_resets_timer_when_a_new_battle_starts() {
+    fn pre_battle_banner_keeps_elapsed_time_when_a_new_battle_starts() {
         let mut engine = engine_with_profiles(&[30]);
 
         // A battle runs, ends into settlement/menu, then the next battle's
@@ -644,11 +632,11 @@ mod tests {
         let result = analyze_width(&mut engine, 5, false);
         assert_eq!(result.logical_frame, Some(5));
         assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 0);
+        assert_eq!(result.elapsed_frames, 20);
     }
 
     #[test]
-    fn pause_or_settings_overlay_mid_battle_does_not_reset_timer() {
+    fn pause_or_settings_overlay_mid_battle_keeps_elapsed_time() {
         let mut engine = engine_with_profiles(&[30]);
 
         analyze_width(&mut engine, 0, false);
@@ -657,7 +645,7 @@ mod tests {
 
         // Opening settings mid-battle flickers a `BeforeOrAfterBattle` frame before
         // settling into the menu. Coming straight from battle, it is a transient
-        // overlay: suppressed to NotInBattle and it must not arm a reset.
+        // overlay: suppressed to NotInBattle and must not change elapsed time.
         let result =
             analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
         assert_eq!(result.battle_state, BattleState::NotInBattle);
@@ -666,14 +654,14 @@ mod tests {
         let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
         assert_eq!(result.elapsed_frames, 20);
 
-        // The same battle resumes; the timer carries on instead of resetting.
+        // The same battle resumes; the timer carries on.
         let result = analyze_width(&mut engine, 25, false);
         assert_eq!(result.logical_frame, Some(25));
         assert_eq!(result.elapsed_frames, 25);
     }
 
     #[test]
-    fn short_mid_battle_banner_does_not_poison_later_real_reset() {
+    fn short_mid_battle_banner_does_not_poison_later_real_prebattle_banner() {
         let mut engine = engine_with_profiles(&[30]);
 
         analyze_width(&mut engine, 0, false);
@@ -681,8 +669,8 @@ mod tests {
         assert_eq!(result.elapsed_frames, 20);
 
         // A brief false `BeforeOrAfterBattle` flicker while leaving the battle is
-        // suppressed and must not prevent the next *real* pre-battle banner from
-        // resetting the timer after a long settlement/menu stretch.
+        // suppressed and must not affect the next *real* pre-battle banner after
+        // a long settlement/menu stretch.
         let result =
             analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
         assert_eq!(result.battle_state, BattleState::NotInBattle);
@@ -698,7 +686,7 @@ mod tests {
         assert_eq!(result.elapsed_frames, 20);
 
         let result = analyze_width(&mut engine, 5, false);
-        assert_eq!(result.elapsed_frames, 0);
+        assert_eq!(result.elapsed_frames, 20);
     }
 
     #[test]
@@ -721,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn point_two_x_deployment_suppresses_init_reset_until_battle_resumes() {
+    fn point_two_x_deployment_keeps_elapsed_time_until_battle_resumes() {
         let mut engine = engine_with_profiles(&[30]);
 
         analyze_width(&mut engine, 0, false);

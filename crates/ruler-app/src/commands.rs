@@ -20,6 +20,7 @@ pub enum UiCommand {
         frames: i32,
     },
     ResetTimer,
+    UndoResetTimer,
     ToggleLapTimer,
     /// Persist the overlay scale multiplier (1.0 == 100%).
     SetOverlayScale(f32),

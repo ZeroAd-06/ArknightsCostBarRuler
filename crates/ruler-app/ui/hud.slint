@@ -31,10 +31,12 @@ export component Hud inherits Window {
     in property <string> progress-str: "0%";
     in property <string> message: "";
     in property <bool> force-controls: false; // preview/debug only
+    in property <bool> undo-reset-enabled: false;
 
     // ---- outputs ----
     callback start-clicked();
     callback reset-clicked();
+    callback undo-reset-clicked();
     callback lap-clicked();
     callback back-cycle();
     callback fwd-cycle();
@@ -220,7 +222,7 @@ export component Hud inherits Window {
         // Hover-revealed control toolbar (running only). It sits below the
         // primary HUD panel, so it never covers or compresses the readout.
         Rectangle {
-            width: 108px;
+            width: 134px;
             height: root.toolbar-height;
             x: parent.width - self.width - 4px;
             y: root.panel-height + 2px;
@@ -236,6 +238,7 @@ export component Hud inherits Window {
                 spacing: 2px;
                 alignment: center;
                 IconBtn { icon: Icons.prev; clicked => { root.back-cycle(); } }
+                IconBtn { icon: Icons.undo-reset; enabled: root.undo-reset-enabled; clicked => { root.undo-reset-clicked(); } }
                 IconBtn { icon: Icons.reset; clicked => { root.reset-clicked(); } }
                 IconBtn { icon: Icons.flag; strong: root.lap-str != ""; clicked => { root.lap-clicked(); } }
                 IconBtn { icon: Icons.next; clicked => { root.fwd-cycle(); } }

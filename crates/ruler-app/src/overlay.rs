@@ -419,6 +419,12 @@ mod platform {
                 let _ = tx.send(UiCommand::ResetTimer);
             }
         });
+        hud.on_undo_reset_clicked({
+            let tx = command_tx.clone();
+            move || {
+                let _ = tx.send(UiCommand::UndoResetTimer);
+            }
+        });
         hud.on_lap_clicked({
             let tx = command_tx.clone();
             move || {
@@ -625,6 +631,7 @@ mod platform {
         hud.set_mode(map_mode(&ui.mode));
         hud.set_time_str(ui.time_str.as_str().into());
         hud.set_frame_str(ui.display_frame.as_str().into());
+        hud.set_undo_reset_enabled(ui.can_undo_reset);
 
         let negative = ui.display_total.ends_with('*');
         let total_clean = ui.display_total.trim_end_matches('*');
@@ -1008,6 +1015,7 @@ mod platform {
         menu.set_display_mode(display_mode_index(ui.display_mode));
         menu.set_scale_index(scale_pct_to_index(ui.overlay_scale_pct));
         menu.set_timer_enabled(ui.active_profile.is_some());
+        menu.set_undo_reset_enabled(ui.can_undo_reset);
         menu.set_cap_calibration(i18n.tr("overlay.menu.calibration").into());
         menu.set_cap_display(i18n.tr("overlay.menu.display").into());
         menu.set_cap_scale(i18n.tr("overlay.menu.scale").into());
@@ -1132,6 +1140,7 @@ mod platform {
                     2 => UiCommand::ResetTimer,
                     3 => UiCommand::AdjustTimer { frames: 1 },
                     4 => UiCommand::AdjustTimer { frames: cycle },
+                    5 => UiCommand::UndoResetTimer,
                     _ => return,
                 };
                 let _ = tx.send(command);
@@ -1332,6 +1341,9 @@ mod platform {
         state
             .menu
             .set_timer_enabled(snapshot.ui.active_profile.is_some());
+        state
+            .menu
+            .set_undo_reset_enabled(snapshot.ui.can_undo_reset);
 
         // Refresh the profile model only when the list actually changes (an inline
         // rename/delete landed), so an in-progress edit field is not torn down each

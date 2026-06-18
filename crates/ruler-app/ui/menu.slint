@@ -21,6 +21,7 @@ export component RulerMenu inherits Window {
     in property <int> display-mode;     // 0 = 0/n-1, 1 = 0/n, 2 = 1/n
     in property <int> scale-index;      // 0=75% 1=100% 2=125% 3=150%
     in property <bool> timer-enabled;   // an active profile exists
+    in property <bool> undo-reset-enabled;
     in property <string> cap-calibration;
     in property <string> cap-display;
     in property <string> cap-scale;
@@ -42,7 +43,7 @@ export component RulerMenu inherits Window {
     callback confirm-delete(int);
     callback set-display(int);
     callback set-scale(int);
-    callback timer-action(int);   // 0 back-cycle, 1 back-1s, 2 reset, 3 fwd-1s, 4 fwd-cycle
+    callback timer-action(int);   // 0 back-cycle, 1 back-1s, 2 reset, 3 fwd-1s, 4 fwd-cycle, 5 undo-reset
     callback about();
     callback exit();
 
@@ -434,6 +435,7 @@ export component RulerMenu inherits Window {
                     alignment: start;
                     IconBtn { icon: Icons.prev; enabled: root.timer-enabled; clicked => { root.timer-action(0); } }
                     IconBtn { icon: Icons.chev-left; enabled: root.timer-enabled; clicked => { root.timer-action(1); } }
+                    IconBtn { icon: Icons.undo-reset; enabled: root.undo-reset-enabled; clicked => { root.timer-action(5); } }
                     IconBtn { icon: Icons.reset; enabled: root.timer-enabled; clicked => { root.timer-action(2); } }
                     IconBtn { icon: Icons.chev-right; enabled: root.timer-enabled; clicked => { root.timer-action(3); } }
                     IconBtn { icon: Icons.next; enabled: root.timer-enabled; clicked => { root.timer-action(4); } }

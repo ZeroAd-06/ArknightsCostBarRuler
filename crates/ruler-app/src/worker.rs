@@ -260,12 +260,36 @@ struct WorkerContext {
     active_profile: Option<String>,
     display_mode: FrameDisplayMode,
     lap_start_frame: Option<i32>,
+    timer_reset_undo: TimerResetUndo,
     last_elapsed_frames: i32,
     last_total_frames: i32,
     last_cost_is_negative: bool,
     sample_index: u64,
     debug_recorder: Option<DebugRecorder>,
     debug_recording_dir: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TimerResetUndo {
+    previous_elapsed_frames: Option<i32>,
+}
+
+impl TimerResetUndo {
+    fn remember_reset(&mut self, elapsed_frames: i32) {
+        self.previous_elapsed_frames = (elapsed_frames != 0).then_some(elapsed_frames);
+    }
+
+    fn take(&mut self) -> Option<i32> {
+        self.previous_elapsed_frames.take()
+    }
+
+    fn clear(&mut self) {
+        self.previous_elapsed_frames = None;
+    }
+
+    fn is_available(self) -> bool {
+        self.previous_elapsed_frames.is_some()
+    }
 }
 
 fn run_worker_loop(
@@ -301,6 +325,7 @@ fn run_worker_loop(
         engine: RulerEngine::new(),
         connected: false,
         lap_start_frame: None,
+        timer_reset_undo: TimerResetUndo::default(),
         last_elapsed_frames: 0,
         last_total_frames: 0,
         last_cost_is_negative: false,
@@ -362,6 +387,7 @@ fn load_profile(context: &mut WorkerContext, filename: &str) -> Result<(), Strin
         })?;
     context.active_profile = Some(filename.to_string());
     context.lap_start_frame = None;
+    context.timer_reset_undo.clear();
     context.last_elapsed_frames = 0;
     context.last_cost_is_negative = false;
     Ok(())
@@ -397,6 +423,7 @@ fn handle_command(
             context.active_profile = None;
             context.config.active_calibration_profile = None;
             context.lap_start_frame = None;
+            context.timer_reset_undo.clear();
             context.last_cost_is_negative = false;
             let _ = context.config.save_to_path(&context.config_path);
             state.update_ui(|ui, api| {
@@ -404,6 +431,7 @@ fn handle_command(
                 ui.message.clear();
                 ui.active_profile = None;
                 ui.total_frames_in_cycle = 0;
+                ui.can_undo_reset = false;
                 ui.profiles = context.profiles.list(None);
                 api.is_running = false;
                 api.current_frame = None;
@@ -450,6 +478,7 @@ fn handle_command(
                 context.engine.reset_timer();
                 context.last_elapsed_frames = 0;
                 context.lap_start_frame = None;
+                context.timer_reset_undo.clear();
                 context.last_cost_is_negative = false;
                 let _ = context.config.save_to_path(&context.config_path);
                 publish_idle(state, context);
@@ -469,10 +498,20 @@ fn handle_command(
             publish_current_state(state, context);
         }
         UiCommand::ResetTimer => {
+            context
+                .timer_reset_undo
+                .remember_reset(context.last_elapsed_frames);
             context.engine.reset_timer();
             context.lap_start_frame = None;
             context.last_elapsed_frames = 0;
             publish_current_state(state, context);
+        }
+        UiCommand::UndoResetTimer => {
+            if let Some(elapsed_frames) = context.timer_reset_undo.take() {
+                set_timer_elapsed(context, elapsed_frames);
+                context.lap_start_frame = None;
+                publish_current_state(state, context);
+            }
         }
         UiCommand::ToggleLapTimer => {
             context.lap_start_frame = if context.lap_start_frame.is_some() {
@@ -510,6 +549,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
 
     context.engine.reset_timer();
     context.lap_start_frame = None;
+    context.timer_reset_undo.clear();
     context.last_elapsed_frames = 0;
     context.last_total_frames = 0;
     context.last_cost_is_negative = false;
@@ -521,6 +561,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         ui.display_total = "/--".to_string();
         ui.time_str = "00:00:00".to_string();
         ui.lap_frames = None;
+        ui.can_undo_reset = false;
         api.is_running = false;
         api.current_frame = None;
         api.total_frames_in_cycle = 0;
@@ -706,6 +747,7 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                         ui.display_total = display_total;
                         ui.time_str = format_time_from_frames(context.last_elapsed_frames);
                         ui.lap_frames = lap_frames;
+                        ui.can_undo_reset = timer_reset_undo_enabled(context);
                         ui.total_frames_in_cycle = result.total_frames_in_cycle;
                         ui.active_profile = active_profile.clone();
                         ui.profiles = context.profiles.list(active_profile.as_deref());
@@ -758,6 +800,7 @@ fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame:
         };
         ui.time_str = format_time_from_frames(context.last_elapsed_frames);
         ui.lap_frames = lap_frames;
+        ui.can_undo_reset = timer_reset_undo_enabled(context);
         ui.total_frames_in_cycle = total_frames;
         ui.active_profile = active_profile.clone();
         ui.profiles = context.profiles.list(active_profile.as_deref());
@@ -778,6 +821,7 @@ fn publish_idle(state: &SharedAppState, context: &WorkerContext) {
         ui.display_total = "/--".to_string();
         ui.time_str = "00:00:00".to_string();
         ui.lap_frames = None;
+        ui.can_undo_reset = false;
         ui.total_frames_in_cycle = 0;
         ui.active_profile = None;
         ui.profiles = context.profiles.list(None);
@@ -795,10 +839,22 @@ fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String)
         ui.mode = OverlayMode::Error;
         ui.message = error;
         ui.active_profile = context.active_profile.clone();
+        ui.can_undo_reset = timer_reset_undo_enabled(context);
         ui.profiles = context.profiles.list(context.active_profile.as_deref());
         api.is_running = false;
         api.current_frame = None;
     });
+}
+
+fn set_timer_elapsed(context: &mut WorkerContext, elapsed_frames: i32) {
+    context
+        .engine
+        .adjust_timer(elapsed_frames - context.last_elapsed_frames);
+    context.last_elapsed_frames = elapsed_frames;
+}
+
+fn timer_reset_undo_enabled(context: &WorkerContext) -> bool {
+    context.active_profile.is_some() && context.timer_reset_undo.is_available()
 }
 
 fn display_total_with_cost_marker(
@@ -839,5 +895,32 @@ fn sleep_until(deadline: Instant, running: &AtomicBool) {
             break;
         }
         thread::sleep((deadline - now).min(Duration::from_millis(1)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TimerResetUndo;
+
+    #[test]
+    fn timer_reset_undo_remembers_nonzero_elapsed_once() {
+        let mut undo = TimerResetUndo::default();
+
+        undo.remember_reset(42);
+
+        assert!(undo.is_available());
+        assert_eq!(undo.take(), Some(42));
+        assert!(!undo.is_available());
+        assert_eq!(undo.take(), None);
+    }
+
+    #[test]
+    fn timer_reset_undo_ignores_zero_elapsed() {
+        let mut undo = TimerResetUndo::default();
+
+        undo.remember_reset(0);
+
+        assert!(!undo.is_available());
+        assert_eq!(undo.take(), None);
     }
 }

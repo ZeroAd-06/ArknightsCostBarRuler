@@ -9,6 +9,7 @@ use std::path::Path;
 
 const MIN_INFERRED_FRAMES_PER_COST: i32 = 15;
 const MAX_INFERRED_FRAMES_PER_COST: i32 = 150;
+const INFERENCE_DENOMINATORS: &[i32] = &[1, 2, 11];
 
 /// New multi-profile format
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -144,14 +145,17 @@ pub fn infer_calibration_from_samples(
         );
     }
 
-    let n_eff = find_fastest_matching_n(&reliable_cycles, total_bar_width).ok_or_else(|| {
-        "校准失败：样本与理论费用条序列不匹配，请重新进入关卡后在正常速度下重试。".to_string()
-    })?;
+    let (n_eff, profile_offset) = find_fastest_matching_n(&reliable_cycles, total_bar_width)
+        .ok_or_else(|| {
+            "校准失败：样本与理论费用条序列不匹配，请重新进入关卡后在正常速度下重试。".to_string()
+        })?;
 
-    let profiles = synthesize_profiles(total_bar_width, n_eff);
+    let mut profiles = synthesize_profiles(total_bar_width, n_eff);
     if profiles.is_empty() {
         return Err("校准失败：未能构建任何有效的费用循环模型。".to_string());
     }
+    let profile_count = profiles.len();
+    profiles.rotate_left(profile_offset % profile_count);
 
     Ok(CalibrationData {
         detection_mode: Some(if profiles.len() > 1 {
@@ -183,17 +187,36 @@ fn collect_reliable_cycle_widths(
         .collect()
 }
 
-fn find_fastest_matching_n(reliable_cycles: &[BTreeSet<i32>], total_bar_width: i32) -> Option<f64> {
-    ((MIN_INFERRED_FRAMES_PER_COST * 2)..=(MAX_INFERRED_FRAMES_PER_COST * 2)).find_map(|twice_n| {
-        let n_eff = twice_n as f64 / 2.0;
+fn find_fastest_matching_n(
+    reliable_cycles: &[BTreeSet<i32>],
+    total_bar_width: i32,
+) -> Option<(f64, usize)> {
+    inference_candidates().into_iter().find_map(|n_eff| {
         let profiles = synthesize_profiles(total_bar_width, n_eff);
-        profiles_fit_cycles(reliable_cycles, &profiles).then_some(n_eff)
+        matching_profile_offset(reliable_cycles, &profiles).map(|offset| (n_eff, offset))
     })
 }
 
-fn profiles_fit_cycles(reliable_cycles: &[BTreeSet<i32>], profiles: &[ProfileData]) -> bool {
+fn inference_candidates() -> Vec<f64> {
+    let mut candidates = Vec::new();
+    for denominator in INFERENCE_DENOMINATORS {
+        let min_numerator = MIN_INFERRED_FRAMES_PER_COST * denominator;
+        let max_numerator = MAX_INFERRED_FRAMES_PER_COST * denominator;
+        for numerator in min_numerator..=max_numerator {
+            candidates.push(numerator as f64 / *denominator as f64);
+        }
+    }
+    candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    candidates
+}
+
+fn matching_profile_offset(
+    reliable_cycles: &[BTreeSet<i32>],
+    profiles: &[ProfileData],
+) -> Option<usize> {
     if profiles.is_empty() {
-        return false;
+        return None;
     }
 
     let profile_sets = profiles
@@ -207,12 +230,12 @@ fn profiles_fit_cycles(reliable_cycles: &[BTreeSet<i32>], profiles: &[ProfileDat
         })
         .collect::<Vec<_>>();
 
-    (0..profile_sets.len()).any(|offset| {
+    (0..profile_sets.len()).find(|offset| {
         reliable_cycles
             .iter()
             .enumerate()
             .all(|(cycle_index, cycle)| {
-                cycle.is_subset(&profile_sets[(cycle_index + offset) % profile_sets.len()])
+                cycle.is_subset(&profile_sets[(cycle_index + *offset) % profile_sets.len()])
             })
     })
 }
@@ -289,6 +312,34 @@ mod tests {
         assert_eq!(data.profiles.len(), 2);
         assert_eq!(data.profiles[0].total_frames, 38);
         assert_eq!(data.profiles[1].total_frames, 37);
+    }
+
+    #[test]
+    fn infer_calibration_detects_tenth_speed_bonus_profile() {
+        let samples = sample_cycles_for_n(120, 30.0 / 1.1);
+        let data = infer_calibration_from_samples(&samples, 1280, 720, 123.0).unwrap();
+
+        assert_eq!(data.detection_mode, Some("alternating".to_string()));
+        assert_eq!(data.profiles.len(), 11);
+        assert_eq!(
+            data.profiles
+                .iter()
+                .map(|profile| profile.total_frames)
+                .sum::<i32>(),
+            300
+        );
+    }
+
+    #[test]
+    fn infer_calibration_rotates_profiles_to_observed_offset() {
+        let expected = synthesize_profiles(180, 37.5);
+        let mut samples = sample_cycles_for_n(180, 37.5);
+        samples.rotate_left(1);
+
+        let data = infer_calibration_from_samples(&samples, 1920, 1080, 123.0).unwrap();
+
+        assert_eq!(data.profiles[0].pixel_map, expected[1].pixel_map);
+        assert_eq!(data.profiles[1].pixel_map, expected[0].pixel_map);
     }
 
     #[test]

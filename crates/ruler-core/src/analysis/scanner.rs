@@ -81,71 +81,39 @@ const PAUSE_GLYPH_RIGHT_FROM_RIGHT_REF: f64 = 50.0;
 const PAUSE_GLYPH_TOP_REF: f64 = 38.0;
 const PAUSE_GLYPH_BOTTOM_REF: f64 = 69.0;
 
-const BATTLE_BUTTON_BRIGHT_THRESHOLD: u8 = 180;
-const BATTLE_BUTTON_DIM_THRESHOLD: u8 = 120;
-const SPEED_0_2X_MAX: f64 = 420.0;
-const SPEED_1X_MIN: f64 = 410.0;
-const SPEED_1X_MAX: f64 = 570.0;
-const SPEED_2X_MIN: f64 = 580.0;
-const SPEED_2X_MAX: f64 = 760.0;
-const PAUSE_RUNNING_MIN: f64 = 590.0;
-const PAUSE_RUNNING_MAX: f64 = 780.0;
+const GLYPH_BRIGHT_THRESHOLD: u8 = 180;
+const GLYPH_DIM_THRESHOLD: u8 = 120;
+
+// Pause/play glyph, normalised bright-pixel area (per scale²). The running glyph
+// (two bars) fills more area than the paused glyph (a single triangle).
+const PAUSE_RUNNING_MIN: f64 = 560.0;
+const PAUSE_RUNNING_MAX: f64 = 710.0;
 const PAUSE_PAUSED_MIN: f64 = 380.0;
 const PAUSE_PAUSED_MAX: f64 = 500.0;
-const DIM_BUTTON_BRIGHT_MAX: f64 = 40.0;
-const DIM_BUTTON_GLYPH_MIN: f64 = 150.0;
-const INIT_SPEED_DIM_MIN: f64 = 150.0;
-const INIT_PAUSE_DIM_MAX: f64 = 500.0;
-const BUTTON_PROBE_THRESHOLD: u8 = 150;
-const BUTTON_PROBE_MIN_VOTES: u8 = 6;
-const BUTTON_PROBE_MAX_CONFLICT_VOTES: u8 = 2;
+
+// Speed glyph ("1X" / "2X") bright-pixel area; 2X carries more strokes than 1X.
+const SPEED_1X_MIN: f64 = 360.0;
+const SPEED_1X_MAX: f64 = 520.0;
+const SPEED_2X_MIN: f64 = 540.0;
+const SPEED_2X_MAX: f64 = 740.0;
+// A crisp glyph is bright strokes on a dark button, so it has few mid-tone
+// pixels. During deployment slow-mo (0.2x) the speed button is greyed/occluded
+// by the deploy-range overlay, flooding the box with mid-tones and pushing
+// (dim - bright) far past this limit even when a few bright pixels survive.
+const SPEED_GLYPH_CRISP_MAX: f64 = 300.0;
+
+// Before/after battle: both glyphs are dark, but the greyed button outlines
+// remain as a moderate band of mid-tone pixels.
+const GLYPH_PRESENT_MAX: f64 = 150.0;
+const INIT_DIM_MIN: f64 = 150.0;
+const INIT_DIM_MAX: f64 = 500.0;
+
 const TAKEOVER_OVERLAY_LEFT_REF: f64 = 315.0;
 const TAKEOVER_OVERLAY_RIGHT_REF: f64 = 510.0;
 const TAKEOVER_OVERLAY_TOP_REF: f64 = 610.0;
 const TAKEOVER_OVERLAY_BOTTOM_REF: f64 = 696.0;
 const TAKEOVER_OVERLAY_BRIGHT_THRESHOLD: u8 = 150;
 const TAKEOVER_OVERLAY_BRIGHT_MIN: f64 = 350.0;
-
-const ONE_X_SPEED_PROBES: &[(f64, f64)] = &[
-    (183.0, 64.0),
-    (178.0, 43.0),
-    (180.0, 46.0),
-    (181.0, 73.0),
-    (194.0, 39.0),
-    (199.0, 34.0),
-    (173.0, 35.0),
-    (181.0, 47.0),
-];
-const TWO_X_SPEED_PROBES: &[(f64, f64)] = &[
-    (175.0, 64.0),
-    (171.0, 66.0),
-    (179.0, 35.0),
-    (171.0, 43.0),
-    (168.0, 36.0),
-    (167.0, 47.0),
-    (201.0, 32.0),
-    (192.0, 66.0),
-];
-const RUNNING_PAUSE_PROBES: &[(f64, f64)] = &[
-    (64.0, 46.0),
-    (68.0, 45.0),
-    (66.0, 47.0),
-    (63.0, 60.0),
-    (88.0, 53.0),
-    (86.0, 63.0),
-    (76.0, 66.0),
-    (60.0, 58.0),
-];
-const PAUSED_PAUSE_PROBES: &[(f64, f64)] = &[
-    (71.0, 52.0),
-    (71.0, 50.0),
-    (70.0, 51.0),
-    (69.0, 56.0),
-    (72.0, 49.0),
-    (75.0, 52.0),
-    (74.0, 53.0),
-    (73.0, 52.0),
-];
 
 #[inline(always)]
 fn read_pixel(
@@ -253,6 +221,7 @@ impl Rect {
 
 #[derive(Clone, Copy, Debug)]
 enum SpeedButtonState {
+    PointTwoX,
     OneX,
     TwoX,
 }
@@ -448,122 +417,28 @@ fn normalized_count(count: u32, scale: f64) -> f64 {
 }
 
 #[inline]
-fn classify_speed(count: f64) -> Option<SpeedButtonState> {
-    if (SPEED_1X_MIN..=SPEED_1X_MAX).contains(&count) {
-        Some(SpeedButtonState::OneX)
-    } else if (SPEED_2X_MIN..=SPEED_2X_MAX).contains(&count) {
-        Some(SpeedButtonState::TwoX)
+fn classify_speed(bright: f64, dim: f64) -> SpeedButtonState {
+    // A crisp 1X/2X glyph sits on a dark button (little mid-tone). Anything that
+    // floods the box with mid-tones is the greyed/occluded deployment button.
+    let crisp = dim - bright <= SPEED_GLYPH_CRISP_MAX;
+    if crisp && (SPEED_1X_MIN..=SPEED_1X_MAX).contains(&bright) {
+        SpeedButtonState::OneX
+    } else if crisp && (SPEED_2X_MIN..=SPEED_2X_MAX).contains(&bright) {
+        SpeedButtonState::TwoX
     } else {
-        None
+        SpeedButtonState::PointTwoX
     }
 }
 
 #[inline]
-fn classify_pause(count: f64) -> Option<PauseButtonState> {
-    if (PAUSE_RUNNING_MIN..=PAUSE_RUNNING_MAX).contains(&count) {
+fn classify_pause(bright: f64) -> Option<PauseButtonState> {
+    if (PAUSE_RUNNING_MIN..=PAUSE_RUNNING_MAX).contains(&bright) {
         Some(PauseButtonState::Running)
-    } else if (PAUSE_PAUSED_MIN..=PAUSE_PAUSED_MAX).contains(&count) {
+    } else if (PAUSE_PAUSED_MIN..=PAUSE_PAUSED_MAX).contains(&bright) {
         Some(PauseButtonState::Paused)
     } else {
         None
     }
-}
-
-fn probe_vote_count(
-    buffer: &[u8],
-    width: u32,
-    height: u32,
-    format: PixelFormat,
-    scale: f64,
-    probes: &[(f64, f64)],
-) -> u8 {
-    let radius = (scale / 1.5).floor() as i32;
-    let mut votes = 0;
-
-    for &(right_offset_ref, top_ref) in probes {
-        let x = (width as f64 - right_offset_ref * scale).round() as i32;
-        let y = (top_ref * scale).round() as i32;
-        let mut bright = false;
-
-        'probe: for yy in (y - radius)..=(y + radius) {
-            for xx in (x - radius)..=(x + radius) {
-                if let Some((r, g, b, _)) = read_pixel(buffer, width, height, format, xx, yy) {
-                    if is_bright_enough(r, g, b, BUTTON_PROBE_THRESHOLD) {
-                        bright = true;
-                        break 'probe;
-                    }
-                }
-            }
-        }
-
-        if bright {
-            votes += 1;
-        }
-    }
-
-    votes
-}
-
-fn classify_button_probes(
-    buffer: &[u8],
-    width: u32,
-    height: u32,
-    format: PixelFormat,
-    scale: f64,
-) -> Option<BattleState> {
-    let running_votes = probe_vote_count(
-        buffer,
-        width,
-        height,
-        format,
-        scale,
-        RUNNING_PAUSE_PROBES,
-    );
-    let paused_votes = probe_vote_count(
-        buffer,
-        width,
-        height,
-        format,
-        scale,
-        PAUSED_PAUSE_PROBES,
-    );
-
-    let pause = if running_votes >= BUTTON_PROBE_MIN_VOTES
-        && paused_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
-    {
-        PauseButtonState::Running
-    } else if paused_votes >= BUTTON_PROBE_MIN_VOTES
-        && running_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
-    {
-        PauseButtonState::Paused
-    } else {
-        return None;
-    };
-
-    let one_x_votes =
-        probe_vote_count(buffer, width, height, format, scale, ONE_X_SPEED_PROBES);
-    let two_x_votes =
-        probe_vote_count(buffer, width, height, format, scale, TWO_X_SPEED_PROBES);
-
-    if one_x_votes >= BUTTON_PROBE_MIN_VOTES
-        && two_x_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
-    {
-        return Some(match pause {
-            PauseButtonState::Running => BattleState::OneXRunning,
-            PauseButtonState::Paused => BattleState::OneXPaused,
-        });
-    }
-
-    if two_x_votes >= BUTTON_PROBE_MIN_VOTES
-        && one_x_votes <= BUTTON_PROBE_MAX_CONFLICT_VOTES
-    {
-        return Some(match pause {
-            PauseButtonState::Running => BattleState::TwoXRunning,
-            PauseButtonState::Paused => BattleState::TwoXPaused,
-        });
-    }
-
-    None
 }
 
 fn has_takeover_overlay(
@@ -599,6 +474,17 @@ fn has_takeover_overlay(
     takeover_bright >= TAKEOVER_OVERLAY_BRIGHT_MIN
 }
 
+/// Classifies the top-right battle HUD into one of the [`BattleState`]s.
+///
+/// Two glyph boxes drive everything: the pause/play button (the reliable
+/// in-battle anchor) and the speed button.
+///
+/// 1. If the pause box holds a valid glyph, we are in battle. Its area says
+///    running (two bars) vs paused (triangle); the speed box then says
+///    1x / 2x / 0.2x (a crisp bright glyph vs the greyed deployment button).
+/// 2. Otherwise both glyphs are dark. Greyed-but-present button outlines with no
+///    deploy overlay mean the battle is loading or settling
+///    ([`BattleState::BeforeOrAfterBattle`]); anything else is not a battle.
 pub fn detect_battle_state(
     buffer: &[u8],
     width: u32,
@@ -630,69 +516,52 @@ pub fn detect_battle_state(
         PAUSE_GLYPH_BOTTOM_REF,
     );
 
-    let (speed_dim_count, speed_bright_count) = count_pixels_at_thresholds(
+    let (speed_dim, speed_bright) = count_pixels_at_thresholds(
         buffer,
         width,
         height,
         format,
         speed_rect,
-        BATTLE_BUTTON_DIM_THRESHOLD,
-        BATTLE_BUTTON_BRIGHT_THRESHOLD,
+        GLYPH_DIM_THRESHOLD,
+        GLYPH_BRIGHT_THRESHOLD,
         count_step,
     );
-    let (pause_dim_count, pause_bright_count) = count_pixels_at_thresholds(
+    let (pause_dim, pause_bright) = count_pixels_at_thresholds(
         buffer,
         width,
         height,
         format,
         pause_rect,
-        BATTLE_BUTTON_DIM_THRESHOLD,
-        BATTLE_BUTTON_BRIGHT_THRESHOLD,
+        GLYPH_DIM_THRESHOLD,
+        GLYPH_BRIGHT_THRESHOLD,
         count_step,
     );
-    let speed_bright = normalized_count(speed_bright_count, scale);
-    let pause_bright = normalized_count(pause_bright_count, scale);
+    let speed_bright = normalized_count(speed_bright, scale);
+    let speed_dim = normalized_count(speed_dim, scale);
+    let pause_bright = normalized_count(pause_bright, scale);
+    let pause_dim = normalized_count(pause_dim, scale);
 
-    if let (Some(speed), Some(pause)) = (classify_speed(speed_bright), classify_pause(pause_bright))
-    {
-        return match (speed, pause) {
+    if let Some(pause) = classify_pause(pause_bright) {
+        return match (classify_speed(speed_bright, speed_dim), pause) {
+            (SpeedButtonState::PointTwoX, PauseButtonState::Running) => {
+                BattleState::PointTwoXRunning
+            }
+            (SpeedButtonState::PointTwoX, PauseButtonState::Paused) => {
+                BattleState::PointTwoXPaused
+            }
             (SpeedButtonState::OneX, PauseButtonState::Running) => BattleState::OneXRunning,
-            (SpeedButtonState::TwoX, PauseButtonState::Running) => BattleState::TwoXRunning,
             (SpeedButtonState::OneX, PauseButtonState::Paused) => BattleState::OneXPaused,
+            (SpeedButtonState::TwoX, PauseButtonState::Running) => BattleState::TwoXRunning,
             (SpeedButtonState::TwoX, PauseButtonState::Paused) => BattleState::TwoXPaused,
         };
     }
 
-    let speed_dim = normalized_count(speed_dim_count, scale);
-    let pause_dim = normalized_count(pause_dim_count, scale);
-    if pause_bright > DIM_BUTTON_BRIGHT_MAX || pause_dim > INIT_PAUSE_DIM_MAX {
-        if let Some(state) = classify_button_probes(buffer, width, height, format, scale) {
-            return state;
-        }
-    }
-
-    if speed_bright <= SPEED_0_2X_MAX {
-        if let Some(pause) = classify_pause(pause_bright) {
-            return match pause {
-                PauseButtonState::Running => BattleState::PointTwoXRunning,
-                PauseButtonState::Paused => BattleState::PointTwoXPaused,
-            };
-        }
-    }
-
-    if speed_bright <= DIM_BUTTON_BRIGHT_MAX && pause_bright <= DIM_BUTTON_BRIGHT_MAX {
-        if speed_dim < DIM_BUTTON_GLYPH_MIN && pause_dim < DIM_BUTTON_GLYPH_MIN {
-            return BattleState::NotInBattle;
-        }
-
-        if speed_dim < INIT_SPEED_DIM_MIN || pause_dim > INIT_PAUSE_DIM_MAX {
-            return BattleState::NotInBattle;
-        }
-
-        if has_takeover_overlay(buffer, width, height, format, scale) {
-            return BattleState::NotInBattle;
-        }
-
+    let glyphs_dark = speed_bright < GLYPH_PRESENT_MAX && pause_bright < GLYPH_PRESENT_MAX;
+    let buttons_present = speed_dim >= INIT_DIM_MIN && pause_dim <= INIT_DIM_MAX;
+    if glyphs_dark
+        && buttons_present
+        && !has_takeover_overlay(buffer, width, height, format, scale)
+    {
         return BattleState::BeforeOrAfterBattle;
     }
 

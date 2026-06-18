@@ -10,6 +10,9 @@ use ruler_core::{analysis::scanner::detect_battle_state, BattleState, PixelForma
 struct Fixture {
     path: PathBuf,
     expected: BattleState,
+    /// Blurry settings-transition frames that may legitimately read as either
+    /// `OneXRunning` or `NotInBattle` (marked with a `1xorGarbage` name prefix).
+    one_x_or_garbage: bool,
 }
 
 struct Sample {
@@ -33,7 +36,10 @@ fn battle_button_detector_classifies_all_capture_samples() {
         let sample = load_sample(&fixture.path, fixture.expected);
         let actual =
             detect_battle_state(&sample.data, sample.width, sample.height, PixelFormat::Rgba);
-        if actual != sample.expected {
+        let accepted = actual == sample.expected
+            || (fixture.one_x_or_garbage
+                && matches!(actual, BattleState::OneXRunning | BattleState::NotInBattle));
+        if !accepted {
             mismatches.push(format!(
                 "{}: expected {:?}, got {:?}",
                 sample.path.display(),
@@ -125,7 +131,15 @@ fn load_fixture_paths() -> Vec<Fixture> {
         paths.sort();
 
         for path in paths {
-            fixtures.push(Fixture { path, expected });
+            let one_x_or_garbage = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("1xorGarbage"));
+            fixtures.push(Fixture {
+                path,
+                expected,
+                one_x_or_garbage,
+            });
         }
     }
 
@@ -173,18 +187,35 @@ fn parse_frame_size(path: &Path) -> (u32, u32) {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or_else(|| panic!("invalid fixture file name: {}", path.display()));
-    let (size, _) = stem
+    // The size is the trailing `<W>x<H>` of the segment before `__`, tolerating
+    // an arbitrary text prefix such as `1xorGarbage`.
+    let (prefix, _) = stem
         .split_once("__")
-        .unwrap_or_else(|| panic!("fixture name must start with WIDTHxHEIGHT__: {stem}"));
-    let (width, height) = size
-        .split_once('x')
-        .unwrap_or_else(|| panic!("fixture size must be WIDTHxHEIGHT: {stem}"));
-    let width = width
-        .parse()
-        .unwrap_or_else(|e| panic!("invalid fixture width in {stem}: {e}"));
-    let height = height
+        .unwrap_or_else(|| panic!("fixture name must contain WIDTHxHEIGHT__: {stem}"));
+    let chars: Vec<char> = prefix.chars().collect();
+    let mut i = chars.len();
+    while i > 0 && chars[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    assert!(
+        i > 0 && i < chars.len() && chars[i - 1] == 'x',
+        "fixture size must end with WIDTHxHEIGHT: {stem}"
+    );
+    let height: u32 = chars[i..]
+        .iter()
+        .collect::<String>()
         .parse()
         .unwrap_or_else(|e| panic!("invalid fixture height in {stem}: {e}"));
+    let x = i - 1;
+    let mut j = x;
+    while j > 0 && chars[j - 1].is_ascii_digit() {
+        j -= 1;
+    }
+    let width: u32 = chars[j..x]
+        .iter()
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid fixture width in {stem}: {e}"));
     (width, height)
 }
 

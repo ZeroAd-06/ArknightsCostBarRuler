@@ -27,6 +27,12 @@ pub struct RulerEngine {
     last_known_cycle_total_frames: i32,
     last_known_cost_is_negative: bool,
     reset_timer_on_next_battle: bool,
+    /// Consecutive analysed frames spent out of an active battle. A genuine
+    /// pre-battle banner only appears after a sustained out-of-battle stretch
+    /// (loading / settlement), so this counter separates it from the brief
+    /// `BeforeOrAfterBattle` flicker of a mid-battle overlay (deployment slow-mo,
+    /// pause/settings menu). Reset to zero the instant a battle is in progress.
+    out_of_battle_frames: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -57,6 +63,12 @@ pub struct EngineStatus {
 
 const NEGATIVE_COST_INTERVAL_MULTIPLIER: i32 = 2;
 
+/// Minimum consecutive out-of-battle frames before a `BeforeOrAfterBattle` frame
+/// is trusted as a genuine pre-battle banner (rather than a brief mid-battle
+/// overlay). Observed overlay flickers last only a handful of frames, while real
+/// loading/settlement stretches run into the dozens-to-hundreds.
+const PRE_BATTLE_BANNER_MIN_OUT_FRAMES: u32 = 30;
+
 impl Default for RulerEngine {
     fn default() -> Self {
         Self::new()
@@ -77,6 +89,7 @@ impl RulerEngine {
             last_known_cycle_total_frames: 0,
             last_known_cost_is_negative: false,
             reset_timer_on_next_battle: false,
+            out_of_battle_frames: 0,
         }
     }
 
@@ -201,6 +214,7 @@ impl RulerEngine {
         self.last_known_cycle_total_frames = 0;
         self.last_known_cost_is_negative = false;
         self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
+        self.out_of_battle_frames = 0;
     }
 
     fn analyze_frame(
@@ -222,6 +236,8 @@ impl RulerEngine {
         format: PixelFormat,
         battle_state: BattleState,
     ) -> Result<FrameResult, String> {
+        let battle_state = self.apply_battle_state_context(battle_state);
+
         if self.calibration.is_none() {
             return Err("No calibration loaded".to_string());
         }
@@ -321,6 +337,28 @@ impl RulerEngine {
             cost_is_negative,
             battle_state,
         })
+    }
+
+    fn apply_battle_state_context(&mut self, battle_state: BattleState) -> BattleState {
+        if battle_state.is_in_battle() {
+            self.out_of_battle_frames = 0;
+            return battle_state;
+        }
+
+        self.out_of_battle_frames = self.out_of_battle_frames.saturating_add(1);
+
+        // A genuine pre-battle banner only shows after a sustained out-of-battle
+        // stretch (loading / settlement). A `BeforeOrAfterBattle` that appears
+        // within a few frames of leaving a battle is a transient overlay
+        // (deployment slow-mo, pause/settings menu); report it as `NotInBattle`
+        // so it does not arm the next-battle timer reset.
+        if battle_state == BattleState::BeforeOrAfterBattle
+            && self.out_of_battle_frames < PRE_BATTLE_BANNER_MIN_OUT_FRAMES
+        {
+            return BattleState::NotInBattle;
+        }
+
+        battle_state
     }
 }
 
@@ -582,15 +620,23 @@ mod tests {
     }
 
     #[test]
-    fn before_or_after_battle_resets_when_battle_starts() {
+    fn pre_battle_banner_resets_timer_when_a_new_battle_starts() {
         let mut engine = engine_with_profiles(&[30]);
 
+        // A battle runs, ends into settlement/menu, then the next battle's
+        // pre-battle banner appears only after a sustained out-of-battle span.
         analyze_width(&mut engine, 0, false);
         let result = analyze_width(&mut engine, 20, false);
         assert_eq!(result.elapsed_frames, 20);
 
+        for _ in 0..PRE_BATTLE_BANNER_MIN_OUT_FRAMES {
+            let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+            assert_eq!(result.elapsed_frames, 20);
+        }
+
         let result =
             analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.battle_state, BattleState::BeforeOrAfterBattle);
         assert_eq!(result.logical_frame, None);
         assert_eq!(result.total_frames_in_cycle, 30);
         assert_eq!(result.elapsed_frames, 20);
@@ -598,6 +644,60 @@ mod tests {
         let result = analyze_width(&mut engine, 5, false);
         assert_eq!(result.logical_frame, Some(5));
         assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 0);
+    }
+
+    #[test]
+    fn pause_or_settings_overlay_mid_battle_does_not_reset_timer() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 20, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        // Opening settings mid-battle flickers a `BeforeOrAfterBattle` frame before
+        // settling into the menu. Coming straight from battle, it is a transient
+        // overlay: suppressed to NotInBattle and it must not arm a reset.
+        let result =
+            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.battle_state, BattleState::NotInBattle);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+        assert_eq!(result.elapsed_frames, 20);
+
+        // The same battle resumes; the timer carries on instead of resetting.
+        let result = analyze_width(&mut engine, 25, false);
+        assert_eq!(result.logical_frame, Some(25));
+        assert_eq!(result.elapsed_frames, 25);
+    }
+
+    #[test]
+    fn short_mid_battle_banner_does_not_poison_later_real_reset() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 20, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        // A brief false `BeforeOrAfterBattle` flicker while leaving the battle is
+        // suppressed and must not prevent the next *real* pre-battle banner from
+        // resetting the timer after a long settlement/menu stretch.
+        let result =
+            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.battle_state, BattleState::NotInBattle);
+        assert_eq!(result.elapsed_frames, 20);
+
+        for _ in 0..PRE_BATTLE_BANNER_MIN_OUT_FRAMES {
+            analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+        }
+
+        let result =
+            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.battle_state, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width(&mut engine, 5, false);
         assert_eq!(result.elapsed_frames, 0);
     }
 
@@ -610,12 +710,39 @@ mod tests {
 
         let result =
             analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.battle_state, BattleState::NotInBattle);
         assert_eq!(result.logical_frame, None);
         assert_eq!(result.elapsed_frames, 20);
 
         let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
         assert_eq!(result.logical_frame, None);
         assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 20);
+    }
+
+    #[test]
+    fn point_two_x_deployment_suppresses_init_reset_until_battle_resumes() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 20, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width_with_state(&mut engine, 20, false, BattleState::PointTwoXPaused);
+        assert_eq!(result.battle_state, BattleState::PointTwoXPaused);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+        assert_eq!(result.battle_state, BattleState::NotInBattle);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result =
+            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
+        assert_eq!(result.battle_state, BattleState::NotInBattle);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width_with_state(&mut engine, 20, false, BattleState::OneXPaused);
+        assert_eq!(result.battle_state, BattleState::OneXPaused);
         assert_eq!(result.elapsed_frames, 20);
     }
 

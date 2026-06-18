@@ -1128,13 +1128,9 @@ mod platform {
                 let cycle = state.snapshot().ui.total_frames_in_cycle;
                 let command = match action {
                     0 => UiCommand::AdjustTimer { frames: -cycle },
-                    1 => UiCommand::AdjustTimer {
-                        frames: -crate::ui_state::FRAMES_PER_SECOND,
-                    },
+                    1 => UiCommand::AdjustTimer { frames: -1 },
                     2 => UiCommand::ResetTimer,
-                    3 => UiCommand::AdjustTimer {
-                        frames: crate::ui_state::FRAMES_PER_SECOND,
-                    },
+                    3 => UiCommand::AdjustTimer { frames: 1 },
                     4 => UiCommand::AdjustTimer { frames: cycle },
                     _ => return,
                 };

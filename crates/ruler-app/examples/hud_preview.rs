@@ -105,7 +105,7 @@ fn main() {
     let hud = Hud::new().unwrap();
     let hud_window = last.borrow_mut().take().expect("hud window");
     let hw = (210.0 * scale).round() as usize;
-    let hh = (56.0 * scale).round() as usize;
+    let hh = (82.0 * scale).round() as usize;
     hud_window
         .window()
         .try_dispatch_event(WindowEvent::ScaleFactorChanged {

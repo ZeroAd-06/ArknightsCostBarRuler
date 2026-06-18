@@ -177,8 +177,8 @@ mod platform {
                     CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HICON, HMENU, IDC_ARROW, MSG,
                     SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
                     WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_KEYDOWN,
-                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
-                    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST,
+                    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
                     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
@@ -191,8 +191,16 @@ mod platform {
     const WM_TRAYICON: u32 = WM_APP + 1;
 
     // Fixed logical design size of `hud.slint`. Physical size = logical * scale.
+    // The panel height stays the scale anchor; extra host height is for controls
+    // rendered outside the panel, not extra internal HUD content.
     const LOGICAL_W: f32 = 210.0;
-    const LOGICAL_H: f32 = 56.0;
+    const LOGICAL_PANEL_H: f32 = 56.0;
+    const LOGICAL_H: f32 = 82.0;
+    const LOGICAL_TOOLBAR_W: f32 = 108.0;
+    const LOGICAL_TOOLBAR_H: f32 = 24.0;
+    const LOGICAL_TOOLBAR_RIGHT_PAD: f32 = 4.0;
+    const LOGICAL_TOOLBAR_TOP_GAP: f32 = 2.0;
+    const HTTRANSPARENT_RESULT: isize = -1;
 
     struct WindowState {
         hud: Hud,
@@ -463,6 +471,14 @@ mod platform {
                 let _ = hdc;
                 let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &paint);
                 LRESULT(0)
+            }
+            WM_NCHITTEST => {
+                if let Some(state) = window_state_mut(hwnd) {
+                    if outer_area_should_pass_through(hwnd, state) {
+                        return LRESULT(HTTRANSPARENT_RESULT);
+                    }
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
             }
             WM_TIMER => {
                 if should_exit(hwnd) {
@@ -1417,6 +1433,41 @@ mod platform {
         }
     }
 
+    unsafe fn outer_area_should_pass_through(hwnd: HWND, state: &mut WindowState) -> bool {
+        let mut cursor = POINT::default();
+        if GetCursorPos(&mut cursor).is_err() {
+            return false;
+        }
+        let mut window_rect = RECT::default();
+        if GetWindowRect(hwnd, &mut window_rect).is_err() {
+            return false;
+        }
+
+        let x = cursor.x - window_rect.left;
+        let y = cursor.y - window_rect.top;
+        let running = matches!(state.state.snapshot().ui.mode, OverlayMode::Running);
+        outer_area_should_pass_through_at(x, y, state.scale, running)
+    }
+
+    fn outer_area_should_pass_through_at(x: i32, y: i32, scale: f32, running: bool) -> bool {
+        if y < (LOGICAL_PANEL_H * scale).round() as i32 {
+            return false;
+        }
+        if running && toolbar_hit_zone_contains(x as f32 / scale, y as f32 / scale) {
+            return false;
+        }
+        true
+    }
+
+    fn toolbar_hit_zone_contains(logical_x: f32, logical_y: f32) -> bool {
+        let left = LOGICAL_W - LOGICAL_TOOLBAR_W - LOGICAL_TOOLBAR_RIGHT_PAD;
+        let right = LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD;
+        let top = LOGICAL_PANEL_H;
+        let bottom = LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + LOGICAL_TOOLBAR_H;
+
+        logical_x >= left && logical_x < right && logical_y >= top && logical_y < bottom
+    }
+
     /// Returns `(left, top, width, height, base_scale)` in physical pixels.
     /// `base_scale` aligns the bar height to the legacy overlay footprint; the
     /// effective scale is `base_scale * scale_mult`. A persisted `pos` is used
@@ -1428,7 +1479,7 @@ mod platform {
             let (roi_x1, roi_x2, _) = find_cost_bar_roi(screen_width, screen_height);
             let cost_bar_pixel_length = (roi_x2 - roi_x1).abs().max(180);
             let legacy_height = (cost_bar_pixel_length * 5 / 6) * 27 / 50;
-            let base_scale = (legacy_height as f32 / LOGICAL_H).clamp(1.0, 4.0);
+            let base_scale = (legacy_height as f32 / LOGICAL_PANEL_H).clamp(1.0, 4.0);
             let effective = base_scale * scale_mult;
             let width = (LOGICAL_W * effective).round() as i32;
             let height = (LOGICAL_H * effective).round() as i32;
@@ -1443,6 +1494,47 @@ mod platform {
                 ),
             };
             (left, top, width, height, base_scale)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn running_toolbar_zone_stays_hit_testable_below_panel() {
+            let scale = 2.5;
+            let x = ((LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD - 10.0) * scale).round() as i32;
+            let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
+
+            assert!(!outer_area_should_pass_through_at(x, y, scale, true));
+        }
+
+        #[test]
+        fn running_toolbar_bridge_stays_hit_testable() {
+            let scale = 2.5;
+            let x = ((LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD - 10.0) * scale).round() as i32;
+            let y = ((LOGICAL_PANEL_H + 1.0) * scale).round() as i32;
+
+            assert!(!outer_area_should_pass_through_at(x, y, scale, true));
+        }
+
+        #[test]
+        fn lower_transparent_area_outside_toolbar_passes_through() {
+            let scale = 2.5;
+            let x = (20.0_f32 * scale).round() as i32;
+            let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
+
+            assert!(outer_area_should_pass_through_at(x, y, scale, true));
+        }
+
+        #[test]
+        fn toolbar_zone_passes_through_when_not_running() {
+            let scale = 2.5;
+            let x = ((LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD - 10.0) * scale).round() as i32;
+            let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
+
+            assert!(outer_area_should_pass_through_at(x, y, scale, false));
         }
     }
 }

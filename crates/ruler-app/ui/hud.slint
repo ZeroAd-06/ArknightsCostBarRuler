@@ -44,13 +44,19 @@ export component Hud inherits Window {
     background: transparent;
     default-font-family: "Bender";
     preferred-width: 210px;
-    preferred-height: 56px;
+    preferred-height: 82px;
 
+    property <length> panel-height: 56px;
+    property <length> toolbar-height: 24px;
     property <bool> running: root.mode == HudMode.running;
     property <bool> show-controls: (hover.has-hover || root.force-controls) && root.running;
 
     // ---- panel ----
     Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: root.panel-height;
         background: Palette.panel;
         border-width: 1px;
         border-color: root.mode == HudMode.error ? Palette.amber : Palette.hairline;
@@ -70,6 +76,10 @@ export component Hud inherits Window {
 
     // ===== RUNNING: timer hero + secondary cluster (packed left, no gap) =====
     running-layer := Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: root.panel-height;
         opacity: root.running ? 1 : 0;
         animate opacity { duration: 160ms; }
         visible: running-layer.opacity > 0.01;
@@ -90,12 +100,11 @@ export component Hud inherits Window {
             }
 
             // secondary cluster (cost frame + lap) — dims out while the
-            // hover toolbar is shown so the two don't clash.
+            // external hover toolbar is shown below the panel, so the readout
+            // remains stable and never gives up internal HUD space.
             VerticalLayout {
                 alignment: center;
                 spacing: 0px;
-                opacity: root.show-controls ? 0 : 1;
-                animate opacity { duration: 140ms; }
                 HorizontalLayout {
                     alignment: start;
                     spacing: 0px;
@@ -128,6 +137,10 @@ export component Hud inherits Window {
 
     // ===== CALIBRATING: thin progress line + percent =====
     cal-layer := Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: root.panel-height;
         opacity: root.mode == HudMode.calibrating ? 1 : 0;
         animate opacity { duration: 160ms; }
         visible: cal-layer.opacity > 0.01;
@@ -160,6 +173,10 @@ export component Hud inherits Window {
 
     // ===== IDLE / PRECAL / ERROR / BOOTING: message =====
     msg-layer := Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: root.panel-height;
         opacity: (root.running || root.mode == HudMode.calibrating) ? 0 : 1;
         animate opacity { duration: 160ms; }
         visible: msg-layer.opacity > 0.01;
@@ -182,6 +199,10 @@ export component Hud inherits Window {
     // As a TouchArea, hover-state propagates to children, so moving onto a
     // button keeps `hover.has-hover` true (no reveal/hide flicker).
     hover := TouchArea {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
         clicked => {
             if (root.mode == HudMode.precal) {
                 root.start-clicked();
@@ -196,12 +217,13 @@ export component Hud inherits Window {
             }
         }
 
-        // hover-revealed control toolbar (running only), solid background.
+        // Hover-revealed control toolbar (running only). It sits below the
+        // primary HUD panel, so it never covers or compresses the readout.
         Rectangle {
             width: 108px;
-            height: 24px;
+            height: root.toolbar-height;
             x: parent.width - self.width - 4px;
-            y: parent.height - self.height - 4px;
+            y: root.panel-height + 2px;
             background: Palette.toolbar;
             border-width: 1px;
             border-color: Palette.hairline;

@@ -22,6 +22,8 @@ mod worker;
 
 use app::RulerApp;
 
+const ICU_PROVIDER_ERROR_LOG_TARGET: &str = "icu_provider::error";
+
 fn main() {
     enable_dpi_awareness();
     let debug = std::env::args().any(|a| a == "--debug" || a == "-d");
@@ -38,9 +40,15 @@ fn main() {
 
 fn init_logging() {
     let env = env_logger::Env::default().filter_or("RUST_LOG", "info");
-    env_logger::Builder::from_env(env)
+    let mut builder = env_logger::Builder::from_env(env);
+    configure_logging(&mut builder);
+    builder.init();
+}
+
+fn configure_logging(builder: &mut env_logger::Builder) {
+    builder
         .format_timestamp_millis()
-        .init();
+        .filter_module(ICU_PROVIDER_ERROR_LOG_TARGET, log::LevelFilter::Error);
 }
 
 #[cfg(windows)]
@@ -145,4 +153,40 @@ fn run(debug: bool) -> Result<(), app::StartupError> {
 
     let app = RulerApp::build(debug)?;
     app.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::{Level, Log, Metadata};
+
+    fn logger_with_filter(filter: &str) -> env_logger::Logger {
+        let mut builder = env_logger::Builder::new();
+        builder.parse_filters(filter);
+        configure_logging(&mut builder);
+        builder.build()
+    }
+
+    #[test]
+    fn suppresses_known_icu4x_segmentation_warning() {
+        let logger = logger_with_filter("info");
+
+        let icu_warning = Metadata::builder()
+            .target(ICU_PROVIDER_ERROR_LOG_TARGET)
+            .level(Level::Warn)
+            .build();
+        assert!(!logger.enabled(&icu_warning));
+
+        let icu_error = Metadata::builder()
+            .target(ICU_PROVIDER_ERROR_LOG_TARGET)
+            .level(Level::Error)
+            .build();
+        assert!(logger.enabled(&icu_error));
+
+        let app_warning = Metadata::builder()
+            .target("ruler_app::app")
+            .level(Level::Warn)
+            .build();
+        assert!(logger.enabled(&app_warning));
+    }
 }

@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 env_logger = "0.11"
+# Keep ICU4X diagnostic output on the `log` facade instead of debug-build stderr.
+icu_provider = { version = "2", default-features = false, features = ["logging"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 ruler-core = { path = "../ruler-core" }

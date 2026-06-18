@@ -16,6 +16,7 @@ pub enum BattleState {
     PointTwoXPaused,
     OneXPaused,
     TwoXPaused,
+    BattleBegin,
     BeforeOrAfterBattle,
     NotInBattle,
 }
@@ -29,6 +30,7 @@ impl BattleState {
             Self::PointTwoXPaused => "0.2x_paused",
             Self::OneXPaused => "1x_paused",
             Self::TwoXPaused => "2x_paused",
+            Self::BattleBegin => "battle_begin",
             Self::BeforeOrAfterBattle => "before_or_after_battle",
             Self::NotInBattle => "not_in_battle",
         }
@@ -114,6 +116,20 @@ const TAKEOVER_OVERLAY_TOP_REF: f64 = 610.0;
 const TAKEOVER_OVERLAY_BOTTOM_REF: f64 = 696.0;
 const TAKEOVER_OVERLAY_BRIGHT_THRESHOLD: u8 = 150;
 const TAKEOVER_OVERLAY_BRIGHT_MIN: f64 = 350.0;
+
+const BATTLE_BEGIN_TOP_RIGHT_DIM_MAX: f64 = 2.0;
+const BATTLE_BEGIN_WHITE_MIN: u8 = 210;
+const BATTLE_BEGIN_WHITE_TOLERANCE: u8 = 45;
+const BATTLE_BEGIN_DARK_MAX_SUM: u16 = 150;
+const BATTLE_BEGIN_SAMPLE_STEP_SCALE: f64 = 14.0;
+const BATTLE_BEGIN_SIDE_AVG_MAX: u64 = 28;
+const BATTLE_BEGIN_SIDE_DARK_RATIO_NUMERATOR: u32 = 99;
+const BATTLE_BEGIN_SIDE_DARK_RATIO_DENOMINATOR: u32 = 100;
+const BATTLE_BEGIN_TOP_WHITE_MAX: u32 = 0;
+const BATTLE_BEGIN_OPERATION_WHITE_PERMYRIAD_MIN: u32 = 70;
+const BATTLE_BEGIN_CODE_WHITE_PERMYRIAD_MIN: u32 = 350;
+const BATTLE_BEGIN_TITLE_WHITE_PERMYRIAD_MIN: u32 = 180;
+const BATTLE_BEGIN_BOTTOM_WHITE_PERMYRIAD_MIN: u32 = 90;
 
 #[inline(always)]
 fn read_pixel(
@@ -230,6 +246,46 @@ enum SpeedButtonState {
 enum PauseButtonState {
     Running,
     Paused,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BattleBeginBandStats {
+    total: u32,
+    white: u32,
+    dark: u32,
+    brightness_sum: u64,
+}
+
+impl BattleBeginBandStats {
+    #[inline]
+    fn white_permyriad(self) -> u32 {
+        if self.total == 0 {
+            0
+        } else {
+            self.white.saturating_mul(10_000) / self.total
+        }
+    }
+
+    #[inline]
+    fn avg_brightness(self) -> u64 {
+        if self.total == 0 {
+            u64::MAX
+        } else {
+            self.brightness_sum / (self.total as u64 * 3)
+        }
+    }
+
+    #[inline]
+    fn is_mostly_dark(self) -> bool {
+        self.total > 0
+            && self
+                .dark
+                .saturating_mul(BATTLE_BEGIN_SIDE_DARK_RATIO_DENOMINATOR)
+                >= self
+                    .total
+                    .saturating_mul(BATTLE_BEGIN_SIDE_DARK_RATIO_NUMERATOR)
+            && self.avg_brightness() <= BATTLE_BEGIN_SIDE_AVG_MAX
+    }
 }
 
 #[inline]
@@ -474,6 +530,158 @@ fn has_takeover_overlay(
     takeover_bright >= TAKEOVER_OVERLAY_BRIGHT_MIN
 }
 
+#[inline(always)]
+fn is_battle_begin_text_pixel(r: u8, g: u8, b: u8) -> bool {
+    r >= BATTLE_BEGIN_WHITE_MIN
+        && g >= BATTLE_BEGIN_WHITE_MIN
+        && b >= BATTLE_BEGIN_WHITE_MIN
+        && max_channel_delta(r, g, b) <= BATTLE_BEGIN_WHITE_TOLERANCE
+}
+
+#[inline(always)]
+fn max_channel_delta(r: u8, g: u8, b: u8) -> u8 {
+    let min = r.min(g).min(b);
+    let max = r.max(g).max(b);
+    max - min
+}
+
+fn sample_battle_begin_band(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    left_ratio: f64,
+    right_ratio: f64,
+    top_ratio: f64,
+    bottom_ratio: f64,
+    x_step: i32,
+    y_step: i32,
+) -> BattleBeginBandStats {
+    if width == 0 || height == 0 || x_step <= 0 || y_step <= 0 {
+        return BattleBeginBandStats::default();
+    }
+
+    let bytes_per_pixel = match format {
+        PixelFormat::Rgba => 4,
+        PixelFormat::Bgr => 3,
+    };
+    let stride = width as usize * bytes_per_pixel;
+    let min_len = stride.saturating_mul(height as usize);
+    if buffer.len() < min_len {
+        return BattleBeginBandStats::default();
+    }
+
+    let left = (width as f64 * left_ratio).round() as i32;
+    let right = (width as f64 * right_ratio).round() as i32;
+    let top = (height as f64 * top_ratio).round() as i32;
+    let bottom = (height as f64 * bottom_ratio).round() as i32;
+    let rect = Rect {
+        left: left.clamp(0, width as i32),
+        right: right.clamp(0, width as i32),
+        top: top.clamp(0, height as i32),
+        bottom: bottom.clamp(0, height as i32),
+    };
+    if rect.is_empty() {
+        return BattleBeginBandStats::default();
+    }
+
+    let mut stats = BattleBeginBandStats::default();
+    let mut y = rect.top;
+    while y < rect.bottom {
+        let row = (height as i32 - 1 - y) as usize;
+        let mut offset = row * stride + rect.left as usize * bytes_per_pixel;
+        let mut x = rect.left;
+        while x < rect.right {
+            let (r, g, b) = match format {
+                PixelFormat::Rgba => (buffer[offset], buffer[offset + 1], buffer[offset + 2]),
+                PixelFormat::Bgr => (buffer[offset + 2], buffer[offset + 1], buffer[offset]),
+            };
+            let brightness = r as u16 + g as u16 + b as u16;
+            stats.total += 1;
+            stats.brightness_sum += brightness as u64;
+            if brightness <= BATTLE_BEGIN_DARK_MAX_SUM {
+                stats.dark += 1;
+            }
+            if is_battle_begin_text_pixel(r, g, b) {
+                stats.white += 1;
+            }
+
+            x += x_step;
+            offset += bytes_per_pixel * x_step as usize;
+        }
+        y += y_step;
+    }
+
+    stats
+}
+
+fn has_battle_begin_title_screen(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    scale: f64,
+) -> bool {
+    let step = (scale * BATTLE_BEGIN_SAMPLE_STEP_SCALE).round().max(4.0) as i32;
+    let top_y_step = ((height as f64 * 0.10).round() as i32).max(step);
+
+    let top_clear = sample_battle_begin_band(
+        buffer,
+        width,
+        height,
+        format,
+        0.20,
+        0.80,
+        0.03,
+        0.34,
+        step * 2,
+        top_y_step,
+    );
+    if top_clear.white > BATTLE_BEGIN_TOP_WHITE_MAX {
+        return false;
+    }
+
+    let left_background = sample_battle_begin_band(
+        buffer, width, height, format, 0.03, 0.18, 0.40, 0.80, step, step,
+    );
+    if !left_background.is_mostly_dark() {
+        return false;
+    }
+
+    let right_background = sample_battle_begin_band(
+        buffer, width, height, format, 0.82, 0.97, 0.40, 0.80, step, step,
+    );
+    if !right_background.is_mostly_dark() {
+        return false;
+    }
+
+    let operation = sample_battle_begin_band(
+        buffer, width, height, format, 0.20, 0.80, 0.38, 0.47, step, step,
+    );
+    if operation.white_permyriad() < BATTLE_BEGIN_OPERATION_WHITE_PERMYRIAD_MIN {
+        return false;
+    }
+
+    let code = sample_battle_begin_band(
+        buffer, width, height, format, 0.25, 0.75, 0.46, 0.58, step, step,
+    );
+    if code.white_permyriad() < BATTLE_BEGIN_CODE_WHITE_PERMYRIAD_MIN {
+        return false;
+    }
+
+    let title = sample_battle_begin_band(
+        buffer, width, height, format, 0.20, 0.80, 0.56, 0.72, step, step,
+    );
+    if title.white_permyriad() < BATTLE_BEGIN_TITLE_WHITE_PERMYRIAD_MIN {
+        return false;
+    }
+
+    let bottom = sample_battle_begin_band(
+        buffer, width, height, format, 0.20, 0.80, 0.84, 0.99, step, step,
+    );
+    bottom.white_permyriad() >= BATTLE_BEGIN_BOTTOM_WHITE_PERMYRIAD_MIN
+}
+
 /// Classifies the top-right battle HUD into one of the [`BattleState`]s.
 ///
 /// Two glyph boxes drive everything: the pause/play button (the reliable
@@ -546,9 +754,7 @@ pub fn detect_battle_state(
             (SpeedButtonState::PointTwoX, PauseButtonState::Running) => {
                 BattleState::PointTwoXRunning
             }
-            (SpeedButtonState::PointTwoX, PauseButtonState::Paused) => {
-                BattleState::PointTwoXPaused
-            }
+            (SpeedButtonState::PointTwoX, PauseButtonState::Paused) => BattleState::PointTwoXPaused,
             (SpeedButtonState::OneX, PauseButtonState::Running) => BattleState::OneXRunning,
             (SpeedButtonState::OneX, PauseButtonState::Paused) => BattleState::OneXPaused,
             (SpeedButtonState::TwoX, PauseButtonState::Running) => BattleState::TwoXRunning,
@@ -559,8 +765,14 @@ pub fn detect_battle_state(
     let glyphs_dark = speed_bright < GLYPH_PRESENT_MAX && pause_bright < GLYPH_PRESENT_MAX;
     let buttons_present = speed_dim >= INIT_DIM_MIN && pause_dim <= INIT_DIM_MAX;
     if glyphs_dark
-        && buttons_present
-        && !has_takeover_overlay(buffer, width, height, format, scale)
+        && speed_dim <= BATTLE_BEGIN_TOP_RIGHT_DIM_MAX
+        && pause_dim <= BATTLE_BEGIN_TOP_RIGHT_DIM_MAX
+        && has_battle_begin_title_screen(buffer, width, height, format, scale)
+    {
+        return BattleState::BattleBegin;
+    }
+
+    if glyphs_dark && buttons_present && !has_takeover_overlay(buffer, width, height, format, scale)
     {
         return BattleState::BeforeOrAfterBattle;
     }

@@ -57,23 +57,57 @@ fn battle_button_detector_classifies_all_capture_samples() {
 }
 
 #[test]
-fn battle_button_detector_stays_under_30us_in_release() {
+fn battle_begin_detector_classifies_all_title_screen_samples() {
+    let fixtures = load_battle_begin_fixture_paths();
+    assert!(
+        !fixtures.is_empty(),
+        "expected PNG samples under tests/fixtures/battle_begin"
+    );
+
+    let mut mismatches = Vec::new();
+    for fixture in fixtures {
+        let sample = load_full_sample(&fixture.path, fixture.expected);
+        let actual =
+            detect_battle_state(&sample.data, sample.width, sample.height, PixelFormat::Rgba);
+        if actual != sample.expected {
+            mismatches.push(format!(
+                "{}: expected {:?}, got {:?}",
+                sample.path.display(),
+                sample.expected,
+                actual
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "wrong battle begin state for:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
+fn battle_button_detector_stays_under_15us_in_release() {
     if cfg!(debug_assertions) {
         return;
     }
 
-    let fixtures = load_fixture_paths();
-    assert!(
-        !fixtures.is_empty(),
-        "expected PNG samples under tests/fixtures/battle_buttons"
+    let mut samples = load_fixture_paths()
+        .into_iter()
+        .map(|fixture| load_sample(&fixture.path, fixture.expected))
+        .collect::<Vec<_>>();
+    samples.extend(
+        load_battle_begin_fixture_paths()
+            .into_iter()
+            .map(|fixture| load_full_sample(&fixture.path, fixture.expected)),
     );
+    assert!(!samples.is_empty(), "expected detector benchmark samples");
 
     let iterations = 1_000u128;
     let mut worst_avg_ns = 0u128;
     let mut worst_path = PathBuf::new();
 
-    for fixture in fixtures {
-        let sample = load_sample(&fixture.path, fixture.expected);
+    for sample in samples {
         let start = Instant::now();
         for _ in 0..iterations {
             black_box(detect_battle_state(
@@ -91,13 +125,13 @@ fn battle_button_detector_stays_under_30us_in_release() {
     }
 
     eprintln!(
-        "battle button detector worst sample average: {:.2}us ({})",
+        "battle state detector worst sample average: {:.2}us ({})",
         worst_avg_ns as f64 / 1000.0,
         worst_path.display()
     );
     assert!(
-        worst_avg_ns < 30_000,
-        "battle button detector exceeded 30us: {:.2}us for {}",
+        worst_avg_ns < 15_000,
+        "battle state detector exceeded 15us: {:.2}us for {}",
         worst_avg_ns as f64 / 1000.0,
         worst_path.display()
     );
@@ -146,6 +180,39 @@ fn load_fixture_paths() -> Vec<Fixture> {
     fixtures
 }
 
+fn load_battle_begin_fixture_paths() -> Vec<Fixture> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("battle_begin");
+    assert!(
+        root.is_dir(),
+        "missing battle begin fixture directory: {}",
+        root.display()
+    );
+    let mut fixtures = Vec::new();
+    let mut paths = fs::read_dir(&root)
+        .expect("failed to list battle begin fixtures")
+        .map(|entry| {
+            entry
+                .expect("failed to read battle begin fixture entry")
+                .path()
+        })
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    for path in paths {
+        fixtures.push(Fixture {
+            path,
+            expected: BattleState::BattleBegin,
+            one_x_or_garbage: false,
+        });
+    }
+
+    fixtures
+}
+
 fn load_sample(path: &Path, expected: BattleState) -> Sample {
     let (frame_width, frame_height) = parse_frame_size(path);
     let image = image::ImageReader::open(path)
@@ -177,6 +244,25 @@ fn load_sample(path: &Path, expected: BattleState) -> Sample {
         path: path.to_path_buf(),
         width: frame_width,
         height: frame_height,
+        data,
+        expected,
+    }
+}
+
+fn load_full_sample(path: &Path, expected: BattleState) -> Sample {
+    let image = image::ImageReader::open(path)
+        .unwrap_or_else(|e| panic!("failed to open {}: {e}", path.display()))
+        .decode()
+        .unwrap_or_else(|e| panic!("failed to decode {}: {e}", path.display()))
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    let mut data = image.into_raw();
+    flip_rows(&mut data, width, height, 4);
+
+    Sample {
+        path: path.to_path_buf(),
+        width,
+        height,
         data,
         expected,
     }

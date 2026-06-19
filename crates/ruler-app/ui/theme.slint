@@ -19,22 +19,22 @@ export global Palette {
     out property <color> danger: #ff6b5e;            // delete affordance
 }
 
-// Material-style outlined icon paths (24x24 viewbox, stroked, fill transparent).
+// Material Symbols Sharp paths from icons/material-symbols/sharp/*.svg.
 export global Icons {
-    out property <string> prev: "M16 6 L8 12 L16 18 M7 6 L7 18";
-    out property <string> next: "M8 6 L16 12 L8 18 M17 6 L17 18";
-    out property <string> chev-left: "M14 6 L8 12 L14 18";
-    out property <string> chev-right: "M10 6 L16 12 L10 18";
-    out property <string> flag: "M7 4 L7 20 M7 5 L16 8 L7 11";
-    out property <string> undo-reset: "M9 7 L4 12 L9 17 M5 12 H14 A5 5 0 1 1 14 22";
-    out property <string> reset: "M5 12 A7 7 0 1 0 8.5 6 M8.5 6 L5 5.5 M8.5 6 L8 9.5";
-    out property <string> plus: "M12 6 L12 18 M6 12 L18 12";
-    out property <string> play: "M9 6 L17 12 L9 18 Z";
-    out property <string> pencil: "M6 18 L6 14.5 L15.5 5 L19 8.5 L9.5 18 Z";
-    out property <string> cross: "M7 7 L17 17 M17 7 L7 17";
-    out property <string> check: "M5 12.5 L10 17.5 L19 6.5";
-    out property <string> info: "M12 5 A7 7 0 1 0 12.01 5 M12 11 L12 16.5";
-    out property <string> power: "M12 4 L12 11 M6.5 8 A7 7 0 1 0 17.5 8";
+    out property <string> prev: "M220-240v-480h80v480h-80Zm520 0L380-480l360-240v480Zm-80-240Zm0 90v-180l-136 90 136 90Z";
+    out property <string> next: "M660-240v-480h80v480h-80Zm-440 0v-480l360 240-360 240Zm80-240Zm0 90 136-90-136-90v180Z";
+    out property <string> chev-left: "M560-240 320-480l240-240 56 56-184 184 184 184-56 56Z";
+    out property <string> chev-right: "M504-480 320-664l56-56 240 240-240 240-56-56 184-184Z";
+    out property <string> flag: "M200-120v-680h360l16 80h224v400H520l-16-80H280v280h-80Zm300-440Zm86 160h134v-240H510l-16-80H280v240h290l16 80Z";
+    out property <string> undo-reset: "M280-200v-80h284q63 0 109.5-40T720-420q0-60-46.5-100T564-560H312l104 104-56 56-200-200 200-200 56 56-104 104h252q97 0 166.5 63T800-420q0 94-69.5 157T564-200H280Z";
+    out property <string> reset: "M440-122q-121-15-200.5-105.5T160-440q0-66 26-126.5T260-672l57 57q-38 34-57.5 79T240-440q0 88 56 155.5T440-202v80Zm80 0v-80q87-16 143.5-83T720-440q0-100-70-170t-170-70h-3l44 44-56 56-140-140 140-140 56 56-44 44h3q134 0 227 93t93 227q0 121-79.5 211.5T520-122Z";
+    out property <string> plus: "M440-440H200v-80h240v-240h80v240h240v80H520v240h-80v-240Z";
+    out property <string> play: "M320-200v-560l440 280-440 280Zm80-280Zm0 134 210-134-210-134v268Z";
+    out property <string> pencil: "M200-200h57l391-391-57-57-391 391v57Zm-80 80v-170l585-583 167 171-582 582H120Zm640-584-56-56 56 56Zm-141 85-28-29 57 57-29-28Z";
+    out property <string> cross: "m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 224-56 56-224-224-224 224Z";
+    out property <string> check: "M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z";
+    out property <string> info: "M440-280h80v-240h-80v240Zm40-320q17 0 28.5-11.5T520-640q0-17-11.5-28.5T480-680q-17 0-28.5 11.5T440-640q0 17 11.5 28.5T480-600Zm0 520q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z";
+    out property <string> power: "M440-440v-400h80v400h-80Zm40 320q-74 0-139.5-28.5T226-226q-49-49-77.5-114.5T120-480q0-80 33-151t93-123l56 56q-48 40-75 97t-27 121q0 116 82 198t198 82q117 0 198.5-82T760-480q0-64-26.5-121T658-698l56-56q60 52 93 123t33 151q0 74-28.5 139.5t-77 114.5q-48.5 49-114 77.5T480-120Z";
 }
 
 // Small square icon button used by the HUD hover toolbar and the menu.
@@ -54,15 +54,15 @@ export component IconBtn inherits Rectangle {
         height: root.glyph;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        viewbox-width: 24;
-        viewbox-height: 24;
+        viewbox-x: 0;
+        viewbox-y: -960;
+        viewbox-width: 960;
+        viewbox-height: 960;
         commands: root.icon;
-        stroke: !root.enabled ? Palette.text-faint
+        fill: !root.enabled ? Palette.text-faint
             : root.danger ? Palette.danger
             : root.strong ? Palette.amber
             : (ta.has-hover ? Palette.text-primary : Palette.text-secondary);
-        stroke-width: 2px;
-        fill: transparent;
     }
     ta := TouchArea {
         enabled: root.enabled;

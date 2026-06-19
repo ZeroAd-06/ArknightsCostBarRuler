@@ -273,12 +273,12 @@ export component Wizard inherits Window {
                         height: 14px;
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
-                        viewbox-width: 24;
-                        viewbox-height: 24;
+                        viewbox-x: 0;
+                        viewbox-y: -960;
+                        viewbox-width: 960;
+                        viewbox-height: 960;
                         commands: Icons.check;
-                        stroke: Palette.text-primary;
-                        stroke-width: 2.5px;
-                        fill: transparent;
+                        fill: Palette.text-primary;
                     }
                     cta := TouchArea {
                         clicked => { root.auto-checked = !root.auto-checked; }
@@ -328,12 +328,12 @@ export component Wizard inherits Window {
                             height: 12px;
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
-                            viewbox-width: 24;
-                            viewbox-height: 24;
+                            viewbox-x: 0;
+                            viewbox-y: -960;
+                            viewbox-width: 960;
+                            viewbox-height: 960;
                             commands: Icons.check;
-                            stroke: Palette.text-primary;
-                            stroke-width: 2.5px;
-                            fill: transparent;
+                            fill: Palette.text-primary;
                         }
                         rva := TouchArea {
                             clicked => { root.record-video = !root.record-video; }
@@ -367,12 +367,12 @@ export component Wizard inherits Window {
                             height: 12px;
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
-                            viewbox-width: 24;
-                            viewbox-height: 24;
+                            viewbox-x: 0;
+                            viewbox-y: -960;
+                            viewbox-width: 960;
+                            viewbox-height: 960;
                             commands: Icons.check;
-                            stroke: Palette.text-primary;
-                            stroke-width: 2.5px;
-                            fill: transparent;
+                            fill: Palette.text-primary;
                         }
                         rca := TouchArea {
                             clicked => { root.record-csv = !root.record-csv; }

@@ -1,5 +1,5 @@
 pub const FRAMES_PER_SECOND: i32 = 30;
-pub const VERSION: &str = "v1.2.1";
+pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FrameDisplayMode {

@@ -154,7 +154,7 @@ fn main() {
     menu.set_cap_cancel("取消".into());
     menu.set_cap_delete("删除".into());
     menu.set_label_new("新建".into());
-    menu.set_about_text("v1.2.1 by Z_06".into());
+    menu.set_about_text(format!("v{} by Z_06", env!("CARGO_PKG_VERSION")).into());
 
     let menu_w_logical = 300.0_f32;
     let menu_h_logical = 190.0 + 30.0 * n as f32;

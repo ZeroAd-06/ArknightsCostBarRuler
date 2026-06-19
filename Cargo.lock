@@ -3942,7 +3942,7 @@ dependencies = [
 
 [[package]]
 name = "ruler-app"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "env_logger",
  "icu_provider",
@@ -3961,7 +3961,7 @@ dependencies = [
 
 [[package]]
 name = "ruler-core"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "crossbeam-channel",
  "image",
@@ -3973,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "ruler-pyo3"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "pyo3",
  "ruler-core",
@@ -3981,7 +3981,7 @@ dependencies = [
 
 [[package]]
 name = "ruler-recorder"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "ruler-core",
 ]

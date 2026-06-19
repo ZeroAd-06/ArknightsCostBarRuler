@@ -11,7 +11,10 @@ use std::{
 };
 
 use ruler_core::{
-    analysis::{calibration::infer_calibration_from_samples, scanner},
+    analysis::{
+        calibration::infer_calibration_from_samples,
+        scanner::{self, BattleState},
+    },
     RulerConfig, RulerEngine,
 };
 
@@ -725,15 +728,27 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                     };
                     context.last_total_frames = result.total_frames_in_cycle;
                     context.last_cost_is_negative = result.cost_is_negative;
-                    if result.logical_frame.is_some() {
+                    if result.battle_state == BattleState::BattleBegin {
+                        if context.last_elapsed_frames != result.elapsed_frames {
+                            context
+                                .timer_reset_undo
+                                .remember_reset(context.last_elapsed_frames);
+                        }
+                        context.last_elapsed_frames = result.elapsed_frames;
+                        context.lap_start_frame = None;
+                    } else if result.logical_frame.is_some() {
                         context.last_elapsed_frames = result.elapsed_frames;
                     }
                     let display_frame = context.display_mode.display_frame(result.logical_frame);
-                    let display_total = display_total_with_cost_marker(
-                        context.display_mode,
-                        result.total_frames_in_cycle,
-                        result.cost_is_negative,
-                    );
+                    let display_total = if result.total_frames_in_cycle > 0 {
+                        display_total_with_cost_marker(
+                            context.display_mode,
+                            result.total_frames_in_cycle,
+                            result.cost_is_negative,
+                        )
+                    } else {
+                        "/--".to_string()
+                    };
                     let lap_frames = context
                         .lap_start_frame
                         .map(|start| context.last_elapsed_frames - start);

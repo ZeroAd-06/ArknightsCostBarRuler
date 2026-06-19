@@ -32,6 +32,10 @@ pub struct RulerEngine {
     /// `BeforeOrAfterBattle` flicker of a mid-battle overlay (deployment slow-mo,
     /// pause/settings menu). Reset to zero the instant a battle is in progress.
     out_of_battle_frames: u32,
+    /// A `BattleBegin` title screen can span many frames. Arm this after seeing
+    /// an active battle so the title screen resets the timer once, while still
+    /// letting the user undo that reset before the next battle begins.
+    battle_begin_reset_armed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -88,6 +92,7 @@ impl RulerEngine {
             last_known_cycle_total_frames: 0,
             last_known_cost_is_negative: false,
             out_of_battle_frames: 0,
+            battle_begin_reset_armed: true,
         }
     }
 
@@ -212,6 +217,7 @@ impl RulerEngine {
         self.last_known_cost_is_negative = false;
         self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
         self.out_of_battle_frames = 0;
+        self.battle_begin_reset_armed = true;
     }
 
     fn analyze_frame(
@@ -234,6 +240,13 @@ impl RulerEngine {
         battle_state: BattleState,
     ) -> Result<FrameResult, String> {
         let battle_state = self.apply_battle_state_context(battle_state);
+
+        if battle_state.is_in_battle() {
+            self.battle_begin_reset_armed = true;
+        } else if battle_state == BattleState::BattleBegin && self.battle_begin_reset_armed {
+            self.reset_timer();
+            self.battle_begin_reset_armed = false;
+        }
 
         if self.calibration.is_none() {
             return Err("No calibration loaded".to_string());
@@ -608,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_battle_banner_keeps_elapsed_time_when_a_new_battle_starts() {
+    fn pre_battle_banner_keeps_elapsed_time_until_battle_begin() {
         let mut engine = engine_with_profiles(&[30]);
 
         // A battle runs, ends into settlement/menu, then the next battle's
@@ -633,6 +646,55 @@ mod tests {
         assert_eq!(result.logical_frame, Some(5));
         assert_eq!(result.total_frames_in_cycle, 30);
         assert_eq!(result.elapsed_frames, 20);
+    }
+
+    #[test]
+    fn battle_begin_resets_elapsed_time_for_next_battle() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 20, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
+        assert_eq!(result.battle_state, BattleState::BattleBegin);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.raw_pixel_width, None);
+        assert_eq!(result.total_frames_in_cycle, 0);
+        assert_eq!(result.elapsed_frames, 0);
+
+        let result = analyze_width(&mut engine, 0, false);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 0);
+
+        let result = analyze_width(&mut engine, 5, false);
+        assert_eq!(result.logical_frame, Some(5));
+        assert_eq!(result.elapsed_frames, 5);
+    }
+
+    #[test]
+    fn battle_begin_reset_happens_once_so_undo_can_survive_title_screen() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 20, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
+        assert_eq!(result.elapsed_frames, 0);
+
+        engine.adjust_timer(20);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
+        assert_eq!(result.battle_state, BattleState::BattleBegin);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width(&mut engine, 0, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width(&mut engine, 5, false);
+        assert_eq!(result.elapsed_frames, 25);
     }
 
     #[test]

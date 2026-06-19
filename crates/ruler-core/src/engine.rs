@@ -333,7 +333,13 @@ impl RulerEngine {
                     self.previous_phase = Some(current_phase);
                 }
             } else {
-                self.previous_phase = None;
+                // The cost bar is momentarily unreadable while still in a battle
+                // state (deployment slow-mo, or the fade in/out of the
+                // pause/settings menu). Preserve the existing phase anchor here,
+                // mirroring the `NotInBattle` path above. Clearing it would let
+                // the first false `phase == 0` frame on resume become a fresh
+                // anchor, so the real phase reappearing afterwards is miscounted
+                // as forward progress and inflates the elapsed time.
             }
 
             (
@@ -864,6 +870,43 @@ mod tests {
         assert_eq!(result.logical_frame, Some(6));
         assert_eq!(result.total_frames_in_cycle, 30);
         assert_eq!(result.elapsed_frames, 6);
+    }
+
+    #[test]
+    fn unreadable_bar_in_paused_battle_preserves_phase_anchor_across_settings() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        // Battle runs and the bar advances to phase 0.233 (frame 7), i.e. the
+        // user opens settings *before* the bar reaches half.
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 7, false);
+        assert_eq!(result.logical_frame, Some(7));
+        assert_eq!(result.elapsed_frames, 7);
+
+        // The settings menu is up and the game is paused. For a couple of frames
+        // the cost bar is still classified as an in-battle (paused) state but is
+        // momentarily unreadable (the menu fade obscures it). The phase anchor
+        // must survive this; clearing it is what used to corrupt the timer.
+        let result = analyze_width_with_state(&mut engine, 40, false, BattleState::OneXPaused);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.elapsed_frames, 7);
+
+        // Then the menu settles into a NotInBattle stretch.
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+        assert_eq!(result.elapsed_frames, 7);
+
+        // On exit, the resume fade briefly reports a false `phase == 0` frame.
+        // With the anchor preserved at 0.233 this rewind is rejected, so the
+        // timer does not re-anchor to zero.
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::OneXRunning);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.elapsed_frames, 7);
+
+        // The real phase reappears (0.467). Only the genuine 0.233 -> 0.467
+        // advance is counted (+7); the false zero must not inflate it to +14.
+        let result = analyze_width_with_state(&mut engine, 14, false, BattleState::OneXRunning);
+        assert_eq!(result.logical_frame, Some(14));
+        assert_eq!(result.elapsed_frames, 14);
     }
 
     fn engine_with_profiles(total_frames: &[i32]) -> RulerEngine {

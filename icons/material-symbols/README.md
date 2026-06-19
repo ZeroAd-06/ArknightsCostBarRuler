@@ -6,8 +6,9 @@ The SVG files in `sharp/` are downloaded from Google Material Symbols Sharp:
 
 License: Apache-2.0, covered by `LICENSES/LICENSE-material-design-icons.txt`.
 
-The top-level `icons/*.png` files are 60x60 PNG renders of the same Material
-Symbols Sharp set, using the UI primary text color `#eef6fb`.
+The top-level `icons/*.png` files, except `deco.png`, are 60x60 PNG renders of
+the same Material Symbols Sharp set, using the UI primary text color `#eef6fb`.
+`deco.png` is the legacy app/tray icon.
 
 Slint mapping:
 
@@ -34,7 +35,6 @@ PNG mapping:
 | --- | --- |
 | `add.png` | `bookmark_add` |
 | `color.png` | `palette` |
-| `deco.png` | `speed` |
 | `magnet_off.png` | `link_off` |
 | `magnet_on.png` | `link` |
 | `node.png` | `open_with` |

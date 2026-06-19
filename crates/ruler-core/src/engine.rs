@@ -36,6 +36,10 @@ pub struct RulerEngine {
     /// an active battle so the title screen resets the timer once, while still
     /// letting the user undo that reset before the next battle begins.
     battle_begin_reset_armed: bool,
+    /// After an automatic `BattleBegin` reset, the first readable in-battle cost
+    /// bar may already be a few frames into the cycle. Count that first phase
+    /// once so entering battle does not lose the frames before the first sample.
+    pending_battle_start_phase: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -93,6 +97,7 @@ impl RulerEngine {
             last_known_cost_is_negative: false,
             out_of_battle_frames: 0,
             battle_begin_reset_armed: true,
+            pending_battle_start_phase: false,
         }
     }
 
@@ -185,6 +190,7 @@ impl RulerEngine {
         self.last_known_cycle_total_frames = 0;
         self.last_known_cost_is_negative = false;
         self.previous_phase = None;
+        self.pending_battle_start_phase = false;
     }
 
     pub fn adjust_timer(&mut self, frames: i32) {
@@ -218,6 +224,7 @@ impl RulerEngine {
         self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
         self.out_of_battle_frames = 0;
         self.battle_begin_reset_armed = true;
+        self.pending_battle_start_phase = false;
     }
 
     fn analyze_frame(
@@ -246,6 +253,7 @@ impl RulerEngine {
         } else if battle_state == BattleState::BattleBegin && self.battle_begin_reset_armed {
             self.reset_timer();
             self.battle_begin_reset_armed = false;
+            self.pending_battle_start_phase = true;
         }
 
         if self.calibration.is_none() {
@@ -308,13 +316,22 @@ impl RulerEngine {
             });
 
             if let Some(current_phase) = current_phase {
-                if let Some(previous_phase) = self.previous_phase {
-                    let phase_delta = phase_delta(previous_phase, current_phase);
+                if self.pending_battle_start_phase && self.previous_phase.is_none() {
                     self.elapsed_frames +=
-                        phase_delta * previous_phase.effective_total_frames() as f64;
+                        current_phase.phase * current_phase.effective_total_frames() as f64;
                     self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
+                    self.pending_battle_start_phase = false;
+                    self.previous_phase = Some(current_phase);
+                } else if let Some(previous_phase) = self.previous_phase {
+                    if let Some(phase_delta) = phase_delta(previous_phase, current_phase) {
+                        self.elapsed_frames +=
+                            phase_delta * previous_phase.effective_total_frames() as f64;
+                        self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
+                        self.previous_phase = Some(current_phase);
+                    }
+                } else {
+                    self.previous_phase = Some(current_phase);
                 }
-                self.previous_phase = Some(current_phase);
             } else {
                 self.previous_phase = None;
             }
@@ -410,12 +427,17 @@ fn is_natural_cycle_wrap(previous: PhaseSample, current_phase: f64) -> bool {
     previous.phase > 0.75 && current_phase < 0.25
 }
 
-fn phase_delta(previous: PhaseSample, current: PhaseSample) -> f64 {
-    let mut delta = current.phase - previous.phase;
+fn phase_delta(previous: PhaseSample, current: PhaseSample) -> Option<f64> {
+    let raw_delta = current.phase - previous.phase;
+    if (-0.5..0.0).contains(&raw_delta) {
+        return None;
+    }
+
+    let mut delta = raw_delta;
     if delta < -0.5 {
         delta += 1.0;
     }
-    delta.max(0.0)
+    Some(delta.max(0.0))
 }
 
 fn rounded_frame_count(frames: f64) -> i32 {
@@ -674,6 +696,22 @@ mod tests {
     }
 
     #[test]
+    fn first_detected_phase_after_battle_begin_counts_entering_frames() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
+        assert_eq!(result.elapsed_frames, 0);
+
+        let result = analyze_width_with_state(&mut engine, 3, false, BattleState::OneXRunning);
+        assert_eq!(result.logical_frame, Some(3));
+        assert_eq!(result.elapsed_frames, 3);
+
+        let result = analyze_width_with_state(&mut engine, 6, false, BattleState::OneXRunning);
+        assert_eq!(result.logical_frame, Some(6));
+        assert_eq!(result.elapsed_frames, 6);
+    }
+
+    #[test]
     fn battle_begin_reset_happens_once_so_undo_can_survive_title_screen() {
         let mut engine = engine_with_profiles(&[30]);
 
@@ -695,6 +733,26 @@ mod tests {
 
         let result = analyze_width(&mut engine, 5, false);
         assert_eq!(result.elapsed_frames, 25);
+    }
+
+    #[test]
+    fn settings_return_does_not_reanchor_on_non_natural_phase_rewind() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 6, false);
+        assert_eq!(result.elapsed_frames, 6);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
+        assert_eq!(result.elapsed_frames, 6);
+
+        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::OneXRunning);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.elapsed_frames, 6);
+
+        let result = analyze_width_with_state(&mut engine, 14, false, BattleState::OneXRunning);
+        assert_eq!(result.logical_frame, Some(14));
+        assert_eq!(result.elapsed_frames, 14);
     }
 
     #[test]

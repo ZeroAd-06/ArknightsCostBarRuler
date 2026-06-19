@@ -52,6 +52,8 @@ export component RulerMenu inherits Window {
 
     // shared row metric (logical px) — mirror in overlay.rs
     property <length> row-h: 30px;
+    property <length> control-h: 22px;
+    property <length> icon-glyph: 16px;
     property <length> cap-w: 58px;
 
     // ---- panel ----
@@ -79,6 +81,8 @@ export component RulerMenu inherits Window {
         Rectangle {
             height: root.row-h;
             HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 spacing: 6px;
                 Text {
                     text: root.cap-calibration;
@@ -90,7 +94,7 @@ export component RulerMenu inherits Window {
                 }
                 new-btn := Rectangle {
                     width: 78px;
-                    height: 22px;
+                    height: root.control-h;
                     border-width: 1px;
                     border-color: Palette.hairline-faint;
                     background: nta.has-hover ? Palette.hover-fill : transparent;
@@ -103,10 +107,10 @@ export component RulerMenu inherits Window {
                         // Path wrapped in a stretching Rectangle: x/y centering is
                         // ignored on a direct layout child, so center it inside.
                         Rectangle {
-                            width: 13px;
+                            width: root.icon-glyph;
                             Path {
-                                width: 13px;
-                                height: 13px;
+                                width: root.icon-glyph;
+                                height: root.icon-glyph;
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
                                 viewbox-x: 0;
@@ -153,6 +157,8 @@ export component RulerMenu inherits Window {
 
             // ---- normal ----
             if (root.editing-index != idx && root.deleting-index != idx): HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 padding-left: 2px;
                 spacing: 3px;
                 Rectangle {
@@ -183,7 +189,8 @@ export component RulerMenu inherits Window {
                 }
                 IconBtn {
                     icon: Icons.pencil;
-                    glyph: 14px;
+                    height: root.control-h;
+                    glyph: root.icon-glyph;
                     clicked => {
                         root.deleting-index = -1;
                         root.editing-index = idx;
@@ -191,7 +198,8 @@ export component RulerMenu inherits Window {
                 }
                 IconBtn {
                     icon: Icons.cross;
-                    glyph: 14px;
+                    height: root.control-h;
+                    glyph: root.icon-glyph;
                     danger: true;
                     clicked => {
                         root.editing-index = -1;
@@ -202,6 +210,8 @@ export component RulerMenu inherits Window {
 
             // ---- inline rename ----
             if (root.editing-index == idx): HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 padding-left: 2px;
                 spacing: 3px;
                 Rectangle {
@@ -217,8 +227,7 @@ export component RulerMenu inherits Window {
                 }
                 Rectangle {
                     horizontal-stretch: 1;
-                    height: 22px;
-                    y: (parent.height - self.height) / 2;
+                    height: root.control-h;
                     border-width: 1px;
                     border-color: Palette.accent;
                     background: #ffffff10;
@@ -250,7 +259,8 @@ export component RulerMenu inherits Window {
                 }
                 IconBtn {
                     icon: Icons.check;
-                    glyph: 14px;
+                    height: root.control-h;
+                    glyph: root.icon-glyph;
                     clicked => {
                         if (edit.text != "") {
                             root.commit-rename(idx, edit.text);
@@ -260,13 +270,16 @@ export component RulerMenu inherits Window {
                 }
                 IconBtn {
                     icon: Icons.cross;
-                    glyph: 14px;
+                    height: root.control-h;
+                    glyph: root.icon-glyph;
                     clicked => { root.editing-index = -1; }
                 }
             }
 
             // ---- inline delete confirm ----
             if (root.deleting-index == idx): HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 padding-left: 2px;
                 spacing: 4px;
                 Rectangle {
@@ -290,7 +303,7 @@ export component RulerMenu inherits Window {
                 }
                 Rectangle {
                     width: 50px;
-                    height: 22px;
+                    height: root.control-h;
                     border-width: 1px;
                     border-color: Palette.hairline-faint;
                     background: cancel-ta.has-hover ? Palette.hover-fill : transparent;
@@ -308,7 +321,7 @@ export component RulerMenu inherits Window {
                 }
                 Rectangle {
                     width: 50px;
-                    height: 22px;
+                    height: root.control-h;
                     border-width: 1px;
                     border-color: Palette.danger;
                     background: del-ta.has-hover ? Palette.danger.with-alpha(0.24) : Palette.danger.with-alpha(0.12);
@@ -346,6 +359,8 @@ export component RulerMenu inherits Window {
         Rectangle {
             height: root.row-h;
             HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 spacing: 6px;
                 Text {
                     text: root.cap-display;
@@ -358,16 +373,19 @@ export component RulerMenu inherits Window {
                 HorizontalLayout {
                     spacing: 5px;
                     Chip {
+                        height: root.control-h;
                         label: "0/n-1";
                         selected: root.display-mode == 0;
                         clicked => { root.set-display(0); }
                     }
                     Chip {
+                        height: root.control-h;
                         label: "0/n";
                         selected: root.display-mode == 1;
                         clicked => { root.set-display(1); }
                     }
                     Chip {
+                        height: root.control-h;
                         label: "1/n";
                         selected: root.display-mode == 2;
                         clicked => { root.set-display(2); }
@@ -381,6 +399,8 @@ export component RulerMenu inherits Window {
         Rectangle {
             height: root.row-h;
             HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 spacing: 6px;
                 Text {
                     text: root.cap-scale;
@@ -393,21 +413,25 @@ export component RulerMenu inherits Window {
                 HorizontalLayout {
                     spacing: 5px;
                     Chip {
+                        height: root.control-h;
                         label: "75%";
                         selected: root.scale-index == 0;
                         clicked => { root.set-scale(0); }
                     }
                     Chip {
+                        height: root.control-h;
                         label: "100%";
                         selected: root.scale-index == 1;
                         clicked => { root.set-scale(1); }
                     }
                     Chip {
+                        height: root.control-h;
                         label: "125%";
                         selected: root.scale-index == 2;
                         clicked => { root.set-scale(2); }
                     }
                     Chip {
+                        height: root.control-h;
                         label: "150%";
                         selected: root.scale-index == 3;
                         clicked => { root.set-scale(3); }
@@ -421,6 +445,8 @@ export component RulerMenu inherits Window {
         Rectangle {
             height: root.row-h;
             HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 spacing: 6px;
                 Text {
                     text: root.cap-timer;
@@ -433,12 +459,48 @@ export component RulerMenu inherits Window {
                 HorizontalLayout {
                     spacing: 2px;
                     alignment: start;
-                    IconBtn { icon: Icons.prev; enabled: root.timer-enabled; clicked => { root.timer-action(0); } }
-                    IconBtn { icon: Icons.chev-left; enabled: root.timer-enabled; clicked => { root.timer-action(1); } }
-                    IconBtn { icon: Icons.undo-reset; enabled: root.undo-reset-enabled; clicked => { root.timer-action(5); } }
-                    IconBtn { icon: Icons.reset; enabled: root.timer-enabled; clicked => { root.timer-action(2); } }
-                    IconBtn { icon: Icons.chev-right; enabled: root.timer-enabled; clicked => { root.timer-action(3); } }
-                    IconBtn { icon: Icons.next; enabled: root.timer-enabled; clicked => { root.timer-action(4); } }
+                    IconBtn {
+                        icon: Icons.prev;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        enabled: root.timer-enabled;
+                        clicked => { root.timer-action(0); }
+                    }
+                    IconBtn {
+                        icon: Icons.chev-left;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        enabled: root.timer-enabled;
+                        clicked => { root.timer-action(1); }
+                    }
+                    IconBtn {
+                        icon: Icons.undo-reset;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        enabled: root.undo-reset-enabled;
+                        clicked => { root.timer-action(5); }
+                    }
+                    IconBtn {
+                        icon: Icons.reset;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        enabled: root.timer-enabled;
+                        clicked => { root.timer-action(2); }
+                    }
+                    IconBtn {
+                        icon: Icons.chev-right;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        enabled: root.timer-enabled;
+                        clicked => { root.timer-action(3); }
+                    }
+                    IconBtn {
+                        icon: Icons.next;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        enabled: root.timer-enabled;
+                        clicked => { root.timer-action(4); }
+                    }
                     Rectangle { }   // trailing spacer
                 }
             }
@@ -459,6 +521,8 @@ export component RulerMenu inherits Window {
         Rectangle {
             height: root.row-h;
             HorizontalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
                 spacing: 2px;
                 about-btn := Rectangle {
                     horizontal-stretch: 1;
@@ -496,7 +560,8 @@ export component RulerMenu inherits Window {
                 }
                 IconBtn {
                     icon: Icons.power;
-                    glyph: 13px;
+                    height: root.control-h;
+                    glyph: root.icon-glyph;
                     danger: true;
                     clicked => { root.exit(); }
                 }

@@ -217,6 +217,8 @@ mod platform {
         scale: f32,
         base_scale: f32,
         scale_mult: f32,
+        displayed_progress: f32,
+        last_mode: OverlayMode,
         // factory slot, used to claim windows for menu/dialog popups
         window_slot: WindowSlot,
         // tray icon bound to this window (Shell_NotifyIcon)
@@ -319,6 +321,8 @@ mod platform {
                 scale,
                 base_scale,
                 scale_mult,
+                displayed_progress: 0.0,
+                last_mode: OverlayMode::Booting,
                 window_slot: Rc::clone(&slot),
                 nid: NOTIFYICONDATAW::default(),
                 tray_icon: None,
@@ -625,35 +629,77 @@ mod platform {
         );
     }
 
-    fn sync_properties(state: &WindowState, ui: &crate::ui_state::UiSnapshot) {
-        let hud = &state.hud;
+    fn sync_properties(state: &mut WindowState, ui: &crate::ui_state::UiSnapshot) {
+        let displayed_progress = displayed_calibration_progress(state, ui);
+        let progress_text = displayed_progress.round().clamp(0.0, 100.0) as u8;
 
-        hud.set_mode(map_mode(&ui.mode));
-        hud.set_time_str(ui.time_str.as_str().into());
-        hud.set_frame_str(ui.display_frame.as_str().into());
-        hud.set_undo_reset_enabled(ui.can_undo_reset);
+        {
+            let hud = &state.hud;
 
-        let negative = ui.display_total.ends_with('*');
-        let total_clean = ui.display_total.trim_end_matches('*');
-        hud.set_total_str(total_clean.into());
-        hud.set_cost_negative(negative);
+            hud.set_mode(map_mode(&ui.mode));
+            hud.set_time_str(ui.time_str.as_str().into());
+            hud.set_frame_str(ui.display_frame.as_str().into());
+            hud.set_undo_reset_enabled(ui.can_undo_reset);
 
-        let lap = ui
-            .lap_frames
-            .map(|frames| frames.to_string())
-            .unwrap_or_default();
-        hud.set_lap_str(lap.into());
+            let negative = ui.display_total.ends_with('*');
+            let total_clean = ui.display_total.trim_end_matches('*');
+            hud.set_total_str(total_clean.into());
+            hud.set_cost_negative(negative);
 
-        hud.set_progress(f32::from(ui.progress_percent));
-        hud.set_progress_str(format!("{}%", ui.progress_percent).into());
+            let lap = ui
+                .lap_frames
+                .map(|frames| frames.to_string())
+                .unwrap_or_default();
+            hud.set_lap_str(lap.into());
 
-        let message = match ui.mode {
-            OverlayMode::Idle => state.i18n.tr("overlay.msg.idle"),
-            OverlayMode::PreCalibration => state.i18n.tr("overlay.msg.pre_cal"),
-            OverlayMode::Error | OverlayMode::Booting => ui.message.clone(),
-            _ => String::new(),
-        };
-        hud.set_message(message.into());
+            hud.set_progress(displayed_progress);
+            hud.set_progress_str(format!("{progress_text}%").into());
+
+            let message = match ui.mode {
+                OverlayMode::Idle => state.i18n.tr("overlay.msg.idle"),
+                OverlayMode::PreCalibration => state.i18n.tr("overlay.msg.pre_cal"),
+                OverlayMode::Error | OverlayMode::Booting => ui.message.clone(),
+                _ => String::new(),
+            };
+            hud.set_message(message.into());
+        }
+
+        state.last_mode = ui.mode.clone();
+    }
+
+    fn displayed_calibration_progress(
+        state: &mut WindowState,
+        ui: &crate::ui_state::UiSnapshot,
+    ) -> f32 {
+        if ui.mode != OverlayMode::Calibrating {
+            state.displayed_progress = 0.0;
+            return 0.0;
+        }
+
+        let target = ui.progress_percent.clamp(0.0, 100.0);
+        if state.last_mode != OverlayMode::Calibrating || target <= 0.0 {
+            state.displayed_progress = 0.0;
+        }
+        if target >= 99.9 {
+            state.displayed_progress = 100.0;
+            return state.displayed_progress;
+        }
+
+        state.displayed_progress = advance_displayed_progress(state.displayed_progress, target);
+        state.displayed_progress
+    }
+
+    fn advance_displayed_progress(displayed: f32, target: f32) -> f32 {
+        let delta = target - displayed;
+        if delta <= 0.0 {
+            return displayed;
+        }
+        if delta < 0.35 {
+            target
+        } else {
+            let step = (delta * 0.35).max(0.18).min(delta);
+            displayed + step
+        }
     }
 
     fn map_mode(mode: &OverlayMode) -> HudMode {
@@ -1543,6 +1589,19 @@ mod platform {
             let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
 
             assert!(outer_area_should_pass_through_at(x, y, scale, false));
+        }
+
+        #[test]
+        fn displayed_progress_advances_toward_target_without_overshoot() {
+            let next = advance_displayed_progress(10.0, 20.0);
+
+            assert!(next > 10.0);
+            assert!(next < 20.0);
+        }
+
+        #[test]
+        fn displayed_progress_does_not_rewind_when_target_jitters_down() {
+            assert_eq!(advance_displayed_progress(20.0, 18.0), 20.0);
         }
     }
 }

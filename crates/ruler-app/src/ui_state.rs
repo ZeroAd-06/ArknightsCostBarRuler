@@ -80,11 +80,11 @@ pub struct ApiStateSnapshot {
     pub active_profile: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UiSnapshot {
     pub mode: OverlayMode,
     pub message: String,
-    pub progress_percent: u8,
+    pub progress_percent: f32,
     pub display_frame: String,
     pub display_total: String,
     pub time_str: String,
@@ -104,7 +104,7 @@ impl Default for UiSnapshot {
         Self {
             mode: OverlayMode::Booting,
             message: "booting".to_string(),
-            progress_percent: 0,
+            progress_percent: 0.0,
             display_frame: "--".to_string(),
             display_total: "/--".to_string(),
             time_str: "00:00:00".to_string(),

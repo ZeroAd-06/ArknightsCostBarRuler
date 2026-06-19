@@ -432,6 +432,7 @@ fn handle_command(
             state.update_ui(|ui, api| {
                 ui.mode = OverlayMode::PreCalibration;
                 ui.message.clear();
+                ui.progress_percent = 0.0;
                 ui.active_profile = None;
                 ui.total_frames_in_cycle = 0;
                 ui.can_undo_reset = false;
@@ -558,7 +559,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
     context.last_cost_is_negative = false;
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Calibrating;
-        ui.progress_percent = 0;
+        ui.progress_percent = 0.0;
         ui.message.clear();
         ui.display_frame = "--".to_string();
         ui.display_total = "/--".to_string();
@@ -618,6 +619,7 @@ fn collect_calibration_samples(
     let mut current_cycle_data = Vec::new();
     let mut previous_cost_state_raw = None;
     let mut is_collecting_cycle = false;
+    let mut progress = CalibrationProgress::new(total_bar_width);
     let mut frame = first_frame;
 
     while cycle_samples.len() < CALIBRATION_CYCLES {
@@ -630,18 +632,6 @@ fn collect_calibration_samples(
         );
 
         if let Some(current) = current_cost_state_raw {
-            let fill_percentage = current as f64 / total_bar_width as f64;
-            let progress_percent = (((cycle_samples.len() as f64 + fill_percentage)
-                / CALIBRATION_CYCLES as f64)
-                * 100.0)
-                .clamp(0.0, 100.0)
-                .round() as u8;
-            state.update_ui(|ui, _| {
-                ui.mode = OverlayMode::Calibrating;
-                ui.progress_percent = progress_percent;
-                ui.message.clear();
-            });
-
             if let Some(previous) = previous_cost_state_raw {
                 if (previous as f64) > total_bar_width as f64 * 0.9
                     && (current as f64) < total_bar_width as f64 * 0.1
@@ -653,9 +643,17 @@ fn collect_calibration_samples(
                 }
             }
 
-            if is_collecting_cycle {
+            if is_collecting_cycle && cycle_samples.len() < CALIBRATION_CYCLES {
                 current_cycle_data.push(current);
             }
+
+            let progress_percent =
+                progress.update(current, cycle_samples.len(), is_collecting_cycle);
+            state.update_ui(|ui, _| {
+                ui.mode = OverlayMode::Calibrating;
+                ui.progress_percent = progress_percent;
+                ui.message.clear();
+            });
             previous_cost_state_raw = Some(current);
         } else {
             previous_cost_state_raw = None;
@@ -668,9 +666,56 @@ fn collect_calibration_samples(
 
     state.update_ui(|ui, _| {
         ui.mode = OverlayMode::Calibrating;
-        ui.progress_percent = 100;
+        ui.progress_percent = 100.0;
     });
     Ok((cycle_samples, screen_width, screen_height))
+}
+
+#[derive(Debug)]
+struct CalibrationProgress {
+    total_bar_width: i32,
+    initial_width: Option<i32>,
+    last_percent: f32,
+}
+
+impl CalibrationProgress {
+    fn new(total_bar_width: i32) -> Self {
+        Self {
+            total_bar_width: total_bar_width.max(1),
+            initial_width: None,
+            last_percent: 0.0,
+        }
+    }
+
+    fn update(&mut self, current_width: i32, completed_cycles: usize, collecting: bool) -> f32 {
+        let current = current_width.clamp(0, self.total_bar_width);
+        let initial = *self.initial_width.get_or_insert(current);
+        let wait_units = (self.total_bar_width - initial).max(0) as f32;
+        let total_bar_width = self.total_bar_width as f32;
+        let total_units = wait_units + CALIBRATION_CYCLES as f32 * total_bar_width;
+
+        let completed_units = if collecting {
+            let completed_cycles = completed_cycles.min(CALIBRATION_CYCLES);
+            let current_cycle_units = if completed_cycles < CALIBRATION_CYCLES {
+                current as f32
+            } else {
+                0.0
+            };
+            wait_units + completed_cycles as f32 * total_bar_width + current_cycle_units
+        } else {
+            (current - initial).clamp(0, self.total_bar_width) as f32
+        };
+
+        let percent = if total_units > 0.0 {
+            completed_units / total_units * 100.0
+        } else {
+            0.0
+        }
+        .clamp(0.0, 100.0);
+
+        self.last_percent = self.last_percent.max(percent);
+        self.last_percent
+    }
 }
 
 fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
@@ -802,6 +847,7 @@ fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame:
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Running;
         ui.message.clear();
+        ui.progress_percent = 0.0;
         ui.display_mode = context.display_mode;
         ui.display_frame = context.display_mode.display_frame(frame);
         ui.display_total = if total_frames > 0 {
@@ -831,6 +877,7 @@ fn publish_idle(state: &SharedAppState, context: &WorkerContext) {
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Idle;
         ui.message.clear();
+        ui.progress_percent = 0.0;
         ui.display_mode = context.display_mode;
         ui.display_frame = "--".to_string();
         ui.display_total = "/--".to_string();
@@ -853,6 +900,7 @@ fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String)
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Error;
         ui.message = error;
+        ui.progress_percent = 0.0;
         ui.active_profile = context.active_profile.clone();
         ui.can_undo_reset = timer_reset_undo_enabled(context);
         ui.profiles = context.profiles.list(context.active_profile.as_deref());
@@ -915,7 +963,14 @@ fn sleep_until(deadline: Instant, running: &AtomicBool) {
 
 #[cfg(test)]
 mod tests {
-    use super::TimerResetUndo;
+    use super::{CalibrationProgress, TimerResetUndo};
+
+    fn assert_near(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}, got {actual}"
+        );
+    }
 
     #[test]
     fn timer_reset_undo_remembers_nonzero_elapsed_once() {
@@ -937,5 +992,39 @@ mod tests {
 
         assert!(!undo.is_available());
         assert_eq!(undo.take(), None);
+    }
+
+    #[test]
+    fn calibration_progress_counts_initial_remaining_bar_before_two_cycles() {
+        let mut progress = CalibrationProgress::new(100);
+
+        assert_near(progress.update(50, 0, false), 0.0);
+        assert_near(progress.update(75, 0, false), 10.0);
+        assert_near(progress.update(0, 0, true), 20.0);
+        assert_near(progress.update(50, 0, true), 40.0);
+        assert_near(progress.update(0, 1, true), 60.0);
+        assert_near(progress.update(50, 1, true), 80.0);
+        assert_near(progress.update(0, 2, true), 100.0);
+    }
+
+    #[test]
+    fn calibration_progress_starts_at_zero_when_already_empty() {
+        let mut progress = CalibrationProgress::new(100);
+
+        assert_near(progress.update(0, 0, false), 0.0);
+        assert_near(progress.update(50, 0, false), 16.666_668);
+        assert_near(progress.update(0, 0, true), 33.333_336);
+        assert_near(progress.update(0, 1, true), 66.666_67);
+        assert_near(progress.update(0, 2, true), 100.0);
+    }
+
+    #[test]
+    fn calibration_progress_does_not_go_backwards_on_width_jitter() {
+        let mut progress = CalibrationProgress::new(100);
+
+        assert_near(progress.update(50, 0, false), 0.0);
+        assert_near(progress.update(80, 0, false), 12.0);
+        assert_near(progress.update(70, 0, false), 12.0);
+        assert_near(progress.update(0, 0, true), 20.0);
     }
 }

@@ -2,6 +2,7 @@
 target/
 
 # --- Build artifacts ---
+dist/
 *.exe
 *.pkg
 *.7z

@@ -47,7 +47,7 @@ cargo build --release -p ruler-app
 
 产物在 `target/release/ruler-app.exe`。
 
-也可以用仓库自带的打包脚本，它会顺手把 `icons/` 和 `ruler/locales/` 一起塞进 `dist/`:
+也可以用仓库自带的打包脚本，它会顺手把 `icons/`、`ruler/locales/` 和许可证文件一起塞进 `dist/`:
 
 ```powershell
 .\build.ps1            # release
@@ -60,7 +60,7 @@ cargo build --release -p ruler-app
 cargo run --release -p ruler-app
 ```
 
-从仓库根目录运行时，`config.json`、`calibration/`、`icons/`、`ruler/locales/` 都会被正确找到。打包分发时，请保证 `icons/` 和 `ruler/locales/` 跟在 `.exe` 旁边 (`build.ps1` 已经帮你做好了)。
+从仓库根目录运行时，`config.json`、`calibration/`、`icons/`、`ruler/locales/` 都会被正确找到。打包分发时，请保证 `icons/`、`ruler/locales/` 和许可证文件跟在 `.exe` 旁边 (`build.ps1` 已经帮你做好了)。
 
 ## 使用说明
 

@@ -21,7 +21,9 @@ slint = { version = "1.16", default-features = false, features = [
 tungstenite = "0.24"
 
 [build-dependencies]
+image = { version = "0.25", default-features = false, features = ["ico", "png"] }
 slint-build = "1.16"
+winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 netstat2 = "0.11.2"

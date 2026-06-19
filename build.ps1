@@ -54,5 +54,11 @@ if (Test-Path "ruler\locales") {
     New-Item -ItemType Directory -Path "$distDir\ruler" -Force | Out-Null
     Copy-Item -Recurse ruler\locales -Destination "$distDir\ruler"
 }
+if (Test-Path "LICENSE") {
+    Copy-Item LICENSE -Destination $distDir
+}
+if (Test-Path "LICENSES") {
+    Copy-Item -Recurse LICENSES -Destination $distDir
+}
 
 Write-Host "Build complete. Binary at $distDir\ruler-app.exe" -ForegroundColor Green

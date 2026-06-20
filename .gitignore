@@ -20,6 +20,7 @@ Thumbs.db
 
 # --- Project runtime ---
 config.json
+log/
 logs/
 calibration/
 calibration_data_*.json

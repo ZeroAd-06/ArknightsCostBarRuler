@@ -11,6 +11,7 @@ use crate::{
     config_wizard::run_config_wizard,
     i18n::I18n,
     icons::IconSet,
+    logging::LoggingRuntime,
     overlay::{OverlayPlacement, OverlayRuntime},
     resources::ResourceLocator,
     target_discovery::{discover_targets, probe_candidate_once},
@@ -25,8 +26,11 @@ pub struct RulerApp {
 }
 
 impl RulerApp {
-    pub fn build(debug: bool) -> Result<Self, StartupError> {
-        let resources = ResourceLocator::new();
+    pub fn build(
+        debug: bool,
+        resources: ResourceLocator,
+        logging: LoggingRuntime,
+    ) -> Result<Self, StartupError> {
         let initial_status = determine_startup_status(&resources);
         let preferred_locale = initial_status
             .loaded_config
@@ -35,6 +39,13 @@ impl RulerApp {
         let i18n = Arc::new(I18n::load(&resources, preferred_locale));
 
         let startup_status = resolve_startup_config(&resources, &i18n, initial_status, debug)?;
+        logging.apply_trace_setting(
+            startup_status
+                .loaded_config
+                .as_ref()
+                .map(|config| config.trace_logging_enabled)
+                .unwrap_or(false),
+        );
 
         let state = Arc::new(SharedAppState::default());
         state.update_startup_status(&startup_status);
@@ -64,6 +75,7 @@ impl RulerApp {
             Arc::clone(&state),
             startup_status,
             resources,
+            logging.session_dir(),
             command_rx,
             Duration::from_millis(1),
         )?;
@@ -152,6 +164,7 @@ fn determine_startup_status(resources: &ResourceLocator) -> StartupStatus {
         Ok(config) => config,
         Err(error) => return StartupStatus::invalid(config_path_text, error.to_string()),
     };
+    log::info!("loaded config from '{}'", config_path.display());
 
     match config.to_capture_config() {
         Ok(_) => StartupStatus::ready(config_path_text, config),
@@ -175,6 +188,10 @@ fn resolve_startup_config(
             config
                 .save_to_path(resources.config_path())
                 .map_err(|error| StartupError::new(error.to_string()))?;
+            log::info!(
+                "saved debug-wizard config to '{}'",
+                resources.config_path().display()
+            );
             return Ok(StartupStatus::ready(config_path_text, config));
         }
         return Ok(StartupStatus::invalid(
@@ -194,6 +211,10 @@ fn resolve_startup_config(
                     config
                         .save_to_path(resources.config_path())
                         .map_err(|error| StartupError::new(error.to_string()))?;
+                    log::info!(
+                        "saved auto-selected config to '{}'",
+                        resources.config_path().display()
+                    );
                     return Ok(StartupStatus::ready(config_path_text, config));
                 }
                 Ok(None) => {
@@ -210,6 +231,10 @@ fn resolve_startup_config(
         config
             .save_to_path(resources.config_path())
             .map_err(|error| StartupError::new(error.to_string()))?;
+        log::info!(
+            "saved config wizard selection to '{}'",
+            resources.config_path().display()
+        );
         return Ok(StartupStatus::ready(config_path_text, config));
     }
 

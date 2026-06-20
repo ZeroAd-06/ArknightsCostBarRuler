@@ -40,6 +40,7 @@ pub struct RulerEngine {
     /// bar may already be a few frames into the cycle. Count that first phase
     /// once so entering battle does not lose the frames before the first sample.
     pending_battle_start_phase: bool,
+    last_reported_battle_state: Option<BattleState>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -98,6 +99,7 @@ impl RulerEngine {
             out_of_battle_frames: 0,
             battle_begin_reset_armed: true,
             pending_battle_start_phase: false,
+            last_reported_battle_state: None,
         }
     }
 
@@ -108,11 +110,18 @@ impl RulerEngine {
         let dims = backend.dimensions();
         self.roi = Some(roi::find_cost_bar_roi(dims.0 as i32, dims.1 as i32));
         self.backend = Some(backend);
+        log::info!(
+            "ruler-core connected: dimensions={}x{}, roi={:?}",
+            dims.0,
+            dims.1,
+            self.roi
+        );
 
         Ok(dims)
     }
 
     pub fn load_calibration<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
+        log::info!("loading calibration from '{}'", path.as_ref().display());
         let loaded = LoadedCalibration::from_file(path.as_ref())?;
         self.set_loaded_calibration(loaded);
         Ok(())
@@ -184,6 +193,7 @@ impl RulerEngine {
     }
 
     pub fn reset_timer(&mut self) {
+        log::debug!("resetting engine timer");
         self.elapsed_frames = 0.0;
         self.cycle_counter = 0;
         self.last_known_total_frames = 0;
@@ -209,6 +219,7 @@ impl RulerEngine {
     }
 
     pub fn disconnect(&mut self) {
+        log::info!("disconnecting ruler-core backend");
         if let Some(mut backend) = self.backend.take() {
             backend.disconnect();
         }
@@ -225,6 +236,7 @@ impl RulerEngine {
         self.out_of_battle_frames = 0;
         self.battle_begin_reset_armed = true;
         self.pending_battle_start_phase = false;
+        self.last_reported_battle_state = None;
     }
 
     fn analyze_frame(
@@ -247,6 +259,10 @@ impl RulerEngine {
         battle_state: BattleState,
     ) -> Result<FrameResult, String> {
         let battle_state = self.apply_battle_state_context(battle_state);
+        if self.last_reported_battle_state != Some(battle_state) {
+            log::debug!("battle state -> {}", battle_state.as_str());
+            self.last_reported_battle_state = Some(battle_state);
+        }
 
         if battle_state.is_in_battle() {
             self.battle_begin_reset_armed = true;
@@ -264,14 +280,24 @@ impl RulerEngine {
         })?;
 
         if !battle_state.is_in_battle() {
-            return Ok(FrameResult {
+            let result = FrameResult {
                 logical_frame: None,
                 total_frames_in_cycle: self.last_known_cycle_total_frames,
                 raw_pixel_width: None,
                 elapsed_frames: self.last_known_total_frames,
                 cost_is_negative: self.last_known_cost_is_negative,
                 battle_state,
-            });
+            };
+            log::trace!(
+                "frame summary: battle_state={}, logical_frame={:?}, total={}, raw_width={:?}, elapsed={}, negative={}",
+                result.battle_state.as_str(),
+                result.logical_frame,
+                result.total_frames_in_cycle,
+                result.raw_pixel_width,
+                result.elapsed_frames,
+                result.cost_is_negative
+            );
+            return Ok(result);
         }
 
         let calibration = self
@@ -354,14 +380,24 @@ impl RulerEngine {
         self.last_known_cycle_total_frames = total_frames_in_cycle;
         self.last_known_cost_is_negative = cost_is_negative;
 
-        Ok(FrameResult {
+        let result = FrameResult {
             logical_frame,
             total_frames_in_cycle,
             raw_pixel_width: pixel_width,
             elapsed_frames: self.last_known_total_frames,
             cost_is_negative,
             battle_state,
-        })
+        };
+        log::trace!(
+            "frame summary: battle_state={}, logical_frame={:?}, total={}, raw_width={:?}, elapsed={}, negative={}",
+            result.battle_state.as_str(),
+            result.logical_frame,
+            result.total_frames_in_cycle,
+            result.raw_pixel_width,
+            result.elapsed_frames,
+            result.cost_is_negative
+        );
+        Ok(result)
     }
 
     fn apply_battle_state_context(&mut self, battle_state: BattleState) -> BattleState {

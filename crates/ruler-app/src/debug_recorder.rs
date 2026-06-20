@@ -2,10 +2,10 @@
 //!
 //! Controlled exclusively via config.json (no UI).  When `debug_recording_enabled`
 //! is true, the worker thread pipes every captured frame through ffmpeg to a
-//! timestamped lossless HEVC video file in MKV and/or logs analysis results to a CSV file.
+//! session-local lossless HEVC MKV file and/or logs analysis results to a CSV file.
 //!
-//! Both outputs are written to `{output_dir}/debug_{timestamp}.mkv` and
-//! `{output_dir}/debug_{timestamp}.csv` respectively.
+//! Both outputs are written to `{session_dir}/capture.mkv` and
+//! `{session_dir}/analysis.csv` respectively.
 
 use std::{
     fs,
@@ -43,51 +43,6 @@ fn flip_rows(buf: &mut [u8], width: u32, height: u32, bpp: u32) {
         let (left, right) = buf.split_at_mut(bot);
         left[top..top + row_bytes].swap_with_slice(&mut right[..row_bytes]);
     }
-}
-
-fn timestamp_for_filename() -> String {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = d / 86400;
-    let time_secs = d % 86400;
-    let h = time_secs / 3600;
-    let m = (time_secs % 3600) / 60;
-    let s = time_secs % 60;
-    let (y, mo, day) = days_since_epoch_to_ymd(days as i64);
-    format!("{y:04}{mo:02}{day:02}_{h:02}{m:02}{s:02}")
-}
-
-fn days_since_epoch_to_ymd(days: i64) -> (i64, u32, u32) {
-    let mut y = 1970i64;
-    let mut d = days;
-    loop {
-        let yd = if is_leap(y) { 366 } else { 365 };
-        if d < yd {
-            break;
-        }
-        d -= yd;
-        y += 1;
-    }
-    let mon_days: &[u32] = if is_leap(y) {
-        &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 1u32;
-    for &md in mon_days {
-        if d < md as i64 {
-            break;
-        }
-        d -= md as i64;
-        m += 1;
-    }
-    (y, m, (d + 1) as u32)
-}
-
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -271,11 +226,10 @@ impl DebugRecorder {
         height: u32,
         fmt: PixelFormat,
     ) -> Result<Self, String> {
-        let ts = timestamp_for_filename();
         let bpp = bytes_per_pixel(fmt);
 
         let ffmpeg = if record_video {
-            let video_path = output_dir.join(format!("debug_{ts}.mkv"));
+            let video_path = output_dir.join("capture.mkv");
             let pix_fmt = pix_fmt_str(fmt);
             log::info!("debug recording: video -> {}", video_path.display());
             Some(FfmpegPipe::spawn(pix_fmt, width, height, &video_path)?)
@@ -284,7 +238,7 @@ impl DebugRecorder {
         };
 
         let csv = if record_csv {
-            let csv_path = output_dir.join(format!("debug_{ts}.csv"));
+            let csv_path = output_dir.join("analysis.csv");
             log::info!("debug recording: csv -> {}", csv_path.display());
             Some(
                 CsvWriter::new(&csv_path)

@@ -8,6 +8,7 @@ mod debug_recorder;
 mod fonts;
 mod i18n;
 mod icons;
+mod logging;
 mod menu;
 mod overlay;
 mod profiles;
@@ -21,8 +22,10 @@ mod ui_state;
 mod worker;
 
 use app::RulerApp;
+use logging::LoggingRuntime;
+use resources::ResourceLocator;
 
-const ICU_PROVIDER_ERROR_LOG_TARGET: &str = "icu_provider::error";
+pub(crate) const ICU_PROVIDER_ERROR_LOG_TARGET: &str = "icu_provider::error";
 
 fn main() {
     enable_dpi_awareness();
@@ -30,25 +33,19 @@ fn main() {
     if relaunch_as_admin_if_needed() {
         return;
     }
-    init_logging();
+    let resources = ResourceLocator::new();
+    let logging = match LoggingRuntime::init(&resources) {
+        Ok(logging) => logging,
+        Err(error) => {
+            eprintln!("failed to initialize file logging: {error}");
+            std::process::exit(1);
+        }
+    };
 
-    if let Err(error) = run(debug) {
+    if let Err(error) = run(debug, resources, logging) {
         log::error!("ruler-app failed to start: {error}");
         std::process::exit(1);
     }
-}
-
-fn init_logging() {
-    let env = env_logger::Env::default().filter_or("RUST_LOG", "info");
-    let mut builder = env_logger::Builder::from_env(env);
-    configure_logging(&mut builder);
-    builder.init();
-}
-
-fn configure_logging(builder: &mut env_logger::Builder) {
-    builder
-        .format_timestamp_millis()
-        .filter_module(ICU_PROVIDER_ERROR_LOG_TARGET, log::LevelFilter::Error);
 }
 
 #[cfg(windows)]
@@ -148,45 +145,13 @@ fn wide_os(value: &std::ffi::OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-fn run(debug: bool) -> Result<(), app::StartupError> {
+fn run(
+    debug: bool,
+    resources: ResourceLocator,
+    logging: LoggingRuntime,
+) -> Result<(), app::StartupError> {
     log::info!("bootstrapping ruler-app for Windows runtime (debug={debug})");
 
-    let app = RulerApp::build(debug)?;
+    let app = RulerApp::build(debug, resources, logging)?;
     app.run()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use log::{Level, Log, Metadata};
-
-    fn logger_with_filter(filter: &str) -> env_logger::Logger {
-        let mut builder = env_logger::Builder::new();
-        builder.parse_filters(filter);
-        configure_logging(&mut builder);
-        builder.build()
-    }
-
-    #[test]
-    fn suppresses_known_icu4x_segmentation_warning() {
-        let logger = logger_with_filter("info");
-
-        let icu_warning = Metadata::builder()
-            .target(ICU_PROVIDER_ERROR_LOG_TARGET)
-            .level(Level::Warn)
-            .build();
-        assert!(!logger.enabled(&icu_warning));
-
-        let icu_error = Metadata::builder()
-            .target(ICU_PROVIDER_ERROR_LOG_TARGET)
-            .level(Level::Error)
-            .build();
-        assert!(logger.enabled(&icu_error));
-
-        let app_warning = Metadata::builder()
-            .target("ruler_app::app")
-            .level(Level::Warn)
-            .build();
-        assert!(logger.enabled(&app_warning));
-    }
 }

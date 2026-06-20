@@ -222,7 +222,7 @@ mod platform {
         let closing = Rc::new(Cell::new(false));
         let drag_on_title = Rc::new(Cell::new(false));
 
-        populate_captions(&wizard, i18n, debug);
+        populate_captions(&wizard, i18n, previous_config, debug);
         wire_callbacks(&wizard, &core, &result, &closing, &drag_on_title);
 
         // Initial discovery + probe.
@@ -230,7 +230,7 @@ mod platform {
 
         let width = (WIZARD_LOGICAL_W * scale).round() as i32;
         let logical_h = if debug {
-            WIZARD_LOGICAL_H + 220.0
+            WIZARD_LOGICAL_H + 248.0
         } else {
             WIZARD_LOGICAL_H
         };
@@ -332,7 +332,12 @@ mod platform {
         config
     }
 
-    fn populate_captions(wizard: &Wizard, i18n: &I18n, debug: bool) {
+    fn populate_captions(
+        wizard: &Wizard,
+        i18n: &I18n,
+        previous_config: Option<&RulerConfig>,
+        debug: bool,
+    ) {
         wizard.set_title_text(i18n.tr("config.window.title").into());
         wizard.set_header_text(i18n.tr("config.selector.header").into());
         wizard.set_status_text(i18n.tr("config.selector.scanning").into());
@@ -353,16 +358,45 @@ mod platform {
         wizard.set_cap_debug_header(i18n.tr("config.selector.debug_header").into());
         wizard.set_cap_debug_video(i18n.tr("config.selector.debug_video").into());
         wizard.set_cap_debug_csv(i18n.tr("config.selector.debug_csv").into());
+        wizard.set_cap_debug_trace(i18n.tr("config.selector.debug_trace").into());
         wizard.set_cap_mode_header(i18n.tr("config.selector.mode_header").into());
         wizard.set_cap_mode_real(i18n.tr("config.selector.mode_real").into());
         wizard.set_cap_mode_replay(i18n.tr("config.selector.mode_replay").into());
         wizard.set_cap_replay_path(i18n.tr("config.selector.replay_path").into());
         wizard.set_cap_replay_fps_label(i18n.tr("config.selector.replay_fps").into());
-        wizard.set_record_video(false);
-        wizard.set_record_csv(false);
-        wizard.set_replay_mode(false);
-        wizard.set_replay_path(slint::SharedString::default());
-        wizard.set_replay_fps_text(slint::SharedString::default());
+        wizard.set_record_video(
+            previous_config
+                .map(|config| config.debug_recording_video)
+                .unwrap_or(false),
+        );
+        wizard.set_record_csv(
+            previous_config
+                .map(|config| config.debug_recording_csv)
+                .unwrap_or(false),
+        );
+        wizard.set_trace_logging(
+            previous_config
+                .map(|config| config.trace_logging_enabled)
+                .unwrap_or(false),
+        );
+        wizard.set_replay_mode(
+            previous_config
+                .map(|config| config.capture_type == "replay")
+                .unwrap_or(false),
+        );
+        wizard.set_replay_path(
+            previous_config
+                .and_then(|config| config.replay_hevc_path.clone())
+                .unwrap_or_default()
+                .into(),
+        );
+        wizard.set_replay_fps_text(
+            previous_config
+                .and_then(|config| config.replay_fps)
+                .map(|fps| fps.to_string())
+                .unwrap_or_default()
+                .into(),
+        );
     }
 
     fn wire_callbacks(
@@ -409,6 +443,7 @@ mod platform {
                 let auto = wizard.get_auto_checked();
                 let record_video = wizard.get_record_video();
                 let record_csv = wizard.get_record_csv();
+                let trace_logging = wizard.get_trace_logging();
                 let replay_mode = wizard.get_replay_mode();
                 let replay_path = wizard.get_replay_path();
                 let replay_fps_text = wizard.get_replay_fps_text();
@@ -448,7 +483,12 @@ mod platform {
                         debug_recording_enabled: record_video || record_csv,
                         debug_recording_video: record_video,
                         debug_recording_csv: record_csv,
-                        debug_recording_output_dir: None,
+                        trace_logging_enabled: trace_logging,
+                        log_output_dir: core
+                            .borrow()
+                            .previous_config
+                            .as_ref()
+                            .and_then(|p| p.log_output_dir.clone()),
                         replay_hevc_path: Some(replay_path.to_string()),
                         replay_fps: Some(fps),
                     }
@@ -471,6 +511,7 @@ mod platform {
                     config.debug_recording_enabled = record_video || record_csv;
                     config.debug_recording_video = record_video;
                     config.debug_recording_csv = record_csv;
+                    config.trace_logging_enabled = trace_logging;
                     config
                 };
                 *result.borrow_mut() = Some(config);
@@ -1374,7 +1415,8 @@ mod platform {
                     debug_recording_enabled: false,
                     debug_recording_video: false,
                     debug_recording_csv: false,
-                    debug_recording_output_dir: None,
+                    trace_logging_enabled: false,
+                    log_output_dir: None,
                     replay_hevc_path: None,
                     replay_fps: None,
                 },

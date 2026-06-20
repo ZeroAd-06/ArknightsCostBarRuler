@@ -125,6 +125,11 @@ impl ReplayCaptureBackend {
 
 impl CaptureBackend for ReplayCaptureBackend {
     fn connect(&mut self) -> Result<(), String> {
+        log::info!(
+            "replay connect: path='{}', target_fps={}",
+            self.hevc_path,
+            self.target_fps
+        );
         let pix_fmt_str = match self.pix_fmt {
             PixelFormat::Rgba => "rgba",
             PixelFormat::Bgr => "bgr24",
@@ -195,6 +200,7 @@ impl CaptureBackend for ReplayCaptureBackend {
     }
 
     fn disconnect(&mut self) {
+        log::info!("replay disconnect: path='{}'", self.hevc_path);
         self.stdout.take();
         if let Some(mut child) = self.ffmpeg.take() {
             let _ = child.kill();

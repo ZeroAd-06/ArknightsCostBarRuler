@@ -42,7 +42,7 @@ pub struct RulerConfig {
     #[serde(default)]
     pub overlay_scale: Option<f32>,
 
-    // -- Debug recording (not exposed in UI) --------------------------------
+    // -- Debug recording / logging ------------------------------------------
     /// Master switch: enable background recording of capture + analysis data.
     #[serde(default)]
     pub debug_recording_enabled: bool,
@@ -55,11 +55,15 @@ pub struct RulerConfig {
     #[serde(default)]
     pub debug_recording_csv: bool,
 
-    /// Output directory for debug recordings.
-    /// Relative paths are resolved under the app's configured data root;
-    /// defaults to "recordings" when not set.
+    /// Enable extra-high-volume trace logging in the app/core pipelines.
     #[serde(default)]
-    pub debug_recording_output_dir: Option<String>,
+    pub trace_logging_enabled: bool,
+
+    /// Output root directory for logs and debug artifacts.
+    /// Relative paths are resolved under the app's configured data root;
+    /// defaults to "log" when not set.
+    #[serde(default, alias = "debug_recording_output_dir")]
+    pub log_output_dir: Option<String>,
 
     // -- Replay (virtual capture from a recorded video file) ---------------
     /// Path to a pre-recorded video file for replay (type: "replay").
@@ -200,6 +204,44 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn legacy_debug_recording_output_dir_alias_still_loads() {
+        let root = unique_temp_dir("ruler_config_alias");
+        let path = root.join("config.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            r#"{
+  "type": "replay",
+  "debug_recording_output_dir": "recordings",
+  "trace_logging_enabled": true
+}"#,
+        )
+        .unwrap();
+
+        let loaded = RulerConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.log_output_dir.as_deref(), Some("recordings"));
+        assert!(loaded.trace_logging_enabled);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_writes_new_log_output_dir_field_name() {
+        let root = unique_temp_dir("ruler_config_log_field");
+        let path = root.join("config.json");
+        let mut config = minimal_config();
+        config.log_output_dir = Some("log".to_string());
+
+        config.save_to_path(&path).unwrap();
+
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("\"log_output_dir\""));
+        assert!(!saved.contains("debug_recording_output_dir"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn minimal_config() -> RulerConfig {
         RulerConfig {
             capture_type: "replay".to_string(),
@@ -220,7 +262,8 @@ mod tests {
             debug_recording_enabled: false,
             debug_recording_video: false,
             debug_recording_csv: false,
-            debug_recording_output_dir: None,
+            trace_logging_enabled: false,
+            log_output_dir: None,
             replay_hevc_path: None,
             replay_fps: None,
         }

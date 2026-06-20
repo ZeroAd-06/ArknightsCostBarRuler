@@ -24,6 +24,7 @@ impl AdbController {
     }
 
     fn run_adb_text(args: &[&str]) -> Result<String, String> {
+        log::trace!("adb text command: adb {}", args.join(" "));
         let mut command = Command::new("adb");
         configure_hidden_command(&mut command);
         let output = command
@@ -46,6 +47,7 @@ impl AdbController {
     }
 
     fn run_adb_bytes(args: &[&str]) -> Result<Vec<u8>, String> {
+        log::trace!("adb bytes command: adb {}", args.join(" "));
         let mut command = Command::new("adb");
         configure_hidden_command(&mut command);
         let output = command
@@ -111,6 +113,7 @@ impl CaptureBackend for AdbController {
     fn connect(&mut self) -> Result<(), String> {
         self.input_overlay_guard = None;
         let device_id = self.resolve_device_id()?;
+        log::info!("ADB connect: device_id={device_id}");
         let state = Self::run_device_text(&device_id, &["get-state"])?;
         if state.trim() != "device" {
             return Err(format!("ADB device '{device_id}' is not ready: {state}"));
@@ -128,6 +131,7 @@ impl CaptureBackend for AdbController {
                 self.height = frame.height;
             }
         }
+        log::info!("ADB dimensions resolved: {}x{}", self.width, self.height);
         Ok(())
     }
 
@@ -156,6 +160,7 @@ impl CaptureBackend for AdbController {
     }
 
     fn disconnect(&mut self) {
+        log::info!("ADB disconnect");
         self.input_overlay_guard = None;
         self.width = 0;
         self.height = 0;

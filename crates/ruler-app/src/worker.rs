@@ -211,6 +211,7 @@ impl WorkerRuntime {
         state: Arc<SharedAppState>,
         startup: StartupStatus,
         resources: ResourceLocator,
+        log_session_dir: PathBuf,
         commands: Receiver<UiCommand>,
         interval: Duration,
     ) -> Result<Self, crate::app::StartupError> {
@@ -223,6 +224,7 @@ impl WorkerRuntime {
                     state,
                     startup,
                     resources,
+                    log_session_dir,
                     commands,
                     worker_running,
                     interval,
@@ -269,7 +271,7 @@ struct WorkerContext {
     last_cost_is_negative: bool,
     sample_index: u64,
     debug_recorder: Option<DebugRecorder>,
-    debug_recording_dir: PathBuf,
+    log_session_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -299,6 +301,7 @@ fn run_worker_loop(
     state: Arc<SharedAppState>,
     startup: StartupStatus,
     resources: ResourceLocator,
+    log_session_dir: PathBuf,
     commands: Receiver<UiCommand>,
     running: Arc<AtomicBool>,
     interval: Duration,
@@ -311,9 +314,6 @@ fn run_worker_loop(
     };
 
     let profiles = ProfileStore::new(&resources);
-
-    let debug_recording_dir =
-        resources.debug_recording_dir(config.debug_recording_output_dir.as_deref());
 
     let mut context = WorkerContext {
         display_mode: FrameDisplayMode::from_config(config.frame_display_mode.as_deref()),
@@ -330,7 +330,7 @@ fn run_worker_loop(
         last_cost_is_negative: false,
         sample_index: 0,
         debug_recorder: None,
-        debug_recording_dir,
+        log_session_dir,
     };
 
     if let Err(error) = bootstrap_engine(&mut context, &state) {
@@ -357,8 +357,13 @@ fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Resu
         .config
         .to_capture_config()
         .map_err(|error| error.to_string())?;
+    log::info!(
+        "connecting capture backend for '{}'",
+        context.config.capture_type
+    );
     let dims = context.engine.connect(capture_config)?;
     context.connected = true;
+    log::info!("capture backend connected: {}x{}", dims.0, dims.1);
     state.update_ui(|ui, _| {
         ui.capture_dimensions = Some(dims);
     });
@@ -375,6 +380,11 @@ fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Resu
 
 fn load_profile(context: &mut WorkerContext, filename: &str) -> Result<(), String> {
     let calibration_path = context.profiles.calibration_path(filename);
+    log::info!(
+        "loading calibration profile '{}' from '{}'",
+        filename,
+        calibration_path.display()
+    );
     context
         .engine
         .load_calibration(&calibration_path)
@@ -419,12 +429,13 @@ fn handle_command(
 ) -> bool {
     match command {
         UiCommand::PrepareCalibration => {
+            log::info!("worker command: prepare calibration");
             context.active_profile = None;
             context.config.active_calibration_profile = None;
             context.lap_start_frame = None;
             context.timer_reset_undo.clear();
             context.last_cost_is_negative = false;
-            let _ = context.config.save_to_path(&context.config_path);
+            persist_config(context, "prepare calibration");
             state.update_ui(|ui, api| {
                 ui.mode = OverlayMode::PreCalibration;
                 ui.message.clear();
@@ -438,25 +449,32 @@ fn handle_command(
                 api.active_profile = None;
             });
         }
-        UiCommand::StartCalibration => match run_calibration(state, context) {
-            Ok(()) => publish_running_state(state, context, None),
-            Err(error) => publish_error(state, context, format!("calibration failed: {error}")),
-        },
-        UiCommand::UseProfile { filename } => match load_profile(context, &filename) {
-            Ok(()) => {
-                context.config.active_calibration_profile = Some(filename);
-                let _ = context.config.save_to_path(&context.config_path);
-                publish_running_state(state, context, None);
+        UiCommand::StartCalibration => {
+            log::info!("worker command: start calibration");
+            match run_calibration(state, context) {
+                Ok(()) => publish_running_state(state, context, None),
+                Err(error) => publish_error(state, context, format!("calibration failed: {error}")),
             }
-            Err(error) => publish_error(state, context, error),
-        },
+        }
+        UiCommand::UseProfile { filename } => {
+            log::info!("worker command: use profile '{}'", filename);
+            match load_profile(context, &filename) {
+                Ok(()) => {
+                    context.config.active_calibration_profile = Some(filename);
+                    persist_config(context, "select profile");
+                    publish_running_state(state, context, None);
+                }
+                Err(error) => publish_error(state, context, error),
+            }
+        }
         UiCommand::RenameProfile { old, new_base } => {
+            log::info!("worker command: rename profile '{}' -> '{}'", old, new_base);
             match context.profiles.rename(&old, &new_base) {
                 Ok(new_filename) => {
                     if context.active_profile.as_deref() == Some(old.as_str()) {
                         context.active_profile = Some(new_filename.clone());
                         context.config.active_calibration_profile = Some(new_filename);
-                        let _ = context.config.save_to_path(&context.config_path);
+                        persist_config(context, "rename active profile");
                     }
                     publish_current_state(state, context);
                 }
@@ -466,6 +484,7 @@ fn handle_command(
             }
         }
         UiCommand::DeleteProfile { filename } => {
+            log::info!("worker command: delete profile '{}'", filename);
             if let Err(error) = context.profiles.delete(&filename) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     publish_error(state, context, format!("failed to delete profile: {error}"));
@@ -480,24 +499,27 @@ fn handle_command(
                 context.lap_start_frame = None;
                 context.timer_reset_undo.clear();
                 context.last_cost_is_negative = false;
-                let _ = context.config.save_to_path(&context.config_path);
+                persist_config(context, "delete active profile");
                 publish_idle(state, context);
             } else {
                 publish_current_state(state, context);
             }
         }
         UiCommand::SetDisplayMode(mode) => {
+            log::info!("worker command: set display mode '{}'", mode.as_config());
             context.display_mode = mode;
             context.config.frame_display_mode = Some(mode.as_config().to_string());
-            let _ = context.config.save_to_path(&context.config_path);
+            persist_config(context, "set display mode");
             publish_current_state(state, context);
         }
         UiCommand::AdjustTimer { frames } => {
+            log::info!("worker command: adjust timer by {frames} frames");
             context.engine.adjust_timer(frames);
             context.last_elapsed_frames += frames;
             publish_current_state(state, context);
         }
         UiCommand::ResetTimer => {
+            log::info!("worker command: reset timer");
             context
                 .timer_reset_undo
                 .remember_reset(context.last_elapsed_frames);
@@ -507,6 +529,7 @@ fn handle_command(
             publish_current_state(state, context);
         }
         UiCommand::UndoResetTimer => {
+            log::info!("worker command: undo timer reset");
             if let Some(elapsed_frames) = context.timer_reset_undo.take() {
                 set_timer_elapsed(context, elapsed_frames);
                 context.lap_start_frame = None;
@@ -514,6 +537,7 @@ fn handle_command(
             }
         }
         UiCommand::ToggleLapTimer => {
+            log::info!("worker command: toggle lap timer");
             context.lap_start_frame = if context.lap_start_frame.is_some() {
                 None
             } else {
@@ -523,16 +547,19 @@ fn handle_command(
         }
         UiCommand::SetOverlayScale(mult) => {
             let pct = (mult * 100.0).round().clamp(50.0, 400.0) as u16;
+            log::info!("worker command: set overlay scale to {}%", pct);
             context.config.overlay_scale = Some(mult);
-            let _ = context.config.save_to_path(&context.config_path);
+            persist_config(context, "set overlay scale");
             state.update_ui(|ui, _| ui.overlay_scale_pct = pct);
         }
         UiCommand::SaveOverlayPlacement { x, y } => {
+            log::debug!("worker command: save overlay placement x={x}, y={y}");
             context.config.overlay_pos_x = Some(x);
             context.config.overlay_pos_y = Some(y);
-            let _ = context.config.save_to_path(&context.config_path);
+            persist_config(context, "save overlay placement");
         }
         UiCommand::Exit => {
+            log::info!("worker command: exit");
             running.store(false, Ordering::Relaxed);
             state.request_exit();
             return false;
@@ -592,6 +619,10 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         .config
         .save_to_path(&context.config_path)
         .map_err(|error| error.to_string())?;
+    log::info!(
+        "saved new calibration profile selection to '{}'",
+        context.config_path.display()
+    );
     Ok(())
 }
 
@@ -733,9 +764,9 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                 let record_csv = context.config.debug_recording_csv;
                 if record_video || record_csv {
                     // Ensure output directory exists
-                    let _ = std::fs::create_dir_all(&context.debug_recording_dir);
+                    let _ = std::fs::create_dir_all(&context.log_session_dir);
                     match DebugRecorder::start(
-                        &context.debug_recording_dir,
+                        &context.log_session_dir,
                         record_video,
                         record_csv,
                         frame_data.width,
@@ -743,8 +774,17 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                         frame_data.format,
                     ) {
                         Ok(recorder) => {
-                            log::info!("debug recording started");
+                            log::info!(
+                                "debug recording started in '{}'",
+                                context.log_session_dir.display()
+                            );
                             context.debug_recorder = Some(recorder);
+                            if record_video {
+                                context.config.debug_recording_video = false;
+                                context.config.debug_recording_enabled =
+                                    context.config.debug_recording_csv;
+                                persist_config(context, "consume one-shot MKV recording");
+                            }
                         }
                         Err(e) => {
                             log::error!("debug recording failed to start: {e}");
@@ -767,6 +807,16 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                     let worker_timing = WorkerTimingSnapshot {
                         sample_index: context.sample_index,
                     };
+                    log::trace!(
+                        "worker frame {} => battle_state={}, logical_frame={:?}, total={}, raw_width={:?}, elapsed={}, negative={}",
+                        context.sample_index,
+                        result.battle_state.as_str(),
+                        result.logical_frame,
+                        result.total_frames_in_cycle,
+                        result.raw_pixel_width,
+                        result.elapsed_frames,
+                        result.cost_is_negative
+                    );
                     context.last_total_frames = result.total_frames_in_cycle;
                     context.last_cost_is_negative = result.cost_is_negative;
                     if result.battle_state == BattleState::BattleBegin {
@@ -903,6 +953,22 @@ fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String)
         api.is_running = false;
         api.current_frame = None;
     });
+}
+
+fn persist_config(context: &WorkerContext, reason: &str) {
+    match context.config.save_to_path(&context.config_path) {
+        Ok(()) => log::debug!(
+            "saved config after {} to '{}'",
+            reason,
+            context.config_path.display()
+        ),
+        Err(error) => log::error!(
+            "failed to save config after {} to '{}': {}",
+            reason,
+            context.config_path.display(),
+            error
+        ),
+    }
 }
 
 fn set_timer_elapsed(context: &mut WorkerContext, elapsed_frames: i32) {

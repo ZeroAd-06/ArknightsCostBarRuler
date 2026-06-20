@@ -10,7 +10,7 @@ pub struct ResourceLocator {
     config_path: PathBuf,
     calibration_dir: PathBuf,
     data_dir: PathBuf,
-    recording_dir_override: Option<PathBuf>,
+    log_dir_override: Option<PathBuf>,
 }
 
 impl ResourceLocator {
@@ -33,7 +33,8 @@ impl ResourceLocator {
         let calibration_dir = env_path("ARKNIGHTS_RULER_CALIBRATION_DIR")
             .unwrap_or_else(|| config_root.join("calibration"));
         let data_dir = env_path("ARKNIGHTS_RULER_DATA_DIR").unwrap_or_else(|| config_root.clone());
-        let recording_dir_override = env_path("ARKNIGHTS_RULER_RECORDINGS_DIR");
+        let log_dir_override = env_path("ARKNIGHTS_RULER_LOG_DIR")
+            .or_else(|| env_path("ARKNIGHTS_RULER_RECORDINGS_DIR"));
 
         Self {
             project_root,
@@ -41,7 +42,7 @@ impl ResourceLocator {
             config_path,
             calibration_dir,
             data_dir,
-            recording_dir_override,
+            log_dir_override,
         }
     }
 
@@ -56,14 +57,14 @@ impl ResourceLocator {
     }
 
     #[must_use]
-    pub fn debug_recording_dir(&self, configured: Option<&str>) -> PathBuf {
+    pub fn log_root_dir(&self, configured: Option<&str>) -> PathBuf {
         if let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) {
             return self.resolve_data_path(configured);
         }
 
-        self.recording_dir_override
+        self.log_dir_override
             .clone()
-            .unwrap_or_else(|| self.data_dir.join("recordings"))
+            .unwrap_or_else(|| self.data_dir.join("log"))
     }
 
     #[must_use]
@@ -154,7 +155,7 @@ mod tests {
             config_path: PathBuf::from("C:/state/config.json"),
             calibration_dir: PathBuf::from("C:/state/calibration"),
             data_dir: PathBuf::from("C:/data"),
-            recording_dir_override: None,
+            log_dir_override: None,
         }
     }
 
@@ -170,32 +171,29 @@ mod tests {
     }
 
     #[test]
-    fn debug_recording_defaults_under_data_root() {
+    fn log_root_defaults_under_data_root() {
         let locator = locator_for_test();
 
-        assert_eq!(
-            locator.debug_recording_dir(None),
-            PathBuf::from("C:/data/recordings")
-        );
+        assert_eq!(locator.log_root_dir(None), PathBuf::from("C:/data/log"));
     }
 
     #[test]
-    fn relative_debug_recording_dir_resolves_under_data_root() {
+    fn relative_log_root_resolves_under_data_root() {
         let locator = locator_for_test();
 
         assert_eq!(
-            locator.debug_recording_dir(Some("captures")),
+            locator.log_root_dir(Some("captures")),
             PathBuf::from("C:/data/captures")
         );
     }
 
     #[cfg(windows)]
     #[test]
-    fn absolute_debug_recording_dir_is_preserved() {
+    fn absolute_log_root_is_preserved() {
         let locator = locator_for_test();
 
         assert_eq!(
-            locator.debug_recording_dir(Some("D:/captures")),
+            locator.log_root_dir(Some("D:/captures")),
             PathBuf::from("D:/captures")
         );
     }

@@ -55,6 +55,7 @@ impl LDPlayerController {
     }
 
     fn run_command(&self, program: &str, args: &[&str]) -> Result<String, String> {
+        log::trace!("LDPlayer command: {} {}", program, args.join(" "));
         let mut command = Command::new(program);
         configure_hidden_command(&mut command);
         let output = command
@@ -183,6 +184,12 @@ fn configure_hidden_command(command: &mut Command) {
 impl CaptureBackend for LDPlayerController {
     fn connect(&mut self) -> Result<(), String> {
         self.input_overlay_guard = None;
+        log::info!(
+            "LDPlayer connect: install_path='{}', instance_index={}, device_id={:?}",
+            self.install_path,
+            self.instance_index,
+            self.device_id
+        );
         self.resolve_dimensions()?;
         let device_id = self
             .device_id
@@ -223,6 +230,11 @@ impl CaptureBackend for LDPlayerController {
                 .ok_or_else(|| "LDPlayer buffer size overflow".to_string())? as usize;
         self.buffer.resize(buffer_size, 0);
         self.spare_buffer.resize(buffer_size, 0);
+        log::info!(
+            "LDPlayer connected: dimensions={}x{}",
+            self.width,
+            self.height
+        );
         Ok(())
     }
 
@@ -274,6 +286,10 @@ impl CaptureBackend for LDPlayerController {
     }
 
     fn disconnect(&mut self) {
+        log::info!(
+            "LDPlayer disconnect: instance_index={}",
+            self.instance_index
+        );
         if !self.handle.is_null() {
             unsafe {
                 let vtable_ptr = (*self.handle).vtable;

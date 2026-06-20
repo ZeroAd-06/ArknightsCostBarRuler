@@ -60,7 +60,7 @@ cargo build --release -p ruler-app
 cargo run --release -p ruler-app
 ```
 
-配置和校准文件默认放在启动时的当前工作目录，也就是 `config.json` 和同目录的 `calibration\`。调试录制默认放在同一根目录下的 `recordings\`。用 `cargo run -p ruler-app` 从仓库根目录启动时会使用仓库根目录;用户解压发行包后直接运行时会使用解压目录。打包分发时，请保证 `icons/`、`ruler/locales/` 和许可证文件跟在 `.exe` 旁边 (`build.ps1` 已经帮你做好了)。
+配置和校准文件默认放在启动时的当前工作目录，也就是 `config.json` 和同目录的 `calibration\`。日志和调试产物默认放在同一根目录下的 `log\`，每次启动都会新建一个 `log\<timestamp>_<pid>\` 会话目录。用 `cargo run -p ruler-app` 从仓库根目录启动时会使用仓库根目录;用户解压发行包后直接运行时会使用解压目录。打包分发时，请保证 `icons/`、`ruler/locales/` 和许可证文件跟在 `.exe` 旁边 (`build.ps1` 已经帮你做好了)。
 
 ## 使用说明
 
@@ -97,7 +97,7 @@ cargo run --release -p ruler-app
 这部分是给排查问题、或者想离线复现 bug 的人用的，普通使用用不到。
 
 - 带 `--debug` (或 `-d`) 启动 `ruler-app`，配置向导里会多出调试选项:
-  - **录制截图视频** (带时间戳的 MKV，体积非常大) 和 **录制分析数据** (CSV)。
+  - **下次录制一次截图视频** (MKV，体积非常大)、**录制分析数据** (CSV)、**超级详细日志**。
   - **虚拟截图器**: 不连模拟器，直接从一段录好的视频里重新跑分析,方便反复调试。
 - `ruler-recorder`: 独立的录制小工具，以后端能跑到的最高帧率同时录制无损 HEVC 视频 + 逐帧分析 CSV (依赖 `ffmpeg` 在 PATH 里)。
 
@@ -105,7 +105,7 @@ cargo run --release -p ruler-app
   cargo run --release -p ruler-recorder -- -c config.json -o recordings -d 60
   ```
 
-- `ruler-app` 的配置路径可以用环境变量覆盖: `ARKNIGHTS_RULER_CONFIG_PATH`、`ARKNIGHTS_RULER_CONFIG_DIR`、`ARKNIGHTS_RULER_CALIBRATION_DIR`、`ARKNIGHTS_RULER_DATA_DIR`、`ARKNIGHTS_RULER_RECORDINGS_DIR`。`debug_recording_output_dir` 若写相对路径，会相对配置根目录解析;写绝对路径则原样使用。
+- `ruler-app` 的配置路径可以用环境变量覆盖: `ARKNIGHTS_RULER_CONFIG_PATH`、`ARKNIGHTS_RULER_CONFIG_DIR`、`ARKNIGHTS_RULER_CALIBRATION_DIR`、`ARKNIGHTS_RULER_DATA_DIR`、`ARKNIGHTS_RULER_LOG_DIR`。旧的 `ARKNIGHTS_RULER_RECORDINGS_DIR` 仍可兼容使用。`log_output_dir` 若写相对路径，会相对配置根目录解析;写绝对路径则原样使用。
 
 - `ruler-verifier`: 离线校验器，拿录制好的视频跑一遍分析，用来核对结果。
 
@@ -119,7 +119,9 @@ cargo run --release -p ruler-app
   cargo run -p ruler-app --example hud_preview
   ```
 
-- 日志级别用 `RUST_LOG` 环境变量控制 (`info` / `debug` / `trace`，默认 `info`):
+- 默认每次启动都会写 `log\<timestamp>_<pid>\app.log`。如果同时开启 CSV / MKV，也会落在同一个会话目录里，方便整包发给我远程排查。
+
+- `RUST_LOG` 现在主要是开发者覆盖手段；如果你只是排查普通问题，优先用 `--debug` 向导里的超级详细日志开关。
 
   ```powershell
   $env:RUST_LOG = "debug"; cargo run --release -p ruler-app
@@ -170,8 +172,8 @@ ArknightsCostBarRuler/
 - 如果程序行为异常，或者干脆不工作，可以试试:
   - 关掉重开。
   - 删掉当前工作目录里的 `config.json` 重新走一遍配置向导。
-  - 用 `$env:RUST_LOG = "debug"` 启动看诊断日志;必要时加 `--debug` 录一段视频 + CSV。
-  - 带上日志，到 [Issue 页面](https://github.com/ZeroAd-06/ArknightsCostBarRuler/issues) 给我报个问题。
+  - 用 `--debug` 打开调试向导，按需开启 **超级详细日志**、CSV，必要时再勾一次性 MKV。
+  - 带上最新的 `log\<timestamp>_<pid>\` 会话目录，到 [Issue 页面](https://github.com/ZeroAd-06/ArknightsCostBarRuler/issues) 给我报个问题。
 - 关于作者本人:
   - 我是个 6 周年才入坑的小登，游戏理解顶多算个中杯，只打过一次合约，也不确定这工具是否真的符合极限玩家的需求。
   - 所以如果你觉得它显示的帧数跟你预期的对不上，那很有可能是我的问题 (・_・;)

@@ -187,6 +187,12 @@ unsafe extern "C" fn unsafe_fn_stub_get_id(_: i32, _: *const u8, _: i32) -> i32 
 impl CaptureBackend for MuMuController {
     fn connect(&mut self) -> Result<(), String> {
         self.input_overlay_guard = None;
+        log::info!(
+            "MuMu connect: install_path='{}', instance_index={}, device_id={:?}",
+            self.install_path,
+            self.instance_index,
+            self.device_id
+        );
         let (dll_path, resolved_root) = Self::find_dll(&self.install_path)?;
         self.install_path = resolved_root.to_string_lossy().into_owned();
         let instance_index = i32::try_from(self.instance_index)
@@ -270,6 +276,13 @@ impl CaptureBackend for MuMuController {
                 Some(AndroidInputOverlayGuard::disable_for_device(device_id)?);
         }
 
+        log::info!(
+            "MuMu connected: display_id={}, dimensions={}x{}",
+            self.display_id,
+            self.width,
+            self.height
+        );
+
         Ok(())
     }
 
@@ -337,6 +350,7 @@ impl CaptureBackend for MuMuController {
     }
 
     fn disconnect(&mut self) {
+        log::info!("MuMu disconnect: instance_index={}", self.instance_index);
         if self.handle != 0 {
             let _ipc = ipc_guard();
             unsafe { (self.symbols.disconnect)(self.handle) };

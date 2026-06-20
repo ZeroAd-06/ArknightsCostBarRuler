@@ -655,7 +655,8 @@ mod platform {
             debug_recording_enabled: previous.map(|c| c.debug_recording_enabled).unwrap_or(false),
             debug_recording_video: previous.map(|c| c.debug_recording_video).unwrap_or(false),
             debug_recording_csv: previous.map(|c| c.debug_recording_csv).unwrap_or(false),
-            debug_recording_output_dir: previous.and_then(|c| c.debug_recording_output_dir.clone()),
+            trace_logging_enabled: previous.map(|c| c.trace_logging_enabled).unwrap_or(false),
+            log_output_dir: previous.and_then(|c| c.log_output_dir.clone()),
             replay_hevc_path: previous.and_then(|c| c.replay_hevc_path.clone()),
             replay_fps: previous.and_then(|c| c.replay_fps),
         }
@@ -1438,6 +1439,7 @@ mod platform {
     }
 
     fn run_command_text(program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+        log::trace!("target discovery command: {} {}", program, args.join(" "));
         let mut command = Command::new(program);
         configure_hidden_command(&mut command);
         let mut child = command

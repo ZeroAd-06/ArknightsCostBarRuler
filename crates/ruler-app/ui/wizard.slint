@@ -42,6 +42,7 @@ export component Wizard inherits Window {
     in property <bool> debug-mode;
     in-out property <bool> record-video;
     in-out property <bool> record-csv;
+    in-out property <bool> trace-logging;
     in-out property <bool> replay-mode;
     in-out property <string> replay-path;
     in-out property <string> replay-fps-text;
@@ -50,6 +51,7 @@ export component Wizard inherits Window {
     in property <string> cap-debug-header;
     in property <string> cap-debug-video;
     in property <string> cap-debug-csv;
+    in property <string> cap-debug-trace;
     in property <string> cap-mode-header;
     in property <string> cap-mode-real;
     in property <string> cap-mode-replay;
@@ -380,6 +382,45 @@ export component Wizard inherits Window {
                     }
                     Text {
                         text: root.cap-debug-csv;
+                        color: Palette.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // trace-logging checkbox
+            Rectangle {
+                height: 18px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        y: (parent.height - self.height) / 2;
+                        border-width: 1px;
+                        border-color: root.trace-logging ? Palette.accent : Palette.hairline-faint;
+                        background: root.trace-logging ? Palette.accent-dim : transparent;
+                        animate background, border-color { duration: 110ms; }
+                        if (root.trace-logging): Path {
+                            width: 12px;
+                            height: 12px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-x: 0;
+                            viewbox-y: -960;
+                            viewbox-width: 960;
+                            viewbox-height: 960;
+                            commands: Icons.check;
+                            fill: Palette.text-primary;
+                        }
+                        tla := TouchArea {
+                            clicked => { root.trace-logging = !root.trace-logging; }
+                        }
+                    }
+                    Text {
+                        text: root.cap-debug-trace;
                         color: Palette.text-secondary;
                         font-size: 11px;
                         vertical-alignment: center;

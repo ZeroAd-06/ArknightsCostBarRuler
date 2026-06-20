@@ -50,6 +50,13 @@ pub enum CaptureType {
 }
 
 pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, String> {
+    log::info!(
+        "creating capture backend: type={:?}, instance_index={}, device_id={:?}, window_handle={:?}",
+        config.capture_type,
+        config.instance_index,
+        config.device_id,
+        config.window_handle
+    );
     match config.capture_type {
         CaptureType::Adb => Ok(Box::new(AdbController::new(config.device_id))),
         CaptureType::MuMu => {

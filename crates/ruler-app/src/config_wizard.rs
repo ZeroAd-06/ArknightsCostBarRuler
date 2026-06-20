@@ -66,10 +66,10 @@ mod platform {
                     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, LoadCursorW,
                     RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
                     ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-                    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE,
-                    SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_KEYDOWN,
-                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_TIMER, WNDCLASSW,
-                    WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+                    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
+                    SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY,
+                    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_TIMER,
+                    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
         },
@@ -93,6 +93,7 @@ mod platform {
     // Fixed logical design size of `wizard.slint` (physical = logical * scale).
     const WIZARD_LOGICAL_W: f32 = 560.0;
     const WIZARD_LOGICAL_H: f32 = 404.0;
+    const WIZARD_DEBUG_EXTRA_H: f32 = 248.0;
 
     #[derive(Clone, Debug)]
     struct ProbeMessage {
@@ -158,6 +159,7 @@ mod platform {
         core: Rc<RefCell<WizardCore>>,
         closing: Rc<Cell<bool>>,
         drag_on_title: Rc<Cell<bool>>,
+        debug_expanded: bool,
         mem_dc: HDC,
         dib: HBITMAP,
         bits: *mut PreBgra,
@@ -229,11 +231,7 @@ mod platform {
         refresh_candidates(&mut core.borrow_mut());
 
         let width = (WIZARD_LOGICAL_W * scale).round() as i32;
-        let logical_h = if debug {
-            WIZARD_LOGICAL_H + 248.0
-        } else {
-            WIZARD_LOGICAL_H
-        };
+        let logical_h = wizard_logical_height(debug);
         let height = (logical_h * scale).round() as i32;
         let _ = window
             .window()
@@ -274,6 +272,7 @@ mod platform {
                 core,
                 closing: Rc::clone(&closing),
                 drag_on_title,
+                debug_expanded: debug,
                 mem_dc,
                 dib,
                 bits,
@@ -353,9 +352,11 @@ mod platform {
         wizard.set_preview_placeholder(i18n.tr("config.window.preview.unavailable").into());
         wizard.set_auto_checked(false);
 
-        // Debug panel captions
-        wizard.set_debug_mode(debug);
+        // Debug panel state + captions
+        wizard.set_debug_expanded(debug);
         wizard.set_cap_debug_header(i18n.tr("config.selector.debug_header").into());
+        wizard.set_cap_debug_show(i18n.tr("config.selector.debug_show").into());
+        wizard.set_cap_debug_hide(i18n.tr("config.selector.debug_hide").into());
         wizard.set_cap_debug_video(i18n.tr("config.selector.debug_video").into());
         wizard.set_cap_debug_csv(i18n.tr("config.selector.debug_csv").into());
         wizard.set_cap_debug_trace(i18n.tr("config.selector.debug_trace").into());
@@ -532,6 +533,10 @@ mod platform {
             drain_probe_messages(&mut core);
             sync_to_slint(&state.wizard, &mut core);
         }
+        let debug_expanded = state.wizard.get_debug_expanded();
+        if debug_expanded != state.debug_expanded {
+            resize_wizard(hwnd, state, debug_expanded);
+        }
 
         let w = state.buf_w;
         let h = state.buf_h;
@@ -543,6 +548,40 @@ mod platform {
         if drawn {
             present_layered(hwnd, state.mem_dc, w as i32, h as i32);
         }
+    }
+
+    fn wizard_logical_height(debug_expanded: bool) -> f32 {
+        if debug_expanded {
+            WIZARD_LOGICAL_H + WIZARD_DEBUG_EXTRA_H
+        } else {
+            WIZARD_LOGICAL_H
+        }
+    }
+
+    unsafe fn resize_wizard(hwnd: HWND, state: &mut WizardWindow, debug_expanded: bool) {
+        let width = state.buf_w as i32;
+        let height = (wizard_logical_height(debug_expanded) * state.scale).round() as i32;
+        let _ = DeleteDC(state.mem_dc);
+        let _ = DeleteObject(HGDIOBJ(state.dib.0));
+        if let Some((mem_dc, dib, bits)) = create_dib(width, height) {
+            state.mem_dc = mem_dc;
+            state.dib = dib;
+            state.bits = bits;
+            state.buf_h = height as usize;
+        }
+        state.debug_expanded = debug_expanded;
+        state
+            .window
+            .set_size(PhysicalSize::new(width as u32, height as u32));
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
     }
 
     /// Push the current candidate state into the Slint component. Each section
@@ -1388,6 +1427,12 @@ mod platform {
             assert_eq!(preview_target_size(1280, 720, 336, 240), (336, 189));
             // Source already smaller than the cap is kept 1:1.
             assert_eq!(preview_target_size(100, 100, 560, 400), (100, 100));
+        }
+
+        #[test]
+        fn wizard_logical_height_tracks_debug_panel_visibility() {
+            assert_eq!(wizard_logical_height(false), 404.0);
+            assert_eq!(wizard_logical_height(true), 652.0);
         }
 
         fn candidate(fingerprint: &str, error: Option<&str>) -> TargetCandidate {

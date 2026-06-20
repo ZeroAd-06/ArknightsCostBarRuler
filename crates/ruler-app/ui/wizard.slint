@@ -38,8 +38,8 @@ export component Wizard inherits Window {
 
     in-out property <bool> auto-checked;
 
-    // debug-mode overrides
-    in property <bool> debug-mode;
+    // debug-related state
+    in-out property <bool> debug-expanded;
     in-out property <bool> record-video;
     in-out property <bool> record-csv;
     in-out property <bool> trace-logging;
@@ -49,6 +49,8 @@ export component Wizard inherits Window {
     in property <string> cap-replay-path;
     in property <string> cap-replay-fps-label;
     in property <string> cap-debug-header;
+    in property <string> cap-debug-show;
+    in property <string> cap-debug-hide;
     in property <string> cap-debug-video;
     in property <string> cap-debug-csv;
     in property <string> cap-debug-trace;
@@ -295,8 +297,8 @@ export component Wizard inherits Window {
             }
         }
 
-        // ===== DEBUG PANEL (only visible in debug mode) =====
-        if (root.debug-mode): VerticalLayout {
+        // ===== DEBUG PANEL =====
+        if (root.debug-expanded): VerticalLayout {
             spacing: 8px;
 
             // ---- Debug Recording section ----
@@ -587,6 +589,26 @@ export component Wizard inherits Window {
         HorizontalLayout {
             spacing: 8px;
             alignment: end;
+
+            // show / hide debug options
+            debug-btn := Rectangle {
+                width: 144px;
+                height: 30px;
+                border-width: 1px;
+                border-color: Palette.hairline-faint;
+                background: dbga.has-hover ? Palette.hover-fill : transparent;
+                animate background { duration: 110ms; }
+                Text {
+                    text: root.debug-expanded ? root.cap-debug-hide : root.cap-debug-show;
+                    color: Palette.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                dbga := TouchArea {
+                    clicked => { root.debug-expanded = !root.debug-expanded; }
+                }
+            }
 
             // refresh
             ref-btn := Rectangle {

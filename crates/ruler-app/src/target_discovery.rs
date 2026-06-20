@@ -652,6 +652,7 @@ mod platform {
             overlay_pos_x: previous.and_then(|config| config.overlay_pos_x),
             overlay_pos_y: previous.and_then(|config| config.overlay_pos_y),
             overlay_scale: previous.and_then(|config| config.overlay_scale),
+            ui_scaler: previous.and_then(|config| config.ui_scaler),
             debug_recording_enabled: previous.map(|c| c.debug_recording_enabled).unwrap_or(false),
             debug_recording_video: previous.map(|c| c.debug_recording_video).unwrap_or(false),
             debug_recording_csv: previous.map(|c| c.debug_recording_csv).unwrap_or(false),

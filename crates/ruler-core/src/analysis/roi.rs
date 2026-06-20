@@ -4,6 +4,7 @@
 const REF_WIDTH: f64 = 1920.0;
 const REF_HEIGHT: f64 = 1080.0;
 const REF_ASPECT_RATIO: f64 = REF_WIDTH / REF_HEIGHT;
+pub const DEFAULT_UI_SCALER: f64 = 1.0;
 
 const X1_OFFSET_FROM_RIGHT_REF: f64 = REF_WIDTH - 1739.0;
 const X2_OFFSET_FROM_RIGHT_REF: f64 = REF_WIDTH - 1919.0;
@@ -13,6 +14,14 @@ const Y2_OFFSET_FROM_BOTTOM_REF: f64 = REF_HEIGHT - 817.0;
 pub type Roi = (i32, i32, i32);
 
 pub fn find_cost_bar_roi(screen_width: i32, screen_height: i32) -> Roi {
+    find_cost_bar_roi_with_ui_scaler(screen_width, screen_height, DEFAULT_UI_SCALER)
+}
+
+pub fn find_cost_bar_roi_with_ui_scaler(
+    screen_width: i32,
+    screen_height: i32,
+    ui_scaler: f64,
+) -> Roi {
     let current_aspect_ratio = screen_width as f64 / screen_height as f64;
 
     let scale = if current_aspect_ratio >= REF_ASPECT_RATIO {
@@ -20,17 +29,28 @@ pub fn find_cost_bar_roi(screen_width: i32, screen_height: i32) -> Roi {
     } else {
         screen_width as f64 / REF_WIDTH
     };
+    let edge_scale = ui_edge_scale(ui_scaler);
 
-    let x1 = screen_width as f64 - X1_OFFSET_FROM_RIGHT_REF * scale;
     let x2 = screen_width as f64 - X2_OFFSET_FROM_RIGHT_REF * scale;
-    let y1 = screen_height as f64 - Y1_OFFSET_FROM_BOTTOM_REF * scale;
-    let y2 = screen_height as f64 - Y2_OFFSET_FROM_BOTTOM_REF * scale;
+    let width = (X1_OFFSET_FROM_RIGHT_REF - X2_OFFSET_FROM_RIGHT_REF) * scale * edge_scale;
+    let x1 = x2 - width;
+    let y1 = screen_height as f64 - Y1_OFFSET_FROM_BOTTOM_REF * scale * edge_scale;
+    let y2 = screen_height as f64 - Y2_OFFSET_FROM_BOTTOM_REF * scale * edge_scale;
 
     let x1_int = x1.round() as i32;
     let x2_int = x2.round() as i32;
     let y_mid_int = ((y1 + y2) / 2.0).round() as i32;
 
     (x1_int, x2_int, y_mid_int)
+}
+
+pub fn ui_edge_scale(ui_scaler: f64) -> f64 {
+    let ui_scaler = if ui_scaler.is_finite() {
+        ui_scaler.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_UI_SCALER
+    };
+    0.9 + 0.1 * ui_scaler
 }
 
 #[cfg(test)]
@@ -57,5 +77,14 @@ mod tests {
         let (x1, x2, _y) = find_cost_bar_roi(2560, 1080);
         assert_eq!(x1, 2560 - 181);
         assert_eq!(x2, 2560 - 1);
+    }
+
+    #[test]
+    fn ui_scaler_shrinks_from_right_and_bottom_anchors() {
+        let full = find_cost_bar_roi_with_ui_scaler(1920, 1080, 1.0);
+        let compact = find_cost_bar_roi_with_ui_scaler(1920, 1080, 0.0);
+
+        assert_eq!(full, (1739, 1919, 814));
+        assert_eq!(compact, (1757, 1919, 840));
     }
 }

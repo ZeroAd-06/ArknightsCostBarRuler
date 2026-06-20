@@ -1,7 +1,7 @@
 /// Calibration data loading from JSON files.
 /// Compatible with both old single-profile and new multi-profile formats.
 use crate::analysis::mapping::CalibrationTable;
-use crate::analysis::roi::find_cost_bar_roi;
+use crate::analysis::roi::DEFAULT_UI_SCALER;
 use crate::analysis::synthesis::{synthesize_profiles, MIN_DETECTABLE_WIDTH};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -9,6 +9,7 @@ use std::path::Path;
 
 const MIN_INFERRED_FRAMES_PER_COST: i32 = 15;
 const MAX_INFERRED_FRAMES_PER_COST: i32 = 150;
+const MIN_RELIABLE_WIDTHS_FOR_INFERENCE: usize = 4;
 const INFERENCE_DENOMINATORS: &[i32] = &[1, 2, 11];
 
 /// New multi-profile format
@@ -21,6 +22,8 @@ pub struct CalibrationData {
     pub screen_width: Option<u32>,
     #[serde(default)]
     pub screen_height: Option<u32>,
+    #[serde(default)]
+    pub ui_scaler: Option<f64>,
     #[serde(default)]
     pub calibration_time: Option<f64>,
 }
@@ -40,6 +43,8 @@ struct OldCalibrationFormat {
     screen_width: Option<u32>,
     #[serde(default)]
     screen_height: Option<u32>,
+    #[serde(default)]
+    ui_scaler: Option<f64>,
     #[serde(default)]
     calibration_time: Option<f64>,
 }
@@ -73,6 +78,7 @@ impl LoadedCalibration {
                     }],
                     screen_width: old_format.screen_width,
                     screen_height: old_format.screen_height,
+                    ui_scaler: old_format.ui_scaler,
                     calibration_time: old_format.calibration_time,
                 }
             } else {
@@ -106,6 +112,7 @@ impl LoadedCalibration {
                     }],
                     screen_width: old_format.screen_width,
                     screen_height: old_format.screen_height,
+                    ui_scaler: old_format.ui_scaler,
                     calibration_time: old_format.calibration_time,
                 }
             } else {
@@ -128,25 +135,31 @@ pub fn infer_calibration_from_samples(
     screen_height: u32,
     calibration_time: f64,
 ) -> Result<CalibrationData, String> {
+    infer_calibration_from_samples_with_ui_scaler(
+        cycle_samples,
+        screen_width,
+        screen_height,
+        DEFAULT_UI_SCALER,
+        calibration_time,
+    )
+}
+
+pub fn infer_calibration_from_samples_with_ui_scaler(
+    cycle_samples: &[Vec<i32>],
+    screen_width: u32,
+    screen_height: u32,
+    ui_scaler: f64,
+    calibration_time: f64,
+) -> Result<CalibrationData, String> {
     if cycle_samples.is_empty() {
         return Err("未能收集到任何有效的费用条循环，请保持费用条可见并重试。".to_string());
     }
 
-    let (x1, x2, _) = find_cost_bar_roi(screen_width as i32, screen_height as i32);
-    let total_bar_width = x2 - x1;
-    if total_bar_width <= 0 {
-        return Err("校准失败：无法根据当前分辨率定位费用条区域。".to_string());
-    }
-
-    let reliable_cycles = collect_reliable_cycle_widths(cycle_samples, total_bar_width);
-    if reliable_cycles.is_empty() {
-        return Err(
-            "校准失败：未能收集到足够的可靠费用条宽度，请等待费用条完整变化后重试。".to_string(),
-        );
-    }
-
-    let (n_eff, profile_offset) = find_fastest_matching_n(&reliable_cycles, total_bar_width)
-        .ok_or_else(|| {
+    let observed_max_width = observed_max_raw_width(cycle_samples).ok_or_else(|| {
+        "校准失败：未能从样本中确定费用条宽度，请保持费用条可见并重试。".to_string()
+    })?;
+    let (total_bar_width, n_eff, profile_offset) =
+        find_matching_model(cycle_samples, observed_max_width).ok_or_else(|| {
             "校准失败：样本与理论费用条序列不匹配，请重新进入关卡后在正常速度下重试。".to_string()
         })?;
 
@@ -166,6 +179,7 @@ pub fn infer_calibration_from_samples(
         profiles,
         screen_width: Some(screen_width),
         screen_height: Some(screen_height),
+        ui_scaler: Some(ui_scaler),
         calibration_time: Some(calibration_time),
     })
 }
@@ -187,14 +201,71 @@ fn collect_reliable_cycle_widths(
         .collect()
 }
 
-fn find_fastest_matching_n(
-    reliable_cycles: &[BTreeSet<i32>],
-    total_bar_width: i32,
-) -> Option<(f64, usize)> {
-    inference_candidates().into_iter().find_map(|n_eff| {
-        let profiles = synthesize_profiles(total_bar_width, n_eff);
-        matching_profile_offset(reliable_cycles, &profiles).map(|offset| (n_eff, offset))
-    })
+fn observed_max_raw_width(cycle_samples: &[Vec<i32>]) -> Option<i32> {
+    cycle_samples
+        .iter()
+        .flat_map(|sample| sample.iter().copied())
+        .filter(|width| *width >= MIN_DETECTABLE_WIDTH)
+        .max()
+}
+
+fn find_matching_model(
+    cycle_samples: &[Vec<i32>],
+    observed_max_width: i32,
+) -> Option<(i32, f64, usize)> {
+    let candidates = total_bar_width_candidates(observed_max_width)
+        .into_iter()
+        .filter_map(|total_bar_width| {
+            let reliable_cycles = collect_reliable_cycle_widths(cycle_samples, total_bar_width);
+            let reliable_width_count = reliable_width_count(&reliable_cycles);
+            (reliable_width_count >= MIN_RELIABLE_WIDTHS_FOR_INFERENCE).then_some((
+                total_bar_width,
+                reliable_cycles,
+                reliable_width_count,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    for n_eff in inference_candidates() {
+        let mut best_for_n: Option<(usize, i32, usize)> = None;
+
+        for (total_bar_width, reliable_cycles, reliable_width_count) in &candidates {
+            let profiles = synthesize_profiles(*total_bar_width, n_eff);
+            if let Some(offset) = matching_profile_offset(reliable_cycles, &profiles) {
+                let should_replace = best_for_n.as_ref().map_or(
+                    true,
+                    |(best_width_count, best_total_bar_width, _)| {
+                        *reliable_width_count > *best_width_count
+                            || (*reliable_width_count == *best_width_count
+                                && *total_bar_width < *best_total_bar_width)
+                    },
+                );
+                if should_replace {
+                    best_for_n = Some((*reliable_width_count, *total_bar_width, offset));
+                }
+            }
+        }
+
+        if let Some((_, total_bar_width, offset)) = best_for_n {
+            return Some((total_bar_width, n_eff, offset));
+        }
+    }
+
+    None
+}
+
+fn total_bar_width_candidates(observed_max_width: i32) -> Vec<i32> {
+    let slack = ((observed_max_width as f64) * 0.08).ceil() as i32;
+    let slack = slack.max(16);
+    (observed_max_width..=observed_max_width.saturating_add(slack)).collect()
+}
+
+fn reliable_width_count(reliable_cycles: &[BTreeSet<i32>]) -> usize {
+    reliable_cycles
+        .iter()
+        .flat_map(|cycle| cycle.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 fn inference_candidates() -> Vec<f64> {
@@ -302,6 +373,30 @@ mod tests {
         assert_eq!(data.profiles[0].total_frames, 60);
         assert_eq!(data.screen_width, Some(1920));
         assert_eq!(data.calibration_time, Some(123.0));
+    }
+
+    #[test]
+    fn infer_calibration_uses_observed_raw_width_as_total_width() {
+        let samples = sample_cycles_for_n(157, 30.0);
+        let data = infer_calibration_from_samples_with_ui_scaler(&samples, 1920, 1080, 0.0, 123.0)
+            .unwrap();
+
+        assert!(data.profiles[0].pixel_map.contains_key("157"));
+        assert!(!data.profiles[0].pixel_map.contains_key("180"));
+        assert_eq!(data.ui_scaler, Some(0.0));
+    }
+
+    #[test]
+    fn infer_calibration_recovers_when_full_width_frame_is_missing() {
+        let mut samples = sample_cycles_for_n(180, 30.0);
+        for sample in &mut samples {
+            sample.retain(|width| *width < 180);
+        }
+
+        let data = infer_calibration_from_samples(&samples, 1920, 1080, 123.0).unwrap();
+
+        assert!(data.profiles[0].pixel_map.contains_key("180"));
+        assert_eq!(data.profiles[0].total_frames, 30);
     }
 
     #[test]

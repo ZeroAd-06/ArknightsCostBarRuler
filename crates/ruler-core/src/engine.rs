@@ -19,6 +19,7 @@ pub struct RulerEngine {
     backend: Option<Box<dyn CaptureBackend>>,
     calibration: Option<LoadedCalibration>,
     roi: Option<Roi>,
+    ui_scaler: f64,
     current_profile_index: usize,
     cycle_counter: usize,
     elapsed_frames: f64,
@@ -89,6 +90,7 @@ impl RulerEngine {
             backend: None,
             calibration: None,
             roi: None,
+            ui_scaler: roi::DEFAULT_UI_SCALER,
             current_profile_index: 0,
             cycle_counter: 0,
             elapsed_frames: 0.0,
@@ -108,7 +110,11 @@ impl RulerEngine {
         backend.connect()?;
 
         let dims = backend.dimensions();
-        self.roi = Some(roi::find_cost_bar_roi(dims.0 as i32, dims.1 as i32));
+        self.roi = Some(roi::find_cost_bar_roi_with_ui_scaler(
+            dims.0 as i32,
+            dims.1 as i32,
+            self.ui_scaler,
+        ));
         self.backend = Some(backend);
         log::info!(
             "ruler-core connected: dimensions={}x{}, roi={:?}",
@@ -173,11 +179,23 @@ impl RulerEngine {
     }
 
     pub fn set_roi(&mut self, screen_width: i32, screen_height: i32) {
-        self.roi = Some(roi::find_cost_bar_roi(screen_width, screen_height));
+        self.roi = Some(roi::find_cost_bar_roi_with_ui_scaler(
+            screen_width,
+            screen_height,
+            self.ui_scaler,
+        ));
     }
 
     pub fn set_roi_value(&mut self, roi: Roi) {
         self.roi = Some(roi);
+    }
+
+    pub fn set_ui_scaler(&mut self, ui_scaler: f64) {
+        self.ui_scaler = normalized_ui_scaler(ui_scaler);
+    }
+
+    pub fn ui_scaler(&self) -> f64 {
+        self.ui_scaler
     }
 
     pub fn roi(&self) -> Option<Roi> {
@@ -246,7 +264,13 @@ impl RulerEngine {
         height: u32,
         format: PixelFormat,
     ) -> Result<FrameResult, String> {
-        let battle_state = scanner::detect_battle_state(buffer, width, height, format);
+        let battle_state = scanner::detect_battle_state_with_ui_scaler(
+            buffer,
+            width,
+            height,
+            format,
+            self.ui_scaler,
+        );
         self.analyze_frame_with_battle_state(buffer, width, height, format, battle_state)
     }
 
@@ -306,7 +330,8 @@ impl RulerEngine {
             .ok_or_else(|| "No calibration loaded".to_string())?;
 
         let pixel_width = scanner::get_raw_filled_pixel_width(buffer, width, height, format, roi);
-        let cost_is_negative = scanner::is_cost_negative(buffer, width, height, format);
+        let cost_is_negative =
+            scanner::is_cost_negative_with_ui_scaler(buffer, width, height, format, self.ui_scaler);
 
         let num_profiles = calibration.tables.len();
         let base_profile = if num_profiles == 0 {
@@ -427,6 +452,14 @@ fn effective_total_frames(total_frames: i32, cost_is_negative: bool) -> i32 {
         total_frames.saturating_mul(NEGATIVE_COST_INTERVAL_MULTIPLIER)
     } else {
         total_frames
+    }
+}
+
+fn normalized_ui_scaler(ui_scaler: f64) -> f64 {
+    if ui_scaler.is_finite() {
+        ui_scaler.clamp(0.0, 1.0)
+    } else {
+        roi::DEFAULT_UI_SCALER
     }
 }
 

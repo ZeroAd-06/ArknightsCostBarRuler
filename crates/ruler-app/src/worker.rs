@@ -12,7 +12,7 @@ use std::{
 
 use ruler_core::{
     analysis::{
-        calibration::infer_calibration_from_samples,
+        calibration::infer_calibration_from_samples_with_ui_scaler,
         scanner::{self, BattleState},
     },
     RulerConfig, RulerEngine,
@@ -353,6 +353,9 @@ fn run_worker_loop(
 }
 
 fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Result<(), String> {
+    context
+        .engine
+        .set_ui_scaler(context.config.effective_ui_scaler());
     let capture_config = context
         .config
         .to_capture_config()
@@ -600,10 +603,11 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock error: {error}"))?
         .as_secs_f64();
-    let calibration_data = infer_calibration_from_samples(
+    let calibration_data = infer_calibration_from_samples_with_ui_scaler(
         &cycle_samples,
         screen_width,
         screen_height,
+        context.config.effective_ui_scaler(),
         calibration_time,
     )?;
     let basename = format!("profile_{}", calibration_time.trunc() as u64);

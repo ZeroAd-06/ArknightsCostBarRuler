@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod arknights_settings;
 mod commands;
 mod config_wizard;
 mod debug_recorder;

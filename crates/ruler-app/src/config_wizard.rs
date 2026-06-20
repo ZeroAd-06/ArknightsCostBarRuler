@@ -481,6 +481,11 @@ mod platform {
                         overlay_pos_x: None,
                         overlay_pos_y: None,
                         overlay_scale: None,
+                        ui_scaler: core
+                            .borrow()
+                            .previous_config
+                            .as_ref()
+                            .and_then(|p| p.ui_scaler),
                         debug_recording_enabled: record_video || record_csv,
                         debug_recording_video: record_video,
                         debug_recording_csv: record_csv,
@@ -1457,6 +1462,7 @@ mod platform {
                     overlay_pos_x: None,
                     overlay_pos_y: None,
                     overlay_scale: None,
+                    ui_scaler: None,
                     debug_recording_enabled: false,
                     debug_recording_video: false,
                     debug_recording_csv: false,

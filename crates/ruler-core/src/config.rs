@@ -41,6 +41,10 @@ pub struct RulerConfig {
     /// Overlay scale multiplier (1.0 == 100%, the height-aligned default).
     #[serde(default)]
     pub overlay_scale: Option<f32>,
+    /// Arknights PC "UI比例缩放" value. 1.0 matches emulator layout, 0.0 uses
+    /// 90% edge length.
+    #[serde(default)]
+    pub ui_scaler: Option<f64>,
 
     // -- Debug recording / logging ------------------------------------------
     /// Master switch: enable background recording of capture + analysis data.
@@ -116,6 +120,13 @@ impl RulerConfig {
 
     pub fn normalized_frame_display_mode(&self) -> &str {
         self.frame_display_mode.as_deref().unwrap_or("0_to_n-1")
+    }
+
+    pub fn effective_ui_scaler(&self) -> f64 {
+        self.ui_scaler
+            .filter(|value| value.is_finite())
+            .unwrap_or(crate::analysis::roi::DEFAULT_UI_SCALER)
+            .clamp(0.0, 1.0)
     }
 
     pub fn to_capture_config(&self) -> Result<CaptureConfig, RulerConfigError> {
@@ -259,6 +270,7 @@ mod tests {
             overlay_pos_x: None,
             overlay_pos_y: None,
             overlay_scale: None,
+            ui_scaler: None,
             debug_recording_enabled: false,
             debug_recording_video: false,
             debug_recording_csv: false,

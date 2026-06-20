@@ -1,6 +1,6 @@
 /// Zero-copy pixel scanner for cost bar analysis.
 /// Operates directly on raw RGBA/BGR buffers.
-use super::roi::Roi;
+use super::roi::{self, Roi};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PixelFormat {
@@ -122,14 +122,11 @@ const BATTLE_BEGIN_WHITE_MIN: u8 = 210;
 const BATTLE_BEGIN_WHITE_TOLERANCE: u8 = 45;
 const BATTLE_BEGIN_DARK_MAX_SUM: u16 = 150;
 const BATTLE_BEGIN_SAMPLE_STEP_SCALE: f64 = 14.0;
-const BATTLE_BEGIN_SIDE_AVG_MAX: u64 = 28;
-const BATTLE_BEGIN_SIDE_DARK_RATIO_NUMERATOR: u32 = 99;
-const BATTLE_BEGIN_SIDE_DARK_RATIO_DENOMINATOR: u32 = 100;
+const BATTLE_BEGIN_SIDE_AVG_MAX: u64 = 120;
 const BATTLE_BEGIN_TOP_WHITE_MAX: u32 = 0;
-const BATTLE_BEGIN_OPERATION_WHITE_PERMYRIAD_MIN: u32 = 70;
-const BATTLE_BEGIN_CODE_WHITE_PERMYRIAD_MIN: u32 = 350;
-const BATTLE_BEGIN_TITLE_WHITE_PERMYRIAD_MIN: u32 = 180;
-const BATTLE_BEGIN_BOTTOM_WHITE_PERMYRIAD_MIN: u32 = 90;
+const BATTLE_BEGIN_CODE_WHITE_PERMYRIAD_MIN: u32 = 100;
+const BATTLE_BEGIN_TITLE_WHITE_PERMYRIAD_MIN: u32 = 150;
+const BATTLE_BEGIN_TEXT_SCORE_PERMYRIAD_MIN: u32 = 650;
 
 #[inline(always)]
 fn read_pixel(
@@ -189,22 +186,27 @@ fn is_cost_sign_pixel(r: u8, g: u8, b: u8, a: u8) -> bool {
 }
 
 #[inline]
-fn cost_sign_scale(width: u32, height: u32) -> f64 {
+fn cost_sign_scale(width: u32, height: u32, ui_scaler: f64) -> f64 {
     let aspect_ratio = width as f64 / height as f64;
-    if aspect_ratio >= COST_SIGN_REF_ASPECT_RATIO {
+    let base_scale = if aspect_ratio >= COST_SIGN_REF_ASPECT_RATIO {
         height as f64 / COST_SIGN_REF_HEIGHT
     } else {
         width as f64 / COST_SIGN_REF_WIDTH
-    }
+    };
+    base_scale * roi::ui_edge_scale(ui_scaler)
 }
 
 #[inline]
-fn cost_sign_scan_rect(width: u32, height: u32) -> Option<(i32, i32, i32, i32, f64)> {
+fn cost_sign_scan_rect(
+    width: u32,
+    height: u32,
+    ui_scaler: f64,
+) -> Option<(i32, i32, i32, i32, f64)> {
     if width == 0 || height == 0 {
         return None;
     }
 
-    let scale = cost_sign_scale(width, height);
+    let scale = cost_sign_scale(width, height, ui_scaler);
     let left = (width as f64 - COST_SIGN_LEFT_OFFSET_FROM_RIGHT_REF * scale).round() as i32;
     let right = (width as f64 - COST_SIGN_RIGHT_OFFSET_FROM_RIGHT_REF * scale).round() as i32;
     let top = (height as f64 - COST_SIGN_TOP_OFFSET_FROM_BOTTOM_REF * scale).round() as i32;
@@ -276,26 +278,20 @@ impl BattleBeginBandStats {
     }
 
     #[inline]
-    fn is_mostly_dark(self) -> bool {
-        self.total > 0
-            && self
-                .dark
-                .saturating_mul(BATTLE_BEGIN_SIDE_DARK_RATIO_DENOMINATOR)
-                >= self
-                    .total
-                    .saturating_mul(BATTLE_BEGIN_SIDE_DARK_RATIO_NUMERATOR)
-            && self.avg_brightness() <= BATTLE_BEGIN_SIDE_AVG_MAX
+    fn is_dim_backdrop(self) -> bool {
+        self.total > 0 && self.avg_brightness() <= BATTLE_BEGIN_SIDE_AVG_MAX
     }
 }
 
 #[inline]
-fn battle_button_scale(width: u32, height: u32) -> f64 {
+fn battle_button_scale(width: u32, height: u32, ui_scaler: f64) -> f64 {
     let aspect_ratio = width as f64 / height as f64;
-    if aspect_ratio >= BATTLE_BUTTON_REF_ASPECT_RATIO {
+    let base_scale = if aspect_ratio >= BATTLE_BUTTON_REF_ASPECT_RATIO {
         height as f64 / BATTLE_BUTTON_REF_HEIGHT
     } else {
         width as f64 / BATTLE_BUTTON_REF_WIDTH
-    }
+    };
+    base_scale * roi::ui_edge_scale(ui_scaler)
 }
 
 #[inline]
@@ -644,23 +640,20 @@ fn has_battle_begin_title_screen(
     let left_background = sample_battle_begin_band(
         buffer, width, height, format, 0.03, 0.18, 0.40, 0.80, step, step,
     );
-    if !left_background.is_mostly_dark() {
+    if !left_background.is_dim_backdrop() {
         return false;
     }
 
     let right_background = sample_battle_begin_band(
         buffer, width, height, format, 0.82, 0.97, 0.40, 0.80, step, step,
     );
-    if !right_background.is_mostly_dark() {
+    if !right_background.is_dim_backdrop() {
         return false;
     }
 
     let operation = sample_battle_begin_band(
         buffer, width, height, format, 0.20, 0.80, 0.38, 0.47, step, step,
     );
-    if operation.white_permyriad() < BATTLE_BEGIN_OPERATION_WHITE_PERMYRIAD_MIN {
-        return false;
-    }
 
     let code = sample_battle_begin_band(
         buffer, width, height, format, 0.25, 0.75, 0.46, 0.58, step, step,
@@ -679,7 +672,12 @@ fn has_battle_begin_title_screen(
     let bottom = sample_battle_begin_band(
         buffer, width, height, format, 0.20, 0.80, 0.84, 0.99, step, step,
     );
-    bottom.white_permyriad() >= BATTLE_BEGIN_BOTTOM_WHITE_PERMYRIAD_MIN
+    operation
+        .white_permyriad()
+        .saturating_add(code.white_permyriad())
+        .saturating_add(title.white_permyriad())
+        .saturating_add(bottom.white_permyriad())
+        >= BATTLE_BEGIN_TEXT_SCORE_PERMYRIAD_MIN
 }
 
 /// Classifies the top-right battle HUD into one of the [`BattleState`]s.
@@ -699,11 +697,21 @@ pub fn detect_battle_state(
     height: u32,
     format: PixelFormat,
 ) -> BattleState {
+    detect_battle_state_with_ui_scaler(buffer, width, height, format, roi::DEFAULT_UI_SCALER)
+}
+
+pub fn detect_battle_state_with_ui_scaler(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    ui_scaler: f64,
+) -> BattleState {
     if width == 0 || height == 0 {
         return BattleState::NotInBattle;
     }
 
-    let scale = battle_button_scale(width, height);
+    let scale = battle_button_scale(width, height, ui_scaler);
     let count_step = if scale >= 1.5 { 2 } else { 1 };
     let speed_rect = glyph_rect_from_right(
         width,
@@ -885,7 +893,18 @@ pub fn get_raw_filled_pixel_width(
 }
 
 pub fn is_cost_negative(buffer: &[u8], width: u32, height: u32, format: PixelFormat) -> bool {
-    let Some((left, right, top, bottom, scale)) = cost_sign_scan_rect(width, height) else {
+    is_cost_negative_with_ui_scaler(buffer, width, height, format, roi::DEFAULT_UI_SCALER)
+}
+
+pub fn is_cost_negative_with_ui_scaler(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    ui_scaler: f64,
+) -> bool {
+    let Some((left, right, top, bottom, scale)) = cost_sign_scan_rect(width, height, ui_scaler)
+    else {
         return false;
     };
 

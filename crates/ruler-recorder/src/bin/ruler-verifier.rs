@@ -29,6 +29,7 @@ struct Options {
     output_path: PathBuf,
     calibration_path: Option<PathBuf>,
     fps_override: Option<f64>,
+    ui_scaler: Option<f64>,
 }
 
 fn print_help() {
@@ -37,6 +38,7 @@ fn print_help() {
     eprintln!("  -i, --input PATH          Input recorded video file (required)");
     eprintln!("  -o, --output PATH         Output CSV path (default: <input>_verify.csv)");
     eprintln!("      --fps VALUE           Fallback FPS if stream timestamps are unavailable");
+    eprintln!("      --ui-scaler VALUE     Arknights PC UI scaler value (0.0..1.0)");
     eprintln!("      --calibration PATH    Override calibration file path");
     eprintln!("  -h, --help               Print help");
 }
@@ -57,6 +59,7 @@ fn parse_args() -> Result<Options, String> {
     let mut output_path: Option<PathBuf> = None;
     let mut calibration_path: Option<PathBuf> = None;
     let mut fps_override: Option<f64> = None;
+    let mut ui_scaler: Option<f64> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -95,6 +98,19 @@ fn parse_args() -> Result<Options, String> {
                 }
                 fps_override = Some(parsed);
             }
+            "--ui-scaler" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "missing value for --ui-scaler".to_string())?;
+                let parsed = value
+                    .parse::<f64>()
+                    .map_err(|_| "--ui-scaler must be a number between 0.0 and 1.0".to_string())?;
+                if !(0.0..=1.0).contains(&parsed) {
+                    return Err("--ui-scaler must be between 0.0 and 1.0".to_string());
+                }
+                ui_scaler = Some(parsed);
+            }
             "--calibration" => {
                 i += 1;
                 let value = args
@@ -120,6 +136,7 @@ fn parse_args() -> Result<Options, String> {
         output_path,
         calibration_path,
         fps_override,
+        ui_scaler,
     })
 }
 
@@ -537,6 +554,11 @@ fn main() {
     });
 
     let mut engine = RulerEngine::new();
+    engine.set_ui_scaler(
+        options
+            .ui_scaler
+            .unwrap_or_else(|| ruler_config.effective_ui_scaler()),
+    );
     engine
         .load_calibration(&calibration_path)
         .unwrap_or_else(|e| {
@@ -562,6 +584,7 @@ fn main() {
     eprintln!("  calibration : {}", calibration_path.display());
     eprintln!("  output      : {}", options.output_path.display());
     eprintln!("  dimensions  : {width}x{height}");
+    eprintln!("  ui scaler   : {:.3}", engine.ui_scaler());
     eprintln!("  timestamps  : ffmpeg/showinfo PTS");
     eprintln!("  fps fallback: {fallback_fps}");
 

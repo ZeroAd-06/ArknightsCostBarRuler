@@ -165,6 +165,7 @@ fn determine_startup_status(resources: &ResourceLocator) -> StartupStatus {
         Err(error) => return StartupStatus::invalid(config_path_text, error.to_string()),
     };
     log::info!("loaded config from '{}'", config_path.display());
+    let config = apply_runtime_ui_scaler(config);
 
     match config.to_capture_config() {
         Ok(_) => StartupStatus::ready(config_path_text, config),
@@ -192,7 +193,10 @@ fn resolve_startup_config(
                 "saved debug-wizard config to '{}'",
                 resources.config_path().display()
             );
-            return Ok(StartupStatus::ready(config_path_text, config));
+            return Ok(StartupStatus::ready(
+                config_path_text,
+                apply_runtime_ui_scaler(config),
+            ));
         }
         return Ok(StartupStatus::invalid(
             config_path_text,
@@ -215,7 +219,10 @@ fn resolve_startup_config(
                         "saved auto-selected config to '{}'",
                         resources.config_path().display()
                     );
-                    return Ok(StartupStatus::ready(config_path_text, config));
+                    return Ok(StartupStatus::ready(
+                        config_path_text,
+                        apply_runtime_ui_scaler(config),
+                    ));
                 }
                 Ok(None) => {
                     log::warn!("auto target selection did not find a usable matching target");
@@ -235,7 +242,10 @@ fn resolve_startup_config(
             "saved config wizard selection to '{}'",
             resources.config_path().display()
         );
-        return Ok(StartupStatus::ready(config_path_text, config));
+        return Ok(StartupStatus::ready(
+            config_path_text,
+            apply_runtime_ui_scaler(config),
+        ));
     }
 
     Ok(StartupStatus::invalid(
@@ -284,5 +294,28 @@ fn try_auto_select_config(config: &RulerConfig) -> Result<Option<RulerConfig>, S
     selected.overlay_pos_x = config.overlay_pos_x;
     selected.overlay_pos_y = config.overlay_pos_y;
     selected.overlay_scale = config.overlay_scale;
+    selected.ui_scaler = config.ui_scaler;
     Ok(Some(selected))
+}
+
+fn apply_runtime_ui_scaler(mut config: RulerConfig) -> RulerConfig {
+    if config.ui_scaler.is_some() || config.capture_type != "window" {
+        return config;
+    }
+
+    match crate::arknights_settings::read_pc_ui_scaler() {
+        Ok(Some(ui_scaler)) => {
+            let ui_scaler = ui_scaler.clamp(0.0, 1.0);
+            log::info!("detected Arknights PC uiScaler={ui_scaler:.3} from registry");
+            config.ui_scaler = Some(ui_scaler);
+        }
+        Ok(None) => {
+            log::info!("Arknights PC uiScaler registry value not found; using 1.0 layout");
+        }
+        Err(error) => {
+            log::warn!("failed to read Arknights PC uiScaler: {error}; using 1.0 layout");
+        }
+    }
+
+    config
 }

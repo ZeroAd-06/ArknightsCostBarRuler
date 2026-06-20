@@ -200,6 +200,7 @@ mod platform {
         get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
     };
     use ruler_core::RulerConfig;
+    use serde_json::Value;
     use sysinfo::System;
     use windows::Win32::{
         Foundation::{BOOL, HWND, LPARAM},
@@ -242,6 +243,28 @@ mod platform {
         hwnd: isize,
         title: String,
         class_name: String,
+    }
+
+    #[derive(Clone, Debug)]
+    struct MuMuInstall {
+        install_path: PathBuf,
+        manager_path: PathBuf,
+    }
+
+    #[derive(Clone, Debug)]
+    struct MuMuManagerInfo {
+        index: u32,
+        name: Option<String>,
+        host: String,
+        port: u16,
+    }
+
+    #[derive(Clone, Debug)]
+    struct LDPlayerInstance {
+        index: u32,
+        name: String,
+        player_pid: u32,
+        vbox_pid: u32,
     }
 
     pub fn discover_targets(previous: Option<&RulerConfig>) -> Vec<TargetCandidate> {
@@ -302,6 +325,37 @@ mod platform {
         claimed_serials: &mut HashSet<String>,
         candidates: &mut Vec<TargetCandidate>,
     ) {
+        for install in discover_mumu_tool_installs(processes) {
+            let program = install.manager_path.to_string_lossy().into_owned();
+            let Ok(output) =
+                run_command_text(&program, &["info", "--vmindex", "all"], COMMAND_TIMEOUT)
+            else {
+                continue;
+            };
+
+            for info in parse_mumu_manager_infos(&output) {
+                let Some(serial) =
+                    adb_serial_for_address(&info.host, info.port, connected_adb_serials)
+                else {
+                    continue;
+                };
+                if !adb_has_arknights_package(&serial) {
+                    continue;
+                }
+
+                claimed_ports.insert(info.port);
+                claimed_serials.insert(serial.clone());
+                push_mumu_candidate(
+                    install.install_path.clone(),
+                    info.index,
+                    info.name.clone(),
+                    serial,
+                    previous,
+                    candidates,
+                );
+            }
+        }
+
         for process in processes
             .iter()
             .filter(|process| process.name.eq_ignore_ascii_case("MuMuVMMHeadless.exe"))
@@ -332,33 +386,14 @@ mod platform {
             };
             claimed_ports.insert(port);
             claimed_serials.insert(serial.clone());
-
-            let install_text = install_path.to_string_lossy().into_owned();
-            let fingerprint = format!("mumu:{}:{}", stable_path(&install_path), instance_index);
-            let mut config = base_config(
-                "mumu",
-                Some(install_text.clone()),
-                Some(instance_index),
-                Some(serial.clone()),
+            push_mumu_candidate(
+                install_path,
+                instance_index,
                 None,
-                None,
-                None,
-                &fingerprint,
+                serial,
                 previous,
+                candidates,
             );
-            config.target_fingerprint = Some(fingerprint.clone());
-
-            candidates.push(TargetCandidate {
-                kind: TargetKind::MuMu,
-                fingerprint,
-                name: format!("MuMu #{instance_index}"),
-                detail: format!("{serial} | {}", install_path.display()),
-                config,
-                latency: None,
-                latency_class: LatencyClass::Unknown,
-                preview: None,
-                error: None,
-            });
         }
     }
 
@@ -372,6 +407,55 @@ mod platform {
         claimed_serials: &mut HashSet<String>,
         candidates: &mut Vec<TargetCandidate>,
     ) {
+        for install_path in discover_ldplayer_tool_installs(processes) {
+            for instance in ldplayer_instances_for_install(&install_path) {
+                if instance.player_pid == 0 || instance.vbox_pid == 0 {
+                    continue;
+                }
+
+                let mut ports = listeners
+                    .iter()
+                    .filter(|listener| {
+                        listener.pid == instance.player_pid || listener.pid == instance.vbox_pid
+                    })
+                    .map(|listener| listener.port)
+                    .filter(|port| *port != 5037 && *port >= 1024)
+                    .collect::<Vec<_>>();
+                ports.sort_unstable();
+                ports.dedup();
+
+                let mut matched_port = None;
+                if let Some(serial) =
+                    ldplayer_adb_serial_for_instance(instance.index, connected_adb_serials)
+                        .filter(|serial| adb_has_arknights_package(serial))
+                {
+                    matched_port = Some((serial, 5554 + instance.index as u16 * 2));
+                }
+                if matched_port.is_none() {
+                    for (serial, port) in adb_serial_for_ports(&ports, connected_adb_serials) {
+                        if adb_has_arknights_package(&serial) {
+                            matched_port = Some((serial, port));
+                            break;
+                        }
+                    }
+                }
+
+                let Some((serial, port)) = matched_port else {
+                    continue;
+                };
+                claimed_ports.insert(port);
+                claimed_serials.insert(serial.clone());
+                push_ldplayer_candidate(
+                    install_path.clone(),
+                    instance.index,
+                    Some(instance.name.clone()),
+                    serial,
+                    previous,
+                    candidates,
+                );
+            }
+        }
+
         for process in processes
             .iter()
             .filter(|process| process.name.eq_ignore_ascii_case("Ld9BoxHeadless.exe"))
@@ -426,33 +510,14 @@ mod platform {
             };
             claimed_ports.insert(port);
             claimed_serials.insert(serial.clone());
-
-            let install_text = install_path.to_string_lossy().into_owned();
-            let fingerprint = format!("ldplayer:{}:{}", stable_path(&install_path), instance_index);
-            let mut config = base_config(
-                "ldplayer",
-                Some(install_text.clone()),
-                Some(instance_index),
-                Some(serial.clone()),
+            push_ldplayer_candidate(
+                install_path,
+                instance_index,
                 None,
-                None,
-                None,
-                &fingerprint,
+                serial,
                 previous,
+                candidates,
             );
-            config.target_fingerprint = Some(fingerprint.clone());
-
-            candidates.push(TargetCandidate {
-                kind: TargetKind::LDPlayer,
-                fingerprint,
-                name: format!("LDPlayer #{instance_index}"),
-                detail: format!("{serial} | {}", install_path.display()),
-                config,
-                latency: None,
-                latency_class: LatencyClass::Unknown,
-                preview: None,
-                error: None,
-            });
         }
     }
 
@@ -594,6 +659,274 @@ mod platform {
             replay_hevc_path: previous.and_then(|c| c.replay_hevc_path.clone()),
             replay_fps: previous.and_then(|c| c.replay_fps),
         }
+    }
+
+    fn push_mumu_candidate(
+        install_path: PathBuf,
+        instance_index: u32,
+        display_name: Option<String>,
+        serial: String,
+        previous: Option<&RulerConfig>,
+        candidates: &mut Vec<TargetCandidate>,
+    ) {
+        let install_text = install_path.to_string_lossy().into_owned();
+        let fingerprint = format!("mumu:{}:{}", stable_path(&install_path), instance_index);
+        let mut config = base_config(
+            "mumu",
+            Some(install_text),
+            Some(instance_index),
+            Some(serial.clone()),
+            None,
+            None,
+            None,
+            &fingerprint,
+            previous,
+        );
+        config.target_fingerprint = Some(fingerprint.clone());
+
+        candidates.push(TargetCandidate {
+            kind: TargetKind::MuMu,
+            fingerprint,
+            name: non_empty(display_name).unwrap_or_else(|| format!("MuMu #{instance_index}")),
+            detail: format!("{serial} | {}", install_path.display()),
+            config,
+            latency: None,
+            latency_class: LatencyClass::Unknown,
+            preview: None,
+            error: None,
+        });
+    }
+
+    fn push_ldplayer_candidate(
+        install_path: PathBuf,
+        instance_index: u32,
+        display_name: Option<String>,
+        serial: String,
+        previous: Option<&RulerConfig>,
+        candidates: &mut Vec<TargetCandidate>,
+    ) {
+        let install_text = install_path.to_string_lossy().into_owned();
+        let fingerprint = format!("ldplayer:{}:{}", stable_path(&install_path), instance_index);
+        let mut config = base_config(
+            "ldplayer",
+            Some(install_text),
+            Some(instance_index),
+            Some(serial.clone()),
+            None,
+            None,
+            None,
+            &fingerprint,
+            previous,
+        );
+        config.target_fingerprint = Some(fingerprint.clone());
+
+        candidates.push(TargetCandidate {
+            kind: TargetKind::LDPlayer,
+            fingerprint,
+            name: non_empty(display_name).unwrap_or_else(|| format!("LDPlayer #{instance_index}")),
+            detail: format!("{serial} | {}", install_path.display()),
+            config,
+            latency: None,
+            latency_class: LatencyClass::Unknown,
+            preview: None,
+            error: None,
+        });
+    }
+
+    fn non_empty(value: Option<String>) -> Option<String> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn discover_mumu_tool_installs(processes: &[ProcessInfo]) -> Vec<MuMuInstall> {
+        let mut seen = HashSet::new();
+        let mut installs = Vec::new();
+        for process in processes
+            .iter()
+            .filter(|process| is_mumu_discovery_process(&process.name))
+        {
+            let Some(install_path) = resolve_mumu_install_path_for_process(process, processes)
+                .or_else(|| {
+                    process
+                        .executable_path
+                        .as_deref()
+                        .and_then(resolve_mumu_install_path)
+                })
+            else {
+                continue;
+            };
+            let Some(manager_path) = resolve_mumu_manager_path(&install_path, process) else {
+                continue;
+            };
+            if seen.insert(stable_path(&manager_path)) {
+                installs.push(MuMuInstall {
+                    install_path,
+                    manager_path,
+                });
+            }
+        }
+        installs
+    }
+
+    fn is_mumu_discovery_process(name: &str) -> bool {
+        [
+            "MuMuPlayer.exe",
+            "MuMuNxDevice.exe",
+            "MuMuVMMHeadless.exe",
+            "NemuPlayer.exe",
+        ]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    }
+
+    fn resolve_mumu_manager_path(install_path: &Path, process: &ProcessInfo) -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Some(parent) = process
+            .executable_path
+            .as_deref()
+            .and_then(|path| Path::new(path).parent())
+        {
+            candidates.push(parent.join("MuMuManager.exe"));
+        }
+        candidates.extend([
+            install_path.join("shell").join("MuMuManager.exe"),
+            install_path.join("nx_main").join("MuMuManager.exe"),
+            install_path
+                .join("nx_device")
+                .join("12.0")
+                .join("shell")
+                .join("MuMuManager.exe"),
+            install_path.join("MuMuManager.exe"),
+        ]);
+        candidates.into_iter().find(|path| path.exists())
+    }
+
+    fn parse_mumu_manager_infos(output: &str) -> Vec<MuMuManagerInfo> {
+        let Ok(value) = serde_json::from_str::<Value>(output) else {
+            return Vec::new();
+        };
+
+        match value {
+            Value::Array(values) => values
+                .iter()
+                .filter_map(parse_mumu_manager_info_value)
+                .collect(),
+            Value::Object(map) if is_mumu_info_object(&map) => {
+                parse_mumu_manager_info_value(&Value::Object(map))
+                    .into_iter()
+                    .collect()
+            }
+            Value::Object(map) => map
+                .values()
+                .filter_map(parse_mumu_manager_info_value)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn is_mumu_info_object(map: &serde_json::Map<String, Value>) -> bool {
+        map.contains_key("adb_port") || map.contains_key("adb_host_ip") || map.contains_key("index")
+    }
+
+    fn parse_mumu_manager_info_value(value: &Value) -> Option<MuMuManagerInfo> {
+        let map = value.as_object()?;
+        let index = json_u32(map.get("index")?)?;
+        let port = json_u16(map.get("adb_port")?)?;
+        if port == 0 {
+            return None;
+        }
+
+        let host = map
+            .get("adb_host_ip")
+            .and_then(json_string)
+            .map(|host| normalize_adb_host(&host))
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let name = map.get("name").and_then(json_string);
+
+        Some(MuMuManagerInfo {
+            index,
+            name,
+            host,
+            port,
+        })
+    }
+
+    fn json_u32(value: &Value) -> Option<u32> {
+        match value {
+            Value::Number(number) => number.as_u64().and_then(|value| u32::try_from(value).ok()),
+            Value::String(text) => text.trim().parse::<u32>().ok(),
+            _ => None,
+        }
+    }
+
+    fn json_u16(value: &Value) -> Option<u16> {
+        json_u32(value).and_then(|value| u16::try_from(value).ok())
+    }
+
+    fn json_string(value: &Value) -> Option<String> {
+        match value {
+            Value::String(text) => Some(text.trim().to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        }
+        .filter(|value| !value.is_empty())
+    }
+
+    fn discover_ldplayer_tool_installs(processes: &[ProcessInfo]) -> Vec<PathBuf> {
+        let mut seen = HashSet::new();
+        let mut installs = Vec::new();
+        for process in processes
+            .iter()
+            .filter(|process| is_ldplayer_discovery_process(&process.name))
+        {
+            let Some(install_path) = resolve_ldplayer_install_path_for_process(process, processes)
+            else {
+                continue;
+            };
+            if seen.insert(stable_path(&install_path)) {
+                installs.push(install_path);
+            }
+        }
+        installs
+    }
+
+    fn is_ldplayer_discovery_process(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower == "dnplayer.exe"
+            || lower == "ldplayer.exe"
+            || lower == "ld9boxheadless.exe"
+            || lower == "ldboxheadless.exe"
+            || lower == "ldvboxheadless.exe"
+            || lower.contains("dnplayer")
+    }
+
+    fn ldplayer_instances_for_install(install_path: &Path) -> Vec<LDPlayerInstance> {
+        let dnconsole = install_path.join("dnconsole.exe");
+        let Ok(output) =
+            run_command_text(&dnconsole.to_string_lossy(), &["list2"], COMMAND_TIMEOUT)
+        else {
+            return Vec::new();
+        };
+        parse_ldplayer_instances(&output)
+    }
+
+    fn parse_ldplayer_instances(output: &str) -> Vec<LDPlayerInstance> {
+        output
+            .lines()
+            .filter_map(|line| {
+                let parts = line.split(',').map(str::trim).collect::<Vec<_>>();
+                if parts.len() < 7 {
+                    return None;
+                }
+                Some(LDPlayerInstance {
+                    index: parts[0].parse::<u32>().ok()?,
+                    name: parts[1].to_string(),
+                    player_pid: parts[5].parse::<u32>().ok()?,
+                    vbox_pid: parts[6].parse::<u32>().ok()?,
+                })
+            })
+            .collect()
     }
 
     fn query_processes() -> Vec<ProcessInfo> {
@@ -959,7 +1292,16 @@ mod platform {
     }
 
     fn adb_serial_for_port(port: u16, connected_adb_serials: &[String]) -> Option<String> {
-        let serial = format!("127.0.0.1:{port}");
+        adb_serial_for_address("127.0.0.1", port, connected_adb_serials)
+    }
+
+    fn adb_serial_for_address(
+        host: &str,
+        port: u16,
+        connected_adb_serials: &[String],
+    ) -> Option<String> {
+        let host = normalize_adb_host(host);
+        let serial = format!("{host}:{port}");
         if !connected_adb_serials
             .iter()
             .any(|connected| connected == &serial)
@@ -968,6 +1310,13 @@ mod platform {
         }
         let state = run_command_text("adb", &["-s", &serial, "get-state"], COMMAND_TIMEOUT).ok()?;
         (state.trim() == "device").then_some(serial)
+    }
+
+    fn normalize_adb_host(host: &str) -> String {
+        match host.trim() {
+            "" | "0.0.0.0" | "localhost" => "127.0.0.1".to_string(),
+            host => host.to_string(),
+        }
     }
 
     fn ldplayer_adb_serial_for_instance(
@@ -1191,6 +1540,59 @@ mod platform {
         }
 
         #[test]
+        fn parses_ldplayer_instances_from_list2() {
+            let output = "0,雷电模拟器,2032678,1704928,1,7456,3500,1280,720,240\n\
+                          1,雷电模拟器-1,852422,590830,1,3772,3180,1920,1080,280";
+            let instances = parse_ldplayer_instances(output);
+
+            assert_eq!(instances.len(), 2);
+            assert_eq!(instances[0].index, 0);
+            assert_eq!(instances[0].name, "雷电模拟器");
+            assert_eq!(instances[0].player_pid, 7456);
+            assert_eq!(instances[0].vbox_pid, 3500);
+            assert_eq!(instances[1].index, 1);
+        }
+
+        #[test]
+        fn parses_mumu_manager_object_output() {
+            let output = r#"{
+                "0": {
+                    "index": "0",
+                    "name": "主模拟器",
+                    "adb_host_ip": "localhost",
+                    "adb_port": 16384
+                },
+                "1": {
+                    "index": 1,
+                    "name": "副模拟器",
+                    "adb_host_ip": "127.0.0.1",
+                    "adb_port": "16416"
+                }
+            }"#;
+            let infos = parse_mumu_manager_infos(output);
+
+            assert_eq!(infos.len(), 2);
+            assert_eq!(infos[0].index, 0);
+            assert_eq!(infos[0].name.as_deref(), Some("主模拟器"));
+            assert_eq!(infos[0].host, "127.0.0.1");
+            assert_eq!(infos[0].port, 16384);
+            assert_eq!(infos[1].index, 1);
+            assert_eq!(infos[1].port, 16416);
+        }
+
+        #[test]
+        fn parses_mumu_manager_single_output() {
+            let output =
+                r#"{"index":"2","name":"MuMu-2","adb_host_ip":"0.0.0.0","adb_port":16448}"#;
+            let infos = parse_mumu_manager_infos(output);
+
+            assert_eq!(infos.len(), 1);
+            assert_eq!(infos[0].index, 2);
+            assert_eq!(infos[0].host, "127.0.0.1");
+            assert_eq!(infos[0].port, 16448);
+        }
+
+        #[test]
         fn parses_mumu_instance_markers() {
             let process = ProcessInfo {
                 name: "MuMuVMMHeadless.exe".to_string(),
@@ -1278,6 +1680,24 @@ mod platform {
                     .unwrap();
 
             assert_eq!(resolved, root);
+        }
+
+        #[test]
+        fn mumu_manager_path_can_come_from_v5_layout() {
+            let root = std::env::temp_dir().join(unique_test_dir("mumu-v5-manager"));
+            let shell = root.join("nx_device").join("12.0").join("shell");
+            std::fs::create_dir_all(&shell).unwrap();
+            std::fs::write(shell.join("MuMuManager.exe"), []).unwrap();
+
+            let process = process(
+                "MuMuNxDevice.exe",
+                1,
+                None,
+                Some(&shell.join("MuMuNxDevice.exe").to_string_lossy()),
+            );
+            let resolved = resolve_mumu_manager_path(&root, &process).unwrap();
+
+            assert_eq!(resolved, shell.join("MuMuManager.exe"));
         }
 
         #[test]

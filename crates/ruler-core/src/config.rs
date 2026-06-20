@@ -55,8 +55,9 @@ pub struct RulerConfig {
     #[serde(default)]
     pub debug_recording_csv: bool,
 
-    /// Output directory for debug recordings (relative to project root).
-    /// Defaults to "recordings" when not set.
+    /// Output directory for debug recordings.
+    /// Relative paths are resolved under the app's configured data root;
+    /// defaults to "recordings" when not set.
     #[serde(default)]
     pub debug_recording_output_dir: Option<String>,
 
@@ -94,6 +95,15 @@ impl RulerConfig {
                 path: path.to_path_buf(),
                 source,
             })?;
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|source| RulerConfigError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
         fs::write(path, contents).map_err(|source| RulerConfigError::Io {
             path: path.to_path_buf(),
             source,
@@ -169,3 +179,58 @@ impl fmt::Display for RulerConfigError {
 }
 
 impl std::error::Error for RulerConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::RulerConfig;
+    use std::{fs, path::PathBuf, time::SystemTime};
+
+    #[test]
+    fn save_to_path_creates_parent_directories() {
+        let root = unique_temp_dir("ruler_config_save");
+        let path = root.join("nested").join("config.json");
+        let config = minimal_config();
+
+        config.save_to_path(&path).unwrap();
+
+        assert!(path.is_file());
+        let loaded = RulerConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.capture_type, "replay");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn minimal_config() -> RulerConfig {
+        RulerConfig {
+            capture_type: "replay".to_string(),
+            install_path: None,
+            instance_index: None,
+            device_id: None,
+            window_handle: None,
+            window_title: None,
+            window_class: None,
+            active_calibration_profile: None,
+            frame_display_mode: None,
+            language: None,
+            auto_select_target: false,
+            target_fingerprint: None,
+            overlay_pos_x: None,
+            overlay_pos_y: None,
+            overlay_scale: None,
+            debug_recording_enabled: false,
+            debug_recording_video: false,
+            debug_recording_csv: false,
+            debug_recording_output_dir: None,
+            replay_hevc_path: None,
+            replay_fps: None,
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{nanos}"))
+    }
+}

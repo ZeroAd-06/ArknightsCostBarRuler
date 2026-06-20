@@ -312,12 +312,8 @@ fn run_worker_loop(
 
     let profiles = ProfileStore::new(&resources);
 
-    // Resolve debug recording output directory
-    let debug_recording_dir = config
-        .debug_recording_output_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("recordings"));
+    let debug_recording_dir =
+        resources.debug_recording_dir(config.debug_recording_output_dir.as_deref());
 
     let mut context = WorkerContext {
         display_mode: FrameDisplayMode::from_config(config.frame_display_mode.as_deref()),

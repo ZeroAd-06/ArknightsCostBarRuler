@@ -60,7 +60,7 @@ cargo build --release -p ruler-app
 cargo run --release -p ruler-app
 ```
 
-从仓库根目录运行时，`config.json`、`calibration/`、`icons/`、`ruler/locales/` 都会被正确找到。打包分发时，请保证 `icons/`、`ruler/locales/` 和许可证文件跟在 `.exe` 旁边 (`build.ps1` 已经帮你做好了)。
+配置和校准文件默认放在启动时的当前工作目录，也就是 `config.json` 和同目录的 `calibration\`。调试录制默认放在同一根目录下的 `recordings\`。用 `cargo run -p ruler-app` 从仓库根目录启动时会使用仓库根目录;用户解压发行包后直接运行时会使用解压目录。打包分发时，请保证 `icons/`、`ruler/locales/` 和许可证文件跟在 `.exe` 旁边 (`build.ps1` 已经帮你做好了)。
 
 ## 使用说明
 
@@ -71,7 +71,7 @@ cargo run --release -p ruler-app
 1. 选择你的**连接类型** (MuMu模拟器12 / 雷电模拟器 / 通用ADB / Windows 电脑版)。
 2. 按提示填好安装路径、实例索引或 ADB Device ID;PC 版则点"扫描窗口"选中明日方舟窗口。
 3. 向导会扫描当前可用目标、给出实时预览和平均截图延迟，选一个能用的。
-4. 点"保存并启动"。配置会写进项目目录下的 `config.json`。
+4. 点"保存并启动"。配置会写进当前工作目录下的 `config.json`。
 
 ### 首次校准
 
@@ -104,6 +104,8 @@ cargo run --release -p ruler-app
   ```powershell
   cargo run --release -p ruler-recorder -- -c config.json -o recordings -d 60
   ```
+
+- `ruler-app` 的配置路径可以用环境变量覆盖: `ARKNIGHTS_RULER_CONFIG_PATH`、`ARKNIGHTS_RULER_CONFIG_DIR`、`ARKNIGHTS_RULER_CALIBRATION_DIR`、`ARKNIGHTS_RULER_DATA_DIR`、`ARKNIGHTS_RULER_RECORDINGS_DIR`。`debug_recording_output_dir` 若写相对路径，会相对配置根目录解析;写绝对路径则原样使用。
 
 - `ruler-verifier`: 离线校验器，拿录制好的视频跑一遍分析，用来核对结果。
 
@@ -167,7 +169,7 @@ ArknightsCostBarRuler/
   - 部署费用自然回复被锁定 (如第 15 章那个"活性态萨卡兹术师结晶"，就是会甩锁链锁费用的那玩意儿)。
 - 如果程序行为异常，或者干脆不工作，可以试试:
   - 关掉重开。
-  - 删掉 `config.json` 重新走一遍配置向导。
+  - 删掉当前工作目录里的 `config.json` 重新走一遍配置向导。
   - 用 `$env:RUST_LOG = "debug"` 启动看诊断日志;必要时加 `--debug` 录一段视频 + CSV。
   - 带上日志，到 [Issue 页面](https://github.com/ZeroAd-06/ArknightsCostBarRuler/issues) 给我报个问题。
 - 关于作者本人:

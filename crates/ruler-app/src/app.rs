@@ -155,7 +155,7 @@ fn determine_startup_status(resources: &ResourceLocator) -> StartupStatus {
 
     match config.to_capture_config() {
         Ok(_) => StartupStatus::ready(config_path_text, config),
-        Err(error) => StartupStatus::invalid(config_path.display().to_string(), error.to_string()),
+        Err(error) => StartupStatus::invalid(config_path_text, error.to_string()),
     }
 }
 

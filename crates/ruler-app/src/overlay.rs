@@ -196,7 +196,9 @@ mod platform {
     const LOGICAL_W: f32 = 210.0;
     const LOGICAL_PANEL_H: f32 = 56.0;
     const LOGICAL_H: f32 = 82.0;
-    const LOGICAL_TOOLBAR_W: f32 = 108.0;
+    // Keep this in sync with the toolbar `width` in `ui/hud.slint`; hit-testing
+    // uses the same rect for the transparent window extension.
+    const LOGICAL_TOOLBAR_W: f32 = 134.0;
     const LOGICAL_TOOLBAR_H: f32 = 24.0;
     const LOGICAL_TOOLBAR_RIGHT_PAD: f32 = 4.0;
     const LOGICAL_TOOLBAR_TOP_GAP: f32 = 2.0;
@@ -1559,6 +1561,16 @@ mod platform {
         fn running_toolbar_zone_stays_hit_testable_below_panel() {
             let scale = 2.5;
             let x = ((LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD - 10.0) * scale).round() as i32;
+            let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
+
+            assert!(!outer_area_should_pass_through_at(x, y, scale, true));
+        }
+
+        #[test]
+        fn leftmost_toolbar_button_zone_stays_hit_testable() {
+            let scale = 2.5;
+            let toolbar_left = LOGICAL_W - LOGICAL_TOOLBAR_W - LOGICAL_TOOLBAR_RIGHT_PAD;
+            let x = ((toolbar_left + 12.0) * scale).round() as i32;
             let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
 
             assert!(!outer_area_should_pass_through_at(x, y, scale, true));

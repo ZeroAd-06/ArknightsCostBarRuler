@@ -50,7 +50,8 @@ mod platform {
             software_renderer::{MinimalSoftwareWindow, SoftwareRenderer},
             PointerEventButton, WindowAdapter, WindowEvent,
         },
-        ComponentHandle, Image, ModelRc, PhysicalSize, Rgba8Pixel, SharedPixelBuffer, VecModel,
+        ComponentHandle, Image, Model, ModelRc, PhysicalSize, Rgba8Pixel, SharedPixelBuffer,
+        VecModel,
     };
     use windows::{
         core::PCWSTR,
@@ -117,7 +118,16 @@ mod platform {
         probe_generation: u64,
         probe_workers: Vec<ProbeWorker>,
         latency_samples: HashMap<String, VecDeque<Duration>>,
-        rows_sig: String,
+        // Persistent target-list model, updated in place between structural
+        // changes (see `sync_rows`) so latency ticks don't tear down the
+        // repeater and reset its row hover animations.
+        rows_model: Rc<VecModel<TargetRow>>,
+        // `None` until the first sync; reset to `None` on refresh to force a
+        // re-evaluation. Holds the last pushed content signature otherwise.
+        rows_content_sig: Option<String>,
+        rows_struct_sig: String,
+        // Physical pixel cap for the downscaled preview image (see `preview_image`).
+        preview_cap: (u32, u32),
         // identity of the preview currently pushed to Slint: (selected idx, data ptr, len)
         preview_token: Option<(usize, usize, usize)>,
     }
@@ -180,6 +190,17 @@ mod platform {
         };
         let window = slot.borrow_mut().take()?;
 
+        // Computed once up front: drives both the native window size and the
+        // physical pixel cap for the downscaled live preview.
+        let scale = wizard_scale();
+
+        // Persistent row model. The render tick updates it in place (a latency
+        // tick changes only a couple of cells) instead of replacing it, so the
+        // target list's repeater is not torn down — and its hover animations
+        // not reset — several times a second.
+        let rows_model: Rc<VecModel<TargetRow>> = Rc::new(VecModel::default());
+        wizard.set_rows(ModelRc::from(rows_model.clone()));
+
         let (probe_tx, probe_rx) = mpsc::channel();
         let core = Rc::new(RefCell::new(WizardCore {
             i18n: i18n.clone(),
@@ -191,7 +212,10 @@ mod platform {
             probe_generation: 0,
             probe_workers: Vec::new(),
             latency_samples: HashMap::new(),
-            rows_sig: String::new(),
+            rows_model,
+            rows_content_sig: None,
+            rows_struct_sig: String::new(),
+            preview_cap: preview_cap_for_scale(scale),
             preview_token: None,
         }));
         let result: Rc<RefCell<Option<RulerConfig>>> = Rc::new(RefCell::new(None));
@@ -204,7 +228,6 @@ mod platform {
         // Initial discovery + probe.
         refresh_candidates(&mut core.borrow_mut());
 
-        let scale = wizard_scale();
         let width = (WIZARD_LOGICAL_W * scale).round() as i32;
         let logical_h = if debug {
             WIZARD_LOGICAL_H + 220.0
@@ -481,42 +504,69 @@ mod platform {
         }
     }
 
-    /// Push the current candidate state into the Slint component. Rebuilds the row
-    /// model only when it changed, and the preview image only when a new frame for
-    /// the selected target arrived (or the selection changed).
+    /// Push the current candidate state into the Slint component. Each section
+    /// is change-gated so the render tick stays cheap: rows update in place, the
+    /// preview is rebuilt only when a new frame arrives for the selection, and
+    /// the header/status assignments rely on Slint's own equality check.
     fn sync_to_slint(wizard: &Wizard, core: &mut WizardCore) {
-        let i18n = &core.i18n;
+        sync_rows(wizard, core);
+        sync_preview(wizard, core);
+        sync_header_status(wizard, core);
+    }
 
-        // rows
-        let sig = rows_signature(&core.candidates, core.selected_index);
-        if core.rows_sig != sig {
-            let rows: Vec<TargetRow> = core
-                .candidates
-                .iter()
-                .enumerate()
-                .map(|(idx, candidate)| {
-                    let error = candidate.error.is_some();
-                    let latency = candidate
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| candidate.latency_text());
-                    TargetRow {
-                        name: candidate.name.as_str().into(),
-                        detail: candidate.detail.as_str().into(),
-                        latency: latency.into(),
-                        latency_class: latency_class_index(candidate.latency_class),
-                        error,
-                        selected: core.selected_index == Some(idx),
-                    }
-                })
-                .collect();
-            wizard.set_rows(ModelRc::new(VecModel::from(rows)));
-            wizard.set_scanning(core.candidates.is_empty());
-            wizard.set_cap_empty(i18n.tr("config.selector.no_targets").into());
-            core.rows_sig = sig;
+    /// Reconcile the target list. On a structural change (a different candidate
+    /// set or order) the model is reset; otherwise only the cells that actually
+    /// changed are written, leaving the repeater — and its row hover animations —
+    /// intact.
+    fn sync_rows(wizard: &Wizard, core: &mut WizardCore) {
+        let content_sig = rows_signature(&core.candidates, core.selected_index);
+        if core.rows_content_sig.as_deref() == Some(content_sig.as_str()) {
+            return;
         }
 
-        // preview
+        let rows: Vec<TargetRow> = core
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(idx, candidate)| target_row(candidate, core.selected_index == Some(idx)))
+            .collect();
+
+        let struct_sig = rows_struct_signature(&core.candidates);
+        if core.rows_struct_sig != struct_sig {
+            core.rows_model.set_vec(rows);
+            core.rows_struct_sig = struct_sig;
+        } else {
+            for (idx, row) in rows.into_iter().enumerate() {
+                if core.rows_model.row_data(idx).as_ref() != Some(&row) {
+                    core.rows_model.set_row_data(idx, row);
+                }
+            }
+        }
+
+        wizard.set_scanning(core.candidates.is_empty());
+        wizard.set_cap_empty(core.i18n.tr("config.selector.no_targets").into());
+        core.rows_content_sig = Some(content_sig);
+    }
+
+    fn target_row(candidate: &TargetCandidate, selected: bool) -> TargetRow {
+        let error = candidate.error.is_some();
+        let latency = candidate
+            .error
+            .clone()
+            .unwrap_or_else(|| candidate.latency_text());
+        TargetRow {
+            name: candidate.name.as_str().into(),
+            detail: candidate.detail.as_str().into(),
+            latency: latency.into(),
+            latency_class: latency_class_index(candidate.latency_class),
+            error,
+            selected,
+        }
+    }
+
+    /// Rebuild the preview only when the selected target's frame pointer changes
+    /// (a new probe frame arrived) or the selection moves.
+    fn sync_preview(wizard: &Wizard, core: &mut WizardCore) {
         let token = core
             .selected_candidate()
             .and_then(|candidate| candidate.preview.as_ref())
@@ -527,20 +577,27 @@ mod platform {
                     preview.data.len(),
                 )
             });
-        if token != core.preview_token {
-            match core
-                .selected_candidate()
-                .and_then(|candidate| candidate.preview.as_ref())
-                .and_then(preview_image)
-            {
-                Some(image) => {
-                    wizard.set_preview(image);
-                    wizard.set_has_preview(true);
-                }
-                None => wizard.set_has_preview(false),
-            }
-            core.preview_token = token;
+        if token == core.preview_token {
+            return;
         }
+
+        let (cap_w, cap_h) = core.preview_cap;
+        match core
+            .selected_candidate()
+            .and_then(|candidate| candidate.preview.as_ref())
+            .and_then(|preview| preview_image(preview, cap_w, cap_h))
+        {
+            Some(image) => {
+                wizard.set_preview(image);
+                wizard.set_has_preview(true);
+            }
+            None => wizard.set_has_preview(false),
+        }
+        core.preview_token = token;
+    }
+
+    fn sync_header_status(wizard: &Wizard, core: &WizardCore) {
+        let i18n = &core.i18n;
 
         // header + status
         let header = core
@@ -613,6 +670,18 @@ mod platform {
         sig
     }
 
+    /// Structure-only signature (candidate identity + order). When this is
+    /// unchanged the row count and ordering match, so the model can be updated
+    /// cell-by-cell instead of reset.
+    fn rows_struct_signature(candidates: &[TargetCandidate]) -> String {
+        let mut sig = String::new();
+        for candidate in candidates {
+            sig.push_str(&candidate.fingerprint);
+            sig.push('\u{2}');
+        }
+        sig
+    }
+
     // ===================== discovery + probe workers =====================
 
     fn refresh_candidates(core: &mut WizardCore) {
@@ -640,7 +709,10 @@ mod platform {
         stop_probe_worker_list(&mut core.probe_workers);
         core.probe_generation = core.probe_generation.wrapping_add(1);
         core.preview_token = None;
-        core.rows_sig = String::new();
+        // Force the next sync to re-evaluate the rows. The structure signature is
+        // left intact so an unchanged candidate set updates in place rather than
+        // tearing down the repeater.
+        core.rows_content_sig = None;
 
         core.candidates = discover_targets(core.previous_config.as_ref());
         for candidate in &mut core.candidates {
@@ -883,13 +955,30 @@ mod platform {
 
     // ===================== preview pixel conversion =====================
 
-    /// Build a Slint RGBA image from a captured (bottom-up) preview frame.
-    fn preview_image(frame: &PreviewFrame) -> Option<Image> {
+    /// Physical-pixel cap for the downscaled preview, derived from the window
+    /// scale and the fixed logical size of the preview pane in `wizard.slint`
+    /// (≈224×160). Computed once so the conversion knows its target size.
+    fn preview_cap_for_scale(scale: f32) -> (u32, u32) {
+        let cap_w = (224.0 * scale).ceil().max(1.0) as u32;
+        let cap_h = (160.0 * scale).ceil().max(1.0) as u32;
+        (cap_w, cap_h)
+    }
+
+    /// Build a Slint RGBA image from a captured (bottom-up) preview frame,
+    /// box-downscaled to fit within `cap_w`×`cap_h` physical pixels.
+    ///
+    /// Downscaling here — at ≈4 Hz, when a probe frame arrives — is what keeps
+    /// the wizard responsive: the software renderer re-samples every `Image` on
+    /// each full-window repaint (and a hover animation repaints at 60+ Hz), so
+    /// handing it a full 720p/1080p game frame meant rescaling that frame dozens
+    /// of times a second. The pre-shrunk image makes each repaint cheap.
+    fn preview_image(frame: &PreviewFrame, cap_w: u32, cap_h: u32) -> Option<Image> {
         if frame.width == 0 || frame.height == 0 {
             return None;
         }
-        let bytes = preview_rgba_top_down(frame).ok()?;
-        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(frame.width, frame.height);
+        let (target_w, target_h) = preview_target_size(frame.width, frame.height, cap_w, cap_h);
+        let bytes = preview_rgba_scaled(frame, target_w, target_h)?;
+        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(target_w, target_h);
         let dst = buffer.make_mut_bytes();
         if dst.len() != bytes.len() {
             return None;
@@ -898,49 +987,77 @@ mod platform {
         Some(Image::from_rgba8(buffer))
     }
 
+    /// Largest size that fits within the cap while preserving aspect ratio.
+    /// Never upscales (a frame already smaller than the cap is kept 1:1).
+    fn preview_target_size(src_w: u32, src_h: u32, cap_w: u32, cap_h: u32) -> (u32, u32) {
+        let cap_w = cap_w.max(1);
+        let cap_h = cap_h.max(1);
+        let scale = (f64::from(cap_w) / f64::from(src_w))
+            .min(f64::from(cap_h) / f64::from(src_h))
+            .min(1.0);
+        let target_w = ((f64::from(src_w) * scale).round() as u32).max(1);
+        let target_h = ((f64::from(src_h) * scale).round() as u32).max(1);
+        (target_w, target_h)
+    }
+
     /// Convert a captured frame (bottom-up, RGBA or BGR) into tightly-packed,
-    /// top-down RGBA8 bytes (`width * height * 4`).
-    fn preview_rgba_top_down(frame: &PreviewFrame) -> Result<Vec<u8>, String> {
-        let source_stride = frame
-            .width
-            .checked_mul(match frame.format {
-                PixelFormat::Rgba => 4,
-                PixelFormat::Bgr => 3,
-            })
-            .ok_or_else(|| "preview source stride overflow".to_string())?
-            as usize;
-        let width = frame.width as usize;
-        let height = frame.height as usize;
-        let mut output = vec![0u8; width * height * 4];
-        for y in 0..height {
-            let src_y = height - 1 - y; // flip bottom-up -> top-down
-            for x in 0..width {
-                let dst = (y * width + x) * 4;
-                match frame.format {
-                    PixelFormat::Rgba => {
-                        let src = src_y * source_stride + x * 4;
-                        if src + 3 >= frame.data.len() {
-                            return Err("preview RGBA buffer is too short".to_string());
+    /// top-down RGBA8 bytes (`target_w * target_h * 4`), box-averaging each
+    /// destination pixel over its source block. With `target == source` this is
+    /// a straight flip + channel convert (one source pixel per destination).
+    fn preview_rgba_scaled(frame: &PreviewFrame, target_w: u32, target_h: u32) -> Option<Vec<u8>> {
+        let bytes_per_pixel = match frame.format {
+            PixelFormat::Rgba => 4usize,
+            PixelFormat::Bgr => 3usize,
+        };
+        let src_w = frame.width as usize;
+        let src_h = frame.height as usize;
+        let target_w = target_w as usize;
+        let target_h = target_h as usize;
+        if src_w == 0 || src_h == 0 || target_w == 0 || target_h == 0 {
+            return None;
+        }
+        let source_stride = src_w.checked_mul(bytes_per_pixel)?;
+        if frame.data.len() < source_stride.checked_mul(src_h)? {
+            return None;
+        }
+
+        let mut output = vec![0u8; target_w * target_h * 4];
+        for ty in 0..target_h {
+            // Source rows (top-down) covered by this destination row.
+            let sy0 = ty * src_h / target_h;
+            let sy1 = (((ty + 1) * src_h / target_h).max(sy0 + 1)).min(src_h);
+            for tx in 0..target_w {
+                let sx0 = tx * src_w / target_w;
+                let sx1 = (((tx + 1) * src_w / target_w).max(sx0 + 1)).min(src_w);
+                let (mut r, mut g, mut b, mut count) = (0u32, 0u32, 0u32, 0u32);
+                for sy_top in sy0..sy1 {
+                    let src_y = src_h - 1 - sy_top; // flip bottom-up -> top-down
+                    let row = src_y * source_stride;
+                    for sx in sx0..sx1 {
+                        let src = row + sx * bytes_per_pixel;
+                        match frame.format {
+                            PixelFormat::Rgba => {
+                                r += u32::from(frame.data[src]);
+                                g += u32::from(frame.data[src + 1]);
+                                b += u32::from(frame.data[src + 2]);
+                            }
+                            PixelFormat::Bgr => {
+                                b += u32::from(frame.data[src]);
+                                g += u32::from(frame.data[src + 1]);
+                                r += u32::from(frame.data[src + 2]);
+                            }
                         }
-                        output[dst] = frame.data[src];
-                        output[dst + 1] = frame.data[src + 1];
-                        output[dst + 2] = frame.data[src + 2];
-                        output[dst + 3] = 255;
-                    }
-                    PixelFormat::Bgr => {
-                        let src = src_y * source_stride + x * 3;
-                        if src + 2 >= frame.data.len() {
-                            return Err("preview BGR buffer is too short".to_string());
-                        }
-                        output[dst] = frame.data[src + 2];
-                        output[dst + 1] = frame.data[src + 1];
-                        output[dst + 2] = frame.data[src];
-                        output[dst + 3] = 255;
+                        count += 1;
                     }
                 }
+                let dst = (ty * target_w + tx) * 4;
+                output[dst] = (r / count) as u8;
+                output[dst + 1] = (g / count) as u8;
+                output[dst + 2] = (b / count) as u8;
+                output[dst + 3] = 255;
             }
         }
-        Ok(output)
+        Some(output)
     }
 
     // ===================== window plumbing =====================
@@ -1177,7 +1294,7 @@ mod platform {
             };
             // Output is top-down: first the source's last row, then its first.
             assert_eq!(
-                preview_rgba_top_down(&frame).unwrap(),
+                preview_rgba_scaled(&frame, 2, 2).unwrap(),
                 vec![
                     0, 0, 255, 255, 255, 255, 255, 255, //
                     255, 0, 0, 255, 0, 255, 0, 255,
@@ -1197,12 +1314,39 @@ mod platform {
                 ],
             };
             assert_eq!(
-                preview_rgba_top_down(&frame).unwrap(),
+                preview_rgba_scaled(&frame, 2, 2).unwrap(),
                 vec![
                     0, 0, 255, 255, 255, 255, 255, 255, // blue, white (image top row)
                     255, 0, 0, 255, 0, 255, 0, 255, // red, green (image bottom row)
                 ]
             );
+        }
+
+        #[test]
+        fn preview_box_downscale_averages_source_block() {
+            // 2x2 grays, downscaled to a single pixel: the average of all four.
+            let frame = PreviewFrame {
+                width: 2,
+                height: 2,
+                format: PixelFormat::Rgba,
+                data: vec![
+                    0, 0, 0, 255, 100, 100, 100, 255, // bottom row
+                    200, 200, 200, 255, 240, 240, 240, 255, // top row
+                ],
+            };
+            // (0 + 100 + 200 + 240) / 4 == 135
+            assert_eq!(
+                preview_rgba_scaled(&frame, 1, 1).unwrap(),
+                vec![135, 135, 135, 255]
+            );
+        }
+
+        #[test]
+        fn preview_target_size_preserves_aspect_and_never_upscales() {
+            assert_eq!(preview_target_size(1920, 1080, 560, 400), (560, 315));
+            assert_eq!(preview_target_size(1280, 720, 336, 240), (336, 189));
+            // Source already smaller than the cap is kept 1:1.
+            assert_eq!(preview_target_size(100, 100, 560, 400), (100, 100));
         }
 
         fn candidate(fingerprint: &str, error: Option<&str>) -> TargetCandidate {

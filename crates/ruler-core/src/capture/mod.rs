@@ -20,11 +20,21 @@ pub struct CapturedFrame {
     pub format: PixelFormat,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowInfo {
+    pub hwnd: isize,
+    pub client_left: i32,
+    pub client_top: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub trait CaptureBackend: Send {
     fn connect(&mut self) -> Result<(), String>;
     fn capture_frame(&mut self) -> Result<CapturedFrame, String>;
     fn disconnect(&mut self);
     fn dimensions(&self) -> (u32, u32);
+    fn window_info(&self) -> Option<WindowInfo> { None }
 }
 
 #[derive(Clone, Debug)]

@@ -4,7 +4,7 @@ use crate::analysis::calibration::{CalibrationTimingModel, LoadedCalibration};
 use crate::analysis::mapping::CalibrationTable;
 use crate::analysis::roi::{self, Roi};
 use crate::analysis::scanner::{self, BattleState, PixelFormat};
-use crate::capture::{create_backend, CaptureBackend, CaptureConfig, CapturedFrame};
+use crate::capture::{create_backend, CaptureBackend, CaptureConfig, CapturedFrame, WindowInfo};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrameResult {
@@ -217,6 +217,10 @@ impl RulerEngine {
 
     pub fn roi(&self) -> Option<Roi> {
         self.roi
+    }
+
+    pub fn window_info(&self) -> Option<WindowInfo> {
+        self.backend.as_ref().and_then(|backend| backend.window_info())
     }
 
     pub fn status(&self) -> EngineStatus {

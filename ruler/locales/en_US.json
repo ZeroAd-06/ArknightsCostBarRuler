@@ -37,6 +37,7 @@
     "overlay.msg.pre_cal": "Enter Stage,\nClick Here to Calibrate",
     "overlay.reset.manual": "Timer Reset",
     "overlay.reset.auto": "Action Start",
+    "overlay.cursor.blocked": "Don't cover the cost bar",
     "overlay.dialog.cancel": "Cancel",
     "overlay.dialog.delete.confirm": "Delete"
 }

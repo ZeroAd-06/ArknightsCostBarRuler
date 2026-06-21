@@ -1,15 +1,24 @@
 use serde_json::Value;
 
 const UI_SCALER_FIELD: &str = "uiScaler";
+const CURSOR_SIZE_FIELD: &str = "cursorSize";
 
 pub fn read_pc_ui_scaler() -> Result<Option<f64>, String> {
+    read_pc_common_setting_number(UI_SCALER_FIELD)
+}
+
+pub fn read_pc_cursor_size() -> Result<Option<f64>, String> {
+    read_pc_common_setting_number(CURSOR_SIZE_FIELD)
+}
+
+fn read_pc_common_setting_number(field: &str) -> Result<Option<f64>, String> {
     let Some(settings) = platform::read_common_settings()? else {
         return Ok(None);
     };
 
     let value: Value = serde_json::from_str(&settings)
         .map_err(|error| format!("failed to parse Arknights common settings JSON: {error}"))?;
-    Ok(value.get(UI_SCALER_FIELD).and_then(Value::as_f64))
+    Ok(value.get(field).and_then(Value::as_f64))
 }
 
 #[cfg(windows)]
@@ -120,10 +129,11 @@ mod tests {
 
     #[test]
     fn extracts_ui_scaler_from_common_settings_json() {
-        let value: Value = serde_json::from_str(r#"{"uiScaler":0.5}"#).unwrap();
+        let value: Value = serde_json::from_str(r#"{"uiScaler":0.5,"cursorSize":0.25}"#).unwrap();
         assert_eq!(
             value.get(UI_SCALER_FIELD).and_then(Value::as_f64),
             Some(0.5)
         );
+        assert_eq!(value.get(CURSOR_SIZE_FIELD).and_then(Value::as_f64), Some(0.25));
     }
 }

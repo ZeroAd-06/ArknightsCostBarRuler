@@ -736,6 +736,9 @@ mod platform {
             hud.set_progress(displayed_progress);
             hud.set_progress_str(format!("{progress_text}%").into());
 
+            hud.set_cursor_blocked(ui.cursor_blocked);
+            hud.set_cursor_warning_text(state.i18n.tr("overlay.cursor.blocked").into());
+
             let message = match ui.mode {
                 OverlayMode::Idle => state.i18n.tr("overlay.msg.idle"),
                 OverlayMode::PreCalibration => state.i18n.tr("overlay.msg.pre_cal"),

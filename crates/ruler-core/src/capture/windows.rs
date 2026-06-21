@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
 use crate::analysis::scanner::PixelFormat;
-use crate::capture::{CaptureBackend, CapturedFrame};
+use crate::capture::{CaptureBackend, CapturedFrame, WindowInfo};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
@@ -430,6 +430,39 @@ impl CaptureBackend for WindowsController {
 
     fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn window_info(&self) -> Option<WindowInfo> {
+        let hwnd = self.hwnd?;
+        if !unsafe { IsWindow(hwnd) }.as_bool() {
+            return None;
+        }
+
+        // The target window can move after the backend connected. Do not reuse
+        // the cached client origin here: cursor occlusion math must be based on
+        // the window's current screen position every frame.
+        let mut rect = RECT::default();
+        if !unsafe { GetClientRect(hwnd, &mut rect) }.as_bool() {
+            return None;
+        }
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+
+        let mut client_origin = POINT { x: 0, y: 0 };
+        if !unsafe { ClientToScreen(hwnd, &mut client_origin) }.as_bool() {
+            return None;
+        }
+
+        Some(WindowInfo {
+            hwnd: hwnd.0 as isize,
+            client_left: client_origin.x,
+            client_top: client_origin.y,
+            width: width as u32,
+            height: height as u32,
+        })
     }
 }
 

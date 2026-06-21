@@ -32,6 +32,8 @@ export component Hud inherits Window {
     in property <string> message: "";
     in property <bool> force-controls: false; // preview/debug only
     in property <bool> undo-reset-enabled: false;
+    in property <bool> cursor-blocked: false;
+    in property <string> cursor-warning-text: "";
 
     // ---- reset cover animation (driven from Rust each tick) ----
     // A cyan bar sweeps down from the top to cover the panel, holds, then
@@ -80,13 +82,30 @@ export component Hud inherits Window {
 
     // top accent hairline — state colored
     Rectangle {
-        x: 0; y: 0;
+        x: 0;
+        y: 0;
         width: 100%;
-        height: 2px;
+        height: root.cursor-blocked ? root.panel-height / 3 : 2px;
         background: root.mode == HudMode.error ? Palette.amber
-            : (root.running ? Palette.accent : Palette.text-faint);
-        opacity: 0.9;
-        animate background { duration: 200ms; }
+            : (root.cursor-blocked ? Palette.amber : (root.running ? Palette.accent : Palette.text-faint));
+        opacity: root.cursor-blocked ? 0.96 : 0.9;
+        clip: true;
+        animate height { duration: 150ms; }
+        animate background { duration: 150ms; }
+
+        Text {
+            visible: root.cursor-blocked;
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: root.panel-height / 3;
+            text: root.cursor-warning-text;
+            color: #0a0e12;
+            font-size: 13px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 
     // ===== RUNNING: timer hero + secondary cluster (packed left, no gap) =====

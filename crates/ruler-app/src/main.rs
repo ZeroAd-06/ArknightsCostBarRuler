@@ -15,6 +15,8 @@ mod overlay;
 mod profiles;
 mod resources;
 #[cfg(windows)]
+mod pc_cursor_guard;
+#[cfg(windows)]
 mod slint_win;
 mod target_discovery;
 mod tray;

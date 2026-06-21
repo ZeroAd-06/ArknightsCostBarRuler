@@ -37,6 +37,7 @@
     "overlay.msg.pre_cal": "进入关卡后\n点击此处校准",
     "overlay.reset.manual": "已重置计时器",
     "overlay.reset.auto": "行动开始",
+    "overlay.cursor.blocked": "不要遮挡费用条",
     "overlay.dialog.cancel": "取消",
     "overlay.dialog.delete.confirm": "删除"
 }

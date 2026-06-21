@@ -111,6 +111,7 @@ impl SharedAppState {
                 .and_then(|config| config.overlay_scale)
                 .map(|mult| (mult * 100.0).round().clamp(50.0, 400.0) as u16)
                 .unwrap_or(100);
+            state.ui.cursor_blocked = false;
         }
         self.notify_overlay();
     }
@@ -296,6 +297,8 @@ struct WorkerContext {
     sample_index: u64,
     debug_recorder: Option<DebugRecorder>,
     log_session_dir: PathBuf,
+    #[cfg(windows)]
+    cursor_guard: Option<crate::pc_cursor_guard::SelfDrawnCursorGuard>,
     // Bumped (and tagged with the trigger kind) whenever the timer is reset
     // while it was actually running (elapsed != 0). The overlay reads this via
     // UiSnapshot to drive the reset cover animation.
@@ -360,6 +363,8 @@ fn run_worker_loop(
         sample_index: 0,
         debug_recorder: None,
         log_session_dir,
+        #[cfg(windows)]
+        cursor_guard: None,
         reset_pulse: 0,
         reset_kind: ResetKind::Manual,
     };
@@ -415,7 +420,10 @@ fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Resu
     log::info!("capture backend connected: {}x{}", dims.0, dims.1);
     state.update_ui(|ui, _| {
         ui.capture_dimensions = Some(dims);
+        ui.cursor_blocked = false;
     });
+    #[cfg(windows)]
+    configure_cursor_guard(context, ui_scaler);
 
     if let Some(profile) = context.active_profile.clone() {
         load_profile(context, &profile)?;
@@ -425,6 +433,31 @@ fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn configure_cursor_guard(context: &mut WorkerContext, ui_scaler: f64) {
+    context.cursor_guard = None;
+    if context.config.capture_type != "window" {
+        return;
+    }
+
+    let cursor_size = match crate::arknights_settings::read_pc_cursor_size() {
+        Ok(Some(value)) => value.clamp(0.0, 1.0),
+        Ok(None) => {
+            log::info!("Arknights PC cursorSize registry value not found; using 1.0");
+            1.0
+        }
+        Err(error) => {
+            log::warn!("failed to read Arknights PC cursorSize: {error}; using 1.0");
+            1.0
+        }
+    };
+    log::info!("Arknights PC cursorSize={cursor_size:.3}; enabling cursor occlusion guard");
+    context.cursor_guard = Some(crate::pc_cursor_guard::SelfDrawnCursorGuard::new(
+        ui_scaler,
+        cursor_size,
+    ));
 }
 
 fn load_profile(context: &mut WorkerContext, filename: &str) -> Result<(), String> {
@@ -492,6 +525,7 @@ fn handle_command(
                 ui.active_profile = None;
                 ui.total_frames_in_cycle = 0;
                 ui.can_undo_reset = false;
+                ui.cursor_blocked = false;
                 ui.profiles = context.profiles.list(None);
                 api.is_running = false;
                 api.current_frame = None;
@@ -517,6 +551,7 @@ fn handle_command(
                         ui.time_str = "00:00:00".to_string();
                         ui.lap_frames = None;
                         ui.can_undo_reset = false;
+                        ui.cursor_blocked = false;
                         ui.profiles = context.profiles.list(None);
                         api.is_running = false;
                         api.current_frame = None;
@@ -670,6 +705,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         ui.time_str = "00:00:00".to_string();
         ui.lap_frames = None;
         ui.can_undo_reset = false;
+        ui.cursor_blocked = false;
         api.is_running = false;
         api.current_frame = None;
         api.total_frames_in_cycle = 0;
@@ -777,6 +813,7 @@ fn collect_calibration_samples(
             state.update_ui(|ui, _| {
                 ui.mode = OverlayMode::Calibrating;
                 ui.progress_percent = progress_percent;
+                ui.cursor_blocked = false;
                 ui.message.clear();
             });
             previous_cost_state_raw = Some(current);
@@ -792,6 +829,7 @@ fn collect_calibration_samples(
     state.update_ui(|ui, _| {
         ui.mode = OverlayMode::Calibrating;
         ui.progress_percent = 100.0;
+        ui.cursor_blocked = false;
     });
     Ok((cycle_samples, screen_width, screen_height, total_bar_width))
 }
@@ -895,6 +933,27 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                 recorder.record_video_frame(&frame_data);
             }
 
+            let battle_state = scanner::detect_battle_state_with_ui_scaler(
+                &frame_data.data,
+                frame_data.width,
+                frame_data.height,
+                frame_data.format,
+                context.engine.ui_scaler(),
+            );
+            if cursor_blocks_cost_bar(context, battle_state) {
+                let worker_timing = WorkerTimingSnapshot {
+                    sample_index: context.sample_index,
+                };
+                log::trace!(
+                    "worker frame {} skipped: self-drawn cursor overlaps cost ROI (battle_state={})",
+                    context.sample_index,
+                    battle_state.as_str()
+                );
+                publish_cursor_blocked(state, context);
+                state.update_timing(worker_timing);
+                return;
+            }
+
             match context.engine.analyze_captured_frame(&frame_data) {
                 Ok(result) => {
                     // Debug recording: write analysis row after the video frame has already been queued.
@@ -962,6 +1021,7 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                         ui.time_str = format_time_from_frames(context.last_elapsed_frames);
                         ui.lap_frames = lap_frames;
                         ui.can_undo_reset = timer_reset_undo_enabled(context);
+                        ui.cursor_blocked = false;
                         ui.total_frames_in_cycle = result.total_frames_in_cycle;
                         ui.reset_pulse = reset_pulse;
                         ui.reset_kind = reset_kind;
@@ -994,6 +1054,22 @@ fn publish_current_state(state: &SharedAppState, context: &WorkerContext) {
     }
 }
 
+#[cfg(windows)]
+fn cursor_blocks_cost_bar(context: &mut WorkerContext, battle_state: BattleState) -> bool {
+    let window_info = context.engine.window_info();
+    let roi = context.engine.roi();
+    context
+        .cursor_guard
+        .as_mut()
+        .map(|guard| guard.should_pause_for_frame(window_info, roi, battle_state))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn cursor_blocks_cost_bar(_: &mut WorkerContext, _: BattleState) -> bool {
+    false
+}
+
 fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame: Option<i32>) {
     let active_profile = context.active_profile.clone();
     let total_frames = context.last_total_frames.max(0);
@@ -1020,6 +1096,7 @@ fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame:
         ui.time_str = format_time_from_frames(context.last_elapsed_frames);
         ui.lap_frames = lap_frames;
         ui.can_undo_reset = timer_reset_undo_enabled(context);
+        ui.cursor_blocked = false;
         ui.total_frames_in_cycle = total_frames;
         ui.reset_pulse = reset_pulse;
         ui.reset_kind = reset_kind;
@@ -1028,6 +1105,32 @@ fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame:
         api.is_running = frame.is_some();
         api.current_frame = frame;
         api.total_frames_in_cycle = if frame.is_some() { total_frames } else { 0 };
+        api.total_elapsed_frames = context.last_elapsed_frames;
+        api.active_profile = active_profile.as_deref().map(calibration_basename);
+    });
+}
+
+fn publish_cursor_blocked(state: &SharedAppState, context: &WorkerContext) {
+    let active_profile = context.active_profile.clone();
+    let lap_frames = context
+        .lap_start_frame
+        .map(|start| context.last_elapsed_frames - start);
+    state.update_ui(|ui, api| {
+        ui.mode = OverlayMode::Running;
+        ui.message.clear();
+        ui.progress_percent = 0.0;
+        ui.cursor_blocked = true;
+        ui.time_str = format_time_from_frames(context.last_elapsed_frames);
+        ui.lap_frames = lap_frames;
+        ui.can_undo_reset = timer_reset_undo_enabled(context);
+        ui.active_profile = active_profile.clone();
+        ui.profiles = context.profiles.list(active_profile.as_deref());
+        // Do not publish an analysed frame for the occluded capture. Keep the
+        // HUD's last frame/total strings intact, but make the API report the
+        // current frame as unavailable for this sample.
+        api.is_running = false;
+        api.current_frame = None;
+        api.total_frames_in_cycle = 0;
         api.total_elapsed_frames = context.last_elapsed_frames;
         api.active_profile = active_profile.as_deref().map(calibration_basename);
     });
@@ -1044,6 +1147,7 @@ fn publish_idle(state: &SharedAppState, context: &WorkerContext) {
         ui.time_str = "00:00:00".to_string();
         ui.lap_frames = None;
         ui.can_undo_reset = false;
+        ui.cursor_blocked = false;
         ui.total_frames_in_cycle = 0;
         ui.active_profile = None;
         ui.profiles = context.profiles.list(None);
@@ -1063,6 +1167,7 @@ fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String)
         ui.progress_percent = 0.0;
         ui.active_profile = context.active_profile.clone();
         ui.can_undo_reset = timer_reset_undo_enabled(context);
+        ui.cursor_blocked = false;
         ui.profiles = context.profiles.list(context.active_profile.as_deref());
         api.is_running = false;
         api.current_frame = None;

@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use crate::analysis::calibration::LoadedCalibration;
+use crate::analysis::calibration::{CalibrationTimingModel, LoadedCalibration};
+use crate::analysis::mapping::CalibrationTable;
 use crate::analysis::roi::{self, Roi};
 use crate::analysis::scanner::{self, BattleState, PixelFormat};
 use crate::capture::{create_backend, CaptureBackend, CaptureConfig, CapturedFrame};
@@ -61,6 +62,22 @@ impl PhaseSample {
 struct FrameLookup {
     logical_frame: i32,
     phase: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CycleEndpointMode {
+    LegacyDirect,
+    LeftClosedRightOpen,
+    LeftClosedRightClosed,
+    LeftOpenRightClosed,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CycleTiming {
+    profile_index: usize,
+    total_frames: i32,
+    total_bar_width: i32,
+    endpoint_mode: CycleEndpointMode,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -341,24 +358,29 @@ impl RulerEngine {
         };
 
         let (logical_frame, total_frames_in_cycle) = if num_profiles > 0 {
-            let mut profile_idx = (base_profile + self.cycle_counter) % num_profiles;
+            let mut cycle_timing =
+                current_cycle_timing(calibration, base_profile, self.cycle_counter);
+            let mut profile_idx = cycle_timing.profile_index;
             let mut table = &calibration.tables[profile_idx];
-            let mut frame_lookup =
-                pixel_width.and_then(|pw| lookup_bar_frame(table, pw, cost_is_negative));
+            let mut frame_lookup = pixel_width
+                .and_then(|pw| lookup_bar_frame(table, cycle_timing, pw, cost_is_negative));
 
             if let (Some(previous), Some(current), Some(pixel_width)) =
                 (self.previous_phase, frame_lookup, pixel_width)
             {
                 if is_natural_cycle_wrap(previous, current.phase) {
                     self.cycle_counter += 1;
-                    profile_idx = (base_profile + self.cycle_counter) % num_profiles;
+                    cycle_timing =
+                        current_cycle_timing(calibration, base_profile, self.cycle_counter);
+                    profile_idx = cycle_timing.profile_index;
                     table = &calibration.tables[profile_idx];
                     frame_lookup =
-                        lookup_bar_frame(table, pixel_width, cost_is_negative).or(frame_lookup);
+                        lookup_bar_frame(table, cycle_timing, pixel_width, cost_is_negative)
+                            .or(frame_lookup);
                 }
             }
 
-            let total_frames = table.total_frames;
+            let total_frames = cycle_timing.total_frames;
             let effective_total_frames = effective_total_frames(total_frames, cost_is_negative);
             let current_phase = frame_lookup.map(|lookup| PhaseSample {
                 phase: lookup.phase,
@@ -455,6 +477,74 @@ fn effective_total_frames(total_frames: i32, cost_is_negative: bool) -> i32 {
     }
 }
 
+fn current_cycle_timing(
+    calibration: &LoadedCalibration,
+    base_profile: usize,
+    cycle_counter: usize,
+) -> CycleTiming {
+    let num_profiles = calibration.tables.len();
+    let profile_index = (base_profile + cycle_counter) % num_profiles;
+    let base_total_frames = calibration.tables[profile_index].total_frames;
+
+    match calibration.timing_model {
+        CalibrationTimingModel::LegacyDirect => CycleTiming {
+            profile_index,
+            total_frames: base_total_frames,
+            total_bar_width: 0,
+            endpoint_mode: CycleEndpointMode::LegacyDirect,
+        },
+        CalibrationTimingModel::OpenInteriorV1 {
+            total_bar_width,
+            boundary_switch_frame,
+        } => {
+            let boundary_cycle_index =
+                boundary_cycle_index(calibration, base_profile, boundary_switch_frame);
+            let endpoint_mode = if cycle_counter < boundary_cycle_index {
+                CycleEndpointMode::LeftClosedRightOpen
+            } else if cycle_counter == boundary_cycle_index {
+                CycleEndpointMode::LeftClosedRightClosed
+            } else {
+                CycleEndpointMode::LeftOpenRightClosed
+            };
+            CycleTiming {
+                profile_index,
+                total_bar_width,
+                total_frames: if endpoint_mode == CycleEndpointMode::LeftClosedRightClosed {
+                    base_total_frames.saturating_add(1)
+                } else {
+                    base_total_frames
+                },
+                endpoint_mode,
+            }
+        }
+    }
+}
+
+fn boundary_cycle_index(
+    calibration: &LoadedCalibration,
+    base_profile: usize,
+    boundary_switch_frame: i32,
+) -> usize {
+    let num_profiles = calibration.tables.len();
+    if num_profiles == 0 {
+        return 0;
+    }
+
+    let mut elapsed_frames = 0i32;
+    let target_frame = boundary_switch_frame.max(0);
+    for cycle_index in 0usize.. {
+        let profile_index = (base_profile + cycle_index) % num_profiles;
+        let total_frames = calibration.tables[profile_index].total_frames.max(1);
+        let next_elapsed = elapsed_frames.saturating_add(total_frames);
+        if target_frame < next_elapsed {
+            return cycle_index;
+        }
+        elapsed_frames = next_elapsed;
+    }
+
+    0
+}
+
 fn normalized_ui_scaler(ui_scaler: f64) -> f64 {
     if ui_scaler.is_finite() {
         ui_scaler.clamp(0.0, 1.0)
@@ -464,7 +554,30 @@ fn normalized_ui_scaler(ui_scaler: f64) -> f64 {
 }
 
 fn lookup_bar_frame(
-    table: &crate::analysis::mapping::CalibrationTable,
+    table: &CalibrationTable,
+    cycle_timing: CycleTiming,
+    pixel_width: i32,
+    cost_is_negative: bool,
+) -> Option<FrameLookup> {
+    let total_frames = cycle_timing.total_frames;
+    if total_frames <= 0 {
+        return None;
+    }
+
+    match cycle_timing.endpoint_mode {
+        CycleEndpointMode::LegacyDirect => {
+            lookup_legacy_bar_frame(table, pixel_width, cost_is_negative)
+        }
+        CycleEndpointMode::LeftClosedRightOpen
+        | CycleEndpointMode::LeftClosedRightClosed
+        | CycleEndpointMode::LeftOpenRightClosed => {
+            lookup_open_interior_bar_frame(table, cycle_timing, pixel_width, cost_is_negative)
+        }
+    }
+}
+
+fn lookup_legacy_bar_frame(
+    table: &CalibrationTable,
     pixel_width: i32,
     cost_is_negative: bool,
 ) -> Option<FrameLookup> {
@@ -486,6 +599,122 @@ fn lookup_bar_frame(
             logical_frame,
             phase: logical_frame as f64 / total_frames as f64,
         })
+    }
+}
+
+fn lookup_open_interior_bar_frame(
+    table: &CalibrationTable,
+    cycle_timing: CycleTiming,
+    pixel_width: i32,
+    cost_is_negative: bool,
+) -> Option<FrameLookup> {
+    let display_frame = if cost_is_negative {
+        lookup_open_interior_display_frame_f64(table, cycle_timing, pixel_width)?
+    } else {
+        lookup_open_interior_display_frame(table, cycle_timing, pixel_width)? as f64
+    };
+    let phase = (display_frame / cycle_timing.total_frames as f64).clamp(0.0, 1.0);
+    let logical_frame = if cost_is_negative {
+        frame_from_phase(
+            phase,
+            effective_total_frames(cycle_timing.total_frames, true),
+        )
+    } else {
+        display_frame.round() as i32
+    };
+
+    Some(FrameLookup {
+        logical_frame,
+        phase,
+    })
+}
+
+fn lookup_open_interior_display_frame(
+    table: &CalibrationTable,
+    cycle_timing: CycleTiming,
+    pixel_width: i32,
+) -> Option<i32> {
+    if open_interior_excludes_width(cycle_timing, pixel_width) {
+        return None;
+    }
+
+    open_interior_endpoint_frame(cycle_timing, pixel_width)
+        .or_else(|| {
+            let internal_frame = table.lookup(pixel_width)?;
+            Some(open_interior_internal_frame(
+                cycle_timing.endpoint_mode,
+                internal_frame,
+            ))
+        })
+        .map(|frame| frame.clamp(0, cycle_timing.total_frames.saturating_sub(1)))
+}
+
+fn lookup_open_interior_display_frame_f64(
+    table: &CalibrationTable,
+    cycle_timing: CycleTiming,
+    pixel_width: i32,
+) -> Option<f64> {
+    if open_interior_excludes_width(cycle_timing, pixel_width) {
+        return None;
+    }
+
+    open_interior_endpoint_frame(cycle_timing, pixel_width)
+        .map(|frame| frame as f64)
+        .or_else(|| {
+            let internal_frame = table.lookup_interpolated_frame(pixel_width)?;
+            Some(open_interior_internal_frame_f64(
+                cycle_timing.endpoint_mode,
+                internal_frame,
+            ))
+        })
+        .map(|frame| frame.clamp(0.0, cycle_timing.total_frames.saturating_sub(1) as f64))
+}
+
+fn open_interior_endpoint_frame(cycle_timing: CycleTiming, pixel_width: i32) -> Option<i32> {
+    if cycle_timing.endpoint_mode == CycleEndpointMode::LegacyDirect {
+        return None;
+    }
+    let total_bar_width = cycle_timing.total_bar_width;
+
+    if matches!(
+        cycle_timing.endpoint_mode,
+        CycleEndpointMode::LeftClosedRightOpen | CycleEndpointMode::LeftClosedRightClosed
+    ) && pixel_width <= 0
+    {
+        return Some(0);
+    }
+
+    if matches!(
+        cycle_timing.endpoint_mode,
+        CycleEndpointMode::LeftClosedRightClosed | CycleEndpointMode::LeftOpenRightClosed
+    ) && pixel_width >= total_bar_width
+    {
+        return Some(cycle_timing.total_frames.saturating_sub(1));
+    }
+
+    None
+}
+
+fn open_interior_excludes_width(cycle_timing: CycleTiming, pixel_width: i32) -> bool {
+    cycle_timing.endpoint_mode == CycleEndpointMode::LeftClosedRightOpen
+        && pixel_width >= cycle_timing.total_bar_width
+}
+
+fn open_interior_internal_frame(endpoint_mode: CycleEndpointMode, internal_frame: i32) -> i32 {
+    match endpoint_mode {
+        CycleEndpointMode::LegacyDirect | CycleEndpointMode::LeftOpenRightClosed => internal_frame,
+        CycleEndpointMode::LeftClosedRightOpen | CycleEndpointMode::LeftClosedRightClosed => {
+            internal_frame.saturating_add(1)
+        }
+    }
+}
+
+fn open_interior_internal_frame_f64(endpoint_mode: CycleEndpointMode, internal_frame: f64) -> f64 {
+    match endpoint_mode {
+        CycleEndpointMode::LegacyDirect | CycleEndpointMode::LeftOpenRightClosed => internal_frame,
+        CycleEndpointMode::LeftClosedRightOpen | CycleEndpointMode::LeftClosedRightClosed => {
+            internal_frame + 1.0
+        }
     }
 }
 
@@ -978,6 +1207,90 @@ mod tests {
         assert_eq!(result.elapsed_frames, 14);
     }
 
+    #[test]
+    fn open_interior_boundary_cycle_reports_extra_frame() {
+        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
+
+        let result = advance_to_open_boundary_cycle(&mut engine);
+
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 31);
+        assert_eq!(result.elapsed_frames, 300);
+    }
+
+    #[test]
+    fn open_interior_before_boundary_is_left_closed_right_open() {
+        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
+
+        let result = analyze_width(&mut engine, 0, false);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 30);
+
+        let result = analyze_width(&mut engine, 1, false);
+        assert_eq!(result.logical_frame, Some(1));
+
+        let result = analyze_width(&mut engine, 29, false);
+        assert_eq!(result.logical_frame, Some(29));
+
+        let result = analyze_width(&mut engine, 30, false);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.total_frames_in_cycle, 30);
+    }
+
+    #[test]
+    fn open_interior_after_boundary_is_left_open_right_closed() {
+        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
+        advance_to_open_boundary_cycle(&mut engine);
+
+        let result = analyze_width(&mut engine, 30, false);
+        assert_eq!(result.logical_frame, Some(30));
+        assert_eq!(result.total_frames_in_cycle, 31);
+        assert_eq!(result.elapsed_frames, 330);
+
+        let result = analyze_width(&mut engine, 1, false);
+        assert_eq!(result.logical_frame, Some(0));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 331);
+
+        let result = analyze_width(&mut engine, 2, false);
+        assert_eq!(result.logical_frame, Some(1));
+
+        let result = analyze_width(&mut engine, 29, false);
+        assert_eq!(result.logical_frame, Some(28));
+
+        let result = analyze_width(&mut engine, 30, false);
+        assert_eq!(result.logical_frame, Some(29));
+    }
+
+    #[test]
+    fn open_interior_boundary_cycle_uses_current_base_length_before_negative_multiplier() {
+        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
+        advance_to_open_boundary_cycle(&mut engine);
+
+        let result = analyze_width(&mut engine, 15, true);
+
+        assert_eq!(result.total_frames_in_cycle, 62);
+        assert_eq!(result.logical_frame, Some(30));
+    }
+
+    #[test]
+    fn open_interior_boundary_cycle_index_comes_from_base_profile_frames() {
+        let calibration_30 =
+            LoadedCalibration::from_json(&open_interior_calibration_json(&[30], 100, 315)).unwrap();
+        let calibration_60 =
+            LoadedCalibration::from_json(&open_interior_calibration_json(&[60], 100, 315)).unwrap();
+        let calibration_90 =
+            LoadedCalibration::from_json(&open_interior_calibration_json(&[90], 100, 315)).unwrap();
+        let calibration_38_37 =
+            LoadedCalibration::from_json(&open_interior_calibration_json(&[38, 37], 100, 315))
+                .unwrap();
+
+        assert_eq!(boundary_cycle_index(&calibration_30, 0, 315), 10);
+        assert_eq!(boundary_cycle_index(&calibration_60, 0, 315), 5);
+        assert_eq!(boundary_cycle_index(&calibration_90, 0, 315), 3);
+        assert_eq!(boundary_cycle_index(&calibration_38_37, 0, 315), 8);
+    }
+
     fn engine_with_profiles(total_frames: &[i32]) -> RulerEngine {
         let mut engine = RulerEngine::new();
         engine
@@ -1000,6 +1313,58 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         format!(r#"{{"profiles": [{profiles}]}}"#)
+    }
+
+    fn open_interior_engine_with_profiles(
+        total_frames: &[i32],
+        total_bar_width: i32,
+        boundary_switch_frame: i32,
+    ) -> RulerEngine {
+        let mut engine = RulerEngine::new();
+        engine
+            .load_calibration_json(&open_interior_calibration_json(
+                total_frames,
+                total_bar_width,
+                boundary_switch_frame,
+            ))
+            .unwrap();
+        engine.set_roi_value(TEST_ROI);
+        engine
+    }
+
+    fn open_interior_calibration_json(
+        total_frames: &[i32],
+        total_bar_width: i32,
+        boundary_switch_frame: i32,
+    ) -> String {
+        let profiles = total_frames
+            .iter()
+            .map(|total_frames| {
+                let pixel_map = (1..*total_frames)
+                    .map(|width| format!(r#""{width}": {}"#, width - 1))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(r#"{{"total_frames": {total_frames}, "pixel_map": {{{pixel_map}}}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"{{
+                "timing_model": "open_interior_v1",
+                "total_bar_width": {total_bar_width},
+                "boundary_switch_frame": {boundary_switch_frame},
+                "profiles": [{profiles}]
+            }}"#
+        )
+    }
+
+    fn advance_to_open_boundary_cycle(engine: &mut RulerEngine) -> FrameResult {
+        let mut result = analyze_width(engine, 0, false);
+        for _ in 0..10 {
+            analyze_width(engine, 29, false);
+            result = analyze_width(engine, 0, false);
+        }
+        result
     }
 
     fn analyze_width(

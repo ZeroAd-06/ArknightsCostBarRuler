@@ -2,7 +2,7 @@
 /// Ported from Python utils.py::get_logical_frame_from_calibration()
 
 /// Tolerance for approximate pixel width matching (same as Python)
-const TOLERANCE: i32 = 5;
+pub const WIDTH_MATCH_TOLERANCE: i32 = 5;
 
 /// A sorted calibration table for fast binary search lookup.
 /// Built from the JSON pixel_map: { "pixel_width": logical_frame, ... }
@@ -50,7 +50,7 @@ impl CalibrationTable {
             }
         }
 
-        if best_diff <= TOLERANCE {
+        if best_diff <= WIDTH_MATCH_TOLERANCE {
             best_frame
         } else {
             None
@@ -62,33 +62,42 @@ impl CalibrationTable {
             return None;
         }
 
+        Some(
+            (self.lookup_interpolated_frame(pixel_width)? / self.total_frames as f64)
+                .clamp(0.0, 1.0),
+        )
+    }
+
+    pub fn lookup_interpolated_frame(&self, pixel_width: i32) -> Option<f64> {
+        if self.entries.is_empty() {
+            return None;
+        }
+
         let pos = self.entries.partition_point(|&(pk, _)| pk < pixel_width);
         if pos < self.entries.len() && self.entries[pos].0 == pixel_width {
-            return Some(frame_phase(self.entries[pos].1, self.total_frames));
+            return Some(self.entries[pos].1 as f64);
         }
 
         if pos == 0 {
             let (width, frame) = self.entries[0];
-            return ((width - pixel_width).abs() <= TOLERANCE)
-                .then(|| frame_phase(frame, self.total_frames));
+            return ((width - pixel_width).abs() <= WIDTH_MATCH_TOLERANCE).then_some(frame as f64);
         }
 
         if pos >= self.entries.len() {
             let (width, frame) = self.entries[self.entries.len() - 1];
-            return ((width - pixel_width).abs() <= TOLERANCE)
-                .then(|| frame_phase(frame, self.total_frames));
+            return ((width - pixel_width).abs() <= WIDTH_MATCH_TOLERANCE).then_some(frame as f64);
         }
 
         let (lower_width, lower_frame) = self.entries[pos - 1];
         let (upper_width, upper_frame) = self.entries[pos];
         if lower_width == upper_width {
-            return Some(frame_phase(lower_frame, self.total_frames));
+            return Some(lower_frame as f64);
         }
 
         let width_ratio = (pixel_width - lower_width) as f64 / (upper_width - lower_width) as f64;
         let interpolated_frame =
             lower_frame as f64 + width_ratio * (upper_frame - lower_frame) as f64;
-        Some((interpolated_frame / self.total_frames as f64).clamp(0.0, 1.0))
+        Some(interpolated_frame)
     }
 
     pub fn len(&self) -> usize {
@@ -97,14 +106,6 @@ impl CalibrationTable {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-}
-
-fn frame_phase(frame: i32, total_frames: i32) -> f64 {
-    if total_frames <= 0 {
-        0.0
-    } else {
-        (frame as f64 / total_frames as f64).clamp(0.0, 1.0)
     }
 }
 

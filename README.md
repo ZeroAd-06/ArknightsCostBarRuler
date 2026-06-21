@@ -81,6 +81,7 @@ cargo run --release -p ruler-app
 4. 校准完成后，悬浮窗就会实时显示当前帧数了。
 
 > 如果费用回复速率变了，右键菜单里换一份校准配置，或者新建一份重新校准即可。
+> 旧版校准文件会继续按原来的映射方式读取，不会自动改写。重新校准生成的新配置会启用边界周期修正；在基础 `N` 帧周期跨过初始回费边界时，当前循环可能会显示为 `N+1` 帧。
 
 ### 悬浮窗与右键菜单
 
@@ -135,7 +136,7 @@ cargo run --release -p ruler-app
 - **WebSocket** (`ws://127.0.0.1:2606/`): 状态变化时主动推送 JSON。
 - **HTTP 快照** (`http://127.0.0.1:2606/`): 一次性 `GET` 拿到当前状态的 JSON，适合不想常驻连接的场景。
 
-两者返回的字段一致 (`isRunning` / `currentFrame` / `totalFramesInCycle` / `totalElapsedFrames` / `activeProfile`)。完整说明见 **[API.md](API.md)**。
+两者返回的字段一致 (`isRunning` / `currentFrame` / `totalFramesInCycle` / `totalElapsedFrames` / `activeProfile`)。其中 `totalFramesInCycle` 在新校准的边界周期可能是基础周期 `N+1`。完整说明见 **[API.md](API.md)**。
 
 > 之前 Python 版自带的打轴 / 对轴器之后会挪到单独的仓库去，但它就是基于这个 API 工作的;你也可以照着 API 文档写自己的联动工具。
 

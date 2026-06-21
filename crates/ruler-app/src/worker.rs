@@ -12,7 +12,7 @@ use std::{
 
 use ruler_core::{
     analysis::{
-        calibration::infer_calibration_from_samples_with_ui_scaler,
+        calibration::infer_calibration_from_samples_with_ui_scaler_and_total_bar_width,
         scanner::{self, BattleState},
     },
     RulerConfig, RulerEngine,
@@ -598,16 +598,18 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         api.total_elapsed_frames = 0;
     });
 
-    let (cycle_samples, screen_width, screen_height) = collect_calibration_samples(state, context)?;
+    let (cycle_samples, screen_width, screen_height, total_bar_width) =
+        collect_calibration_samples(state, context)?;
     let calibration_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock error: {error}"))?
         .as_secs_f64();
-    let calibration_data = infer_calibration_from_samples_with_ui_scaler(
+    let calibration_data = infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
         &cycle_samples,
         screen_width,
         screen_height,
         context.config.effective_ui_scaler(),
+        total_bar_width,
         calibration_time,
     )?;
     let basename = format!("profile_{}", calibration_time.trunc() as u64);
@@ -633,7 +635,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
 fn collect_calibration_samples(
     state: &SharedAppState,
     context: &mut WorkerContext,
-) -> Result<(Vec<Vec<i32>>, u32, u32), String> {
+) -> Result<(Vec<Vec<i32>>, u32, u32, i32), String> {
     let first_frame = context.engine.capture_frame()?;
     let screen_width = first_frame.width;
     let screen_height = first_frame.height;
@@ -699,7 +701,7 @@ fn collect_calibration_samples(
         ui.mode = OverlayMode::Calibrating;
         ui.progress_percent = 100.0;
     });
-    Ok((cycle_samples, screen_width, screen_height))
+    Ok((cycle_samples, screen_width, screen_height, total_bar_width))
 }
 
 #[derive(Debug)]

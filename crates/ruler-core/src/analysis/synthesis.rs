@@ -81,14 +81,11 @@ fn synthesize_cycle_profile(total_bar_width: i32, n_eff: f64, cycle_index: i32) 
     let total_frames = (end_frame - start_frame).max(1);
     let mut pixel_map = HashMap::new();
 
-    for global_frame in start_frame..end_frame {
-        let local_frame = global_frame - start_frame;
+    for global_frame in (start_frame + 1)..end_frame {
+        let local_frame = global_frame - start_frame - 1;
         let width = synthesized_width(total_bar_width, n_eff, global_frame);
         pixel_map.entry(width.to_string()).or_insert(local_frame);
     }
-    pixel_map
-        .entry(total_bar_width.to_string())
-        .or_insert(total_frames - 1);
 
     ProfileData {
         total_frames,
@@ -133,7 +130,8 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].total_frames, 30);
         assert_eq!(profiles[0].pixel_map.get("0"), Some(&0));
-        assert!(profiles[0].pixel_map.contains_key("180"));
+        assert!(!profiles[0].pixel_map.contains_key("180"));
+        assert_eq!(profiles[0].pixel_map.values().copied().max(), Some(28));
     }
 
     #[test]

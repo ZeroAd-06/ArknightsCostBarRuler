@@ -24,7 +24,7 @@
 - **帧数显示模式**: 支持 `0/n-1`、`0/n`、`1/n` 三种数法，看你习惯哪种。
 - **首次使用向导**: 自动扫描可用目标、实时预览截图、测量截图延迟，照着点就能配好。
 - **多语言**: 简体中文 / English。
-- **本地 API**: 在 `127.0.0.1:2606` 上同时提供 WebSocket 推送和 HTTP 快照，方便第三方工具 (比如对轴器) 读取帧数和计时数据。详见 [API 文档](API.md)。
+- **本地 API**: 在 `127.0.0.1:2606` 上同时提供 WebSocket 推送和 HTTP 快照，方便第三方工具 (比如对轴器) 读取帧数和计时数据。详见 [API 文档](docs/API.md)。
 
 ## 快速开始
 
@@ -82,6 +82,7 @@ cargo run --release -p ruler-app
 
 > 如果费用回复速率变了，右键菜单里换一份校准配置，或者新建一份重新校准即可。
 > 旧版校准文件会继续按原来的映射方式读取，不会自动改写。重新校准生成的新配置会启用边界周期修正；在基础 `N` 帧周期跨过初始回费边界时，当前循环可能会显示为 `N+1` 帧。
+> 想了解“前 10 费不准 / 第 11 费 31 帧”这个现象，可以看 [费用条边界周期分析](docs/cost-bar-boundary-cycle.md)。
 
 ### 悬浮窗与右键菜单
 
@@ -136,7 +137,7 @@ cargo run --release -p ruler-app
 - **WebSocket** (`ws://127.0.0.1:2606/`): 状态变化时主动推送 JSON。
 - **HTTP 快照** (`http://127.0.0.1:2606/`): 一次性 `GET` 拿到当前状态的 JSON，适合不想常驻连接的场景。
 
-两者返回的字段一致 (`isRunning` / `currentFrame` / `totalFramesInCycle` / `totalElapsedFrames` / `activeProfile`)。其中 `totalFramesInCycle` 在新校准的边界周期可能是基础周期 `N+1`。完整说明见 **[API.md](API.md)**。
+两者返回的字段一致 (`isRunning` / `currentFrame` / `totalFramesInCycle` / `totalElapsedFrames` / `activeProfile`)。其中 `totalFramesInCycle` 在新校准的边界周期可能是基础周期 `N+1`。完整说明见 **[API.md](docs/API.md)**。
 
 > 之前 Python 版自带的打轴 / 对轴器之后会挪到单独的仓库去，但它就是基于这个 API 工作的;你也可以照着 API 文档写自己的联动工具。
 
@@ -148,6 +149,7 @@ cargo run --release -p ruler-app
 ArknightsCostBarRuler/
 ├── Cargo.toml              # workspace 根配置
 ├── build.ps1               # 构建 + 打包脚本
+├── docs/                   # 延伸文档与 API 说明
 ├── crates/
 │   ├── ruler-core/         # 核心库: 截图、分析、引擎 (跨二进制复用)
 │   │   └── src/

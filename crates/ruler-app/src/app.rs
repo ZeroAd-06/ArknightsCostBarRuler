@@ -299,7 +299,7 @@ fn try_auto_select_config(config: &RulerConfig) -> Result<Option<RulerConfig>, S
 }
 
 fn apply_runtime_ui_scaler(mut config: RulerConfig) -> RulerConfig {
-    if config.ui_scaler.is_some() || config.capture_type != "window" {
+    if config.capture_type != "window" {
         return config;
     }
 
@@ -310,10 +310,10 @@ fn apply_runtime_ui_scaler(mut config: RulerConfig) -> RulerConfig {
             config.ui_scaler = Some(ui_scaler);
         }
         Ok(None) => {
-            log::info!("Arknights PC uiScaler registry value not found; using 1.0 layout");
+            log::info!("Arknights PC uiScaler registry value not found; keeping existing value");
         }
         Err(error) => {
-            log::warn!("failed to read Arknights PC uiScaler: {error}; using 1.0 layout");
+            log::warn!("failed to read Arknights PC uiScaler: {error}; keeping existing value");
         }
     }
 

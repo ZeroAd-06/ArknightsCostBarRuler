@@ -361,9 +361,24 @@ fn run_worker_loop(
 }
 
 fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Result<(), String> {
-    context
-        .engine
-        .set_ui_scaler(context.config.effective_ui_scaler());
+    // Always re-read ui_scaler from the registry at connect time so that
+    // in-game changes take effect without requiring a config wipe.
+    let ui_scaler = if context.config.capture_type == "window" {
+        match crate::arknights_settings::read_pc_ui_scaler() {
+            Ok(Some(value)) => value.clamp(0.0, 1.0),
+            Ok(None) => {
+                log::info!("Arknights PC uiScaler registry value not found; using config value");
+                context.config.effective_ui_scaler()
+            }
+            Err(error) => {
+                log::warn!("failed to read Arknights PC uiScaler: {error}; using config value");
+                context.config.effective_ui_scaler()
+            }
+        }
+    } else {
+        context.config.effective_ui_scaler()
+    };
+    context.engine.set_ui_scaler(ui_scaler);
     let capture_config = context
         .config
         .to_capture_config()

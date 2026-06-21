@@ -16,7 +16,7 @@ fn embed_windows_resources() {
 
     const APP_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="2.0.0.0" processorArchitecture="*" name="ArknightsCostBarRuler.ruler-app" type="win32"/>
+  <assemblyIdentity version="2.1.0.0" processorArchitecture="*" name="ArknightsCostBarRuler.ruler-app" type="win32"/>
   <description>Arknights Cost Bar Ruler</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>

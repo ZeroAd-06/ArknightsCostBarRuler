@@ -1044,7 +1044,15 @@ mod platform {
         let scale = parent_state.scale;
 
         let snapshot = state.snapshot();
-        let n_profiles = snapshot.ui.profiles.len();
+        let calibrating = snapshot.ui.mode == OverlayMode::Calibrating;
+        // While calibrating the profile list is hidden (see `populate_menu`),
+        // so the popup is sized for zero profile rows.
+        let effective_profiles: &[crate::ui_state::ProfileMenuItem] = if calibrating {
+            &[]
+        } else {
+            &snapshot.ui.profiles
+        };
+        let n_profiles = effective_profiles.len();
 
         let Ok(menu) = RulerMenu::new() else {
             return;
@@ -1096,7 +1104,7 @@ mod platform {
             scale,
             closing: Rc::clone(&closing),
             pending_high: Cell::new(0),
-            profiles_sig: profiles_signature(&snapshot.ui.profiles),
+            profiles_sig: profiles_signature(effective_profiles),
             profile_count: n_profiles,
         });
         let state_ptr = Box::into_raw(menu_state);
@@ -1174,7 +1182,16 @@ mod platform {
     }
 
     unsafe fn populate_menu(menu: &RulerMenu, ui: &crate::ui_state::UiSnapshot, i18n: &I18n) {
-        rebuild_profiles(menu, &ui.profiles);
+        let calibrating = ui.mode == OverlayMode::Calibrating;
+        menu.set_calibrating(calibrating);
+        // Hide profile rows while calibrating: clicking one would queue a
+        // UseProfile that the blocked worker can't act on until the run ends,
+        // and the user's intent during calibration is to cancel, not switch.
+        if calibrating {
+            rebuild_profiles(menu, &[]);
+        } else {
+            rebuild_profiles(menu, &ui.profiles);
+        }
         menu.set_editing_index(-1);
         menu.set_deleting_index(-1);
         menu.set_display_mode(display_mode_index(ui.display_mode));
@@ -1182,6 +1199,7 @@ mod platform {
         menu.set_timer_enabled(ui.active_profile.is_some());
         menu.set_undo_reset_enabled(ui.can_undo_reset);
         menu.set_cap_calibration(i18n.tr("overlay.menu.calibration").into());
+        menu.set_cap_calibrating(i18n.tr("overlay.menu.calibrating").into());
         menu.set_cap_display(i18n.tr("overlay.menu.display").into());
         menu.set_cap_scale(i18n.tr("overlay.menu.scale").into());
         menu.set_cap_timer(i18n.tr("overlay.menu.timer").into());
@@ -1282,16 +1300,27 @@ mod platform {
             }
         });
         // Settings actions keep the panel open; the tick re-syncs the selection.
+        // We also push the change straight into the shared state so the chips
+        // update (and the overlay resizes) even when the worker is blocked
+        // inside the calibration capture loop — the queued command just
+        // persists the same value once the worker is free.
         menu.on_set_display({
             let tx = command_tx.clone();
+            let state = Arc::clone(state);
             move |index| {
-                let _ = tx.send(UiCommand::SetDisplayMode(index_to_display_mode(index)));
+                let mode = index_to_display_mode(index);
+                state.update_ui(|ui, _| ui.display_mode = mode);
+                let _ = tx.send(UiCommand::SetDisplayMode(mode));
             }
         });
         menu.on_set_scale({
             let tx = command_tx.clone();
+            let state = Arc::clone(state);
             move |index| {
-                let _ = tx.send(UiCommand::SetOverlayScale(index_to_scale(index)));
+                let mult = index_to_scale(index);
+                let pct = (mult * 100.0).round().clamp(50.0, 400.0) as u16;
+                state.update_ui(|ui, _| ui.overlay_scale_pct = pct);
+                let _ = tx.send(UiCommand::SetOverlayScale(mult));
             }
         });
         menu.on_timer_action({
@@ -1318,10 +1347,27 @@ mod platform {
                 closing.set(true);
             }
         });
-        menu.on_exit({
-            let tx = command_tx.clone();
+        // Cancel an in-flight calibration: set the one-shot cancel flag the
+        // worker polls in its capture loop, then close the menu. The worker
+        // returns to PreCalibration on its own; the user can retry immediately.
+        menu.on_cancel_calibration({
+            let state = Arc::clone(state);
             let closing = Rc::clone(closing);
             move || {
+                state.request_cancel_calibration();
+                closing.set(true);
+            }
+        });
+        menu.on_exit({
+            let tx = command_tx.clone();
+            let state = Arc::clone(state);
+            let closing = Rc::clone(closing);
+            move || {
+                // Abort any in-flight calibration first so the worker unblocks
+                // and drains the queued Exit promptly. Without this the worker
+                // is stuck inside `collect_calibration_samples` and the Exit
+                // command would not be processed until the run finished.
+                state.request_cancel_calibration();
                 let _ = tx.send(UiCommand::Exit);
                 closing.set(true);
             }
@@ -1495,6 +1541,13 @@ mod platform {
             return;
         };
         let snapshot = state.state.snapshot();
+
+        // Sync the calibrating flag every tick so the header swaps between the
+        // "New" and "Cancel" buttons if the worker transitions modes while the
+        // menu is open (e.g. calibration finishes or is cancelled mid-menu).
+        let calibrating = snapshot.ui.mode == OverlayMode::Calibrating;
+        state.menu.set_calibrating(calibrating);
+
         // Live-sync the cheap selections so chips reflect changes made via the
         // menu (and the worker) without rebuilding the profile model each frame.
         state
@@ -1510,14 +1563,23 @@ mod platform {
             .menu
             .set_undo_reset_enabled(snapshot.ui.can_undo_reset);
 
+        // While calibrating, force the effective profile list to empty so the
+        // `for` loop in menu.slint renders zero rows and the popup can shrink.
+        let effective_profiles: Vec<_> = if calibrating {
+            Vec::new()
+        } else {
+            snapshot.ui.profiles.clone()
+        };
+
         // Refresh the profile model only when the list actually changes (an inline
-        // rename/delete landed), so an in-progress edit field is not torn down each
-        // frame. Resize the popup when the row count changed.
-        let sig = profiles_signature(&snapshot.ui.profiles);
+        // rename/delete landed, or the calibrating state flipped), so an in-progress
+        // edit field is not torn down each frame. Resize the popup when the row
+        // count changed.
+        let sig = profiles_signature(&effective_profiles);
         if state.profiles_sig != sig {
-            rebuild_profiles(&state.menu, &snapshot.ui.profiles);
+            rebuild_profiles(&state.menu, &effective_profiles);
             state.profiles_sig = sig;
-            let new_count = snapshot.ui.profiles.len();
+            let new_count = effective_profiles.len();
             if new_count != state.profile_count {
                 state.profile_count = new_count;
                 resize_menu(hwnd, state, new_count);

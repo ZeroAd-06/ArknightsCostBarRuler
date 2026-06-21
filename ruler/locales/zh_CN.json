@@ -27,6 +27,7 @@
     "config.btn.save_start": "保存并启动",
     "config.btn.cancel": "取消",
     "overlay.menu.calibration": "校准配置",
+    "overlay.menu.calibrating": "校准中",
     "overlay.menu.display": "帧数显示",
     "overlay.menu.timer": "调节计时器",
     "overlay.menu.scale": "缩放",

@@ -27,6 +27,7 @@
     "config.btn.save_start": "Save and Start",
     "config.btn.cancel": "Cancel",
     "overlay.menu.calibration": "Calibration",
+    "overlay.menu.calibrating": "Calibrating",
     "overlay.menu.display": "Frame Display",
     "overlay.menu.timer": "Adjust Timer",
     "overlay.menu.scale": "Scale",

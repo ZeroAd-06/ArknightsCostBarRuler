@@ -31,6 +31,12 @@ use crate::{
 
 const CALIBRATION_CYCLES: usize = 2;
 
+/// Sentinel error string used to distinguish a user-initiated cancellation
+/// from a real failure inside `run_calibration`. `handle_command` checks for
+/// this exact value to decide whether to return to PreCalibration (cancel) or
+/// publish an error (failure).
+const CALIBRATION_CANCELLED: &str = "calibration_cancelled";
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkerTimingSnapshot {
     pub sample_index: u64,
@@ -54,6 +60,9 @@ pub struct AppStateSnapshot {
 pub struct SharedAppState {
     inner: Mutex<AppStateSnapshot>,
     overlay_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    // One-shot flag set by the UI to abort an in-flight calibration loop.
+    // The worker polls it inside `collect_calibration_samples` and bails out.
+    cancel_calibration: AtomicBool,
 }
 
 impl fmt::Debug for SharedAppState {
@@ -125,6 +134,20 @@ impl SharedAppState {
 
     pub fn request_exit(&self) {
         self.update_ui(|ui, _| ui.should_exit = true);
+    }
+
+    /// Set the one-shot cancel flag for an in-flight calibration. The worker
+    /// polls this inside the capture loop and aborts promptly. Has no effect if
+    /// no calibration is running — the flag is cleared at the start of the next
+    /// `run_calibration` call.
+    pub fn request_cancel_calibration(&self) {
+        self.cancel_calibration.store(true, Ordering::SeqCst);
+    }
+
+    /// Atomically read and clear the cancel flag. Returns `true` if a cancel
+    /// was requested since the last call.
+    pub fn take_cancel_calibration(&self) -> bool {
+        self.cancel_calibration.swap(false, Ordering::SeqCst)
     }
 
     pub fn record_overlay_paint(&self, sample_index: u64, painted_at: Instant) {
@@ -479,6 +502,28 @@ fn handle_command(
             log::info!("worker command: start calibration");
             match run_calibration(state, context) {
                 Ok(()) => publish_running_state(state, context, None),
+                Err(ref error) if error == CALIBRATION_CANCELLED => {
+                    log::info!("calibration cancelled by user, returning to PreCalibration");
+                    // Clear any remaining cancel signal (the post-collection
+                    // re-check may have left it set) and restore the
+                    // pre-calibration state so the user can retry.
+                    let _ = state.take_cancel_calibration();
+                    state.update_ui(|ui, api| {
+                        ui.mode = OverlayMode::PreCalibration;
+                        ui.progress_percent = 0.0;
+                        ui.message.clear();
+                        ui.display_frame = "--".to_string();
+                        ui.display_total = "/--".to_string();
+                        ui.time_str = "00:00:00".to_string();
+                        ui.lap_frames = None;
+                        ui.can_undo_reset = false;
+                        ui.profiles = context.profiles.list(None);
+                        api.is_running = false;
+                        api.current_frame = None;
+                        api.total_frames_in_cycle = 0;
+                        api.total_elapsed_frames = 0;
+                    });
+                }
                 Err(error) => publish_error(state, context, format!("calibration failed: {error}")),
             }
         }
@@ -602,6 +647,10 @@ fn handle_command(
 }
 
 fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Result<(), String> {
+    // Clear any stale cancel flag from a previous run so a fresh calibration
+    // is not aborted by a cancel that arrived too late last time.
+    let _ = state.take_cancel_calibration();
+
     if !context.connected {
         return Err("capture backend is not connected".to_string());
     }
@@ -629,6 +678,14 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
 
     let (cycle_samples, screen_width, screen_height, total_bar_width) =
         collect_calibration_samples(state, context)?;
+
+    // Re-check the cancel flag right after collection — the user may have
+    // clicked cancel during the final frames, and we'd rather drop the run
+    // than commit a profile the user explicitly aborted.
+    if state.take_cancel_calibration() {
+        return Err(CALIBRATION_CANCELLED.to_string());
+    }
+
     let calibration_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock error: {error}"))?
@@ -685,6 +742,12 @@ fn collect_calibration_samples(
     let mut frame = first_frame;
 
     while cycle_samples.len() < CALIBRATION_CYCLES {
+        // Poll the cancel flag every frame so a right-click "cancel" aborts
+        // the loop promptly instead of waiting for both cycles to complete.
+        if state.take_cancel_calibration() {
+            return Err(CALIBRATION_CANCELLED.to_string());
+        }
+
         let current_cost_state_raw = scanner::get_raw_filled_pixel_width(
             &frame.data,
             frame.width,

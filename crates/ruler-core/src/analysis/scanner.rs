@@ -124,6 +124,8 @@ const BATTLE_BEGIN_DARK_MAX_SUM: u16 = 150;
 const BATTLE_BEGIN_SAMPLE_STEP_SCALE: f64 = 14.0;
 const BATTLE_BEGIN_SIDE_AVG_MAX: u64 = 120;
 const BATTLE_BEGIN_TOP_WHITE_MAX: u32 = 0;
+const BATTLE_BEGIN_TOP_COLOR_DELTA_MAX: u64 = 4;
+const BATTLE_BEGIN_SIDE_COLOR_DELTA_MAX: u64 = 4;
 const BATTLE_BEGIN_CODE_WHITE_PERMYRIAD_MIN: u32 = 100;
 const BATTLE_BEGIN_TITLE_WHITE_PERMYRIAD_MIN: u32 = 150;
 const BATTLE_BEGIN_TEXT_SCORE_PERMYRIAD_MIN: u32 = 650;
@@ -256,6 +258,7 @@ struct BattleBeginBandStats {
     white: u32,
     dark: u32,
     brightness_sum: u64,
+    channel_delta_sum: u64,
 }
 
 impl BattleBeginBandStats {
@@ -278,8 +281,19 @@ impl BattleBeginBandStats {
     }
 
     #[inline]
+    fn avg_channel_delta(self) -> u64 {
+        if self.total == 0 {
+            u64::MAX
+        } else {
+            self.channel_delta_sum / self.total as u64
+        }
+    }
+
+    #[inline]
     fn is_dim_backdrop(self) -> bool {
-        self.total > 0 && self.avg_brightness() <= BATTLE_BEGIN_SIDE_AVG_MAX
+        self.total > 0
+            && self.avg_brightness() <= BATTLE_BEGIN_SIDE_AVG_MAX
+            && self.avg_channel_delta() <= BATTLE_BEGIN_SIDE_COLOR_DELTA_MAX
     }
 }
 
@@ -595,6 +609,7 @@ fn sample_battle_begin_band(
             let brightness = r as u16 + g as u16 + b as u16;
             stats.total += 1;
             stats.brightness_sum += brightness as u64;
+            stats.channel_delta_sum += max_channel_delta(r, g, b) as u64;
             if brightness <= BATTLE_BEGIN_DARK_MAX_SUM {
                 stats.dark += 1;
             }
@@ -633,7 +648,9 @@ fn has_battle_begin_title_screen(
         step * 2,
         top_y_step,
     );
-    if top_clear.white > BATTLE_BEGIN_TOP_WHITE_MAX {
+    if top_clear.white > BATTLE_BEGIN_TOP_WHITE_MAX
+        || top_clear.avg_channel_delta() > BATTLE_BEGIN_TOP_COLOR_DELTA_MAX
+    {
         return false;
     }
 

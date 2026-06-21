@@ -87,6 +87,36 @@ fn battle_begin_detector_classifies_all_title_screen_samples() {
 }
 
 #[test]
+fn battle_begin_detector_rejects_known_false_positives() {
+    let fixtures = load_battle_begin_negative_fixture_paths();
+    assert!(
+        !fixtures.is_empty(),
+        "expected PNG samples under tests/fixtures/battle_begin_negative"
+    );
+
+    let mut mismatches = Vec::new();
+    for fixture in fixtures {
+        let sample = load_full_sample(&fixture.path, fixture.expected);
+        let actual =
+            detect_battle_state(&sample.data, sample.width, sample.height, PixelFormat::Rgba);
+        if actual != sample.expected {
+            mismatches.push(format!(
+                "{}: expected {:?}, got {:?}",
+                sample.path.display(),
+                sample.expected,
+                actual
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "known false positives still match battle begin:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
 fn battle_button_detector_stays_under_15us_in_release() {
     if cfg!(debug_assertions) {
         return;
@@ -206,6 +236,39 @@ fn load_battle_begin_fixture_paths() -> Vec<Fixture> {
         fixtures.push(Fixture {
             path,
             expected: BattleState::BattleBegin,
+            one_x_or_garbage: false,
+        });
+    }
+
+    fixtures
+}
+
+fn load_battle_begin_negative_fixture_paths() -> Vec<Fixture> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("battle_begin_negative");
+    assert!(
+        root.is_dir(),
+        "missing battle begin negative fixture directory: {}",
+        root.display()
+    );
+    let mut fixtures = Vec::new();
+    let mut paths = fs::read_dir(&root)
+        .expect("failed to list battle begin negative fixtures")
+        .map(|entry| {
+            entry
+                .expect("failed to read battle begin negative fixture entry")
+                .path()
+        })
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    for path in paths {
+        fixtures.push(Fixture {
+            path,
+            expected: BattleState::NotInBattle,
             one_x_or_garbage: false,
         });
     }

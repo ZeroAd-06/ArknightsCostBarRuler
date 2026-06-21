@@ -24,7 +24,8 @@ use crate::{
     profiles::{calibration_basename, ProfileStore},
     resources::ResourceLocator,
     ui_state::{
-        format_time_from_frames, ApiStateSnapshot, FrameDisplayMode, OverlayMode, UiSnapshot,
+        format_time_from_frames, ApiStateSnapshot, FrameDisplayMode, OverlayMode, ResetKind,
+        UiSnapshot,
     },
 };
 
@@ -272,6 +273,11 @@ struct WorkerContext {
     sample_index: u64,
     debug_recorder: Option<DebugRecorder>,
     log_session_dir: PathBuf,
+    // Bumped (and tagged with the trigger kind) whenever the timer is reset
+    // while it was actually running (elapsed != 0). The overlay reads this via
+    // UiSnapshot to drive the reset cover animation.
+    reset_pulse: u32,
+    reset_kind: ResetKind,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -331,6 +337,8 @@ fn run_worker_loop(
         sample_index: 0,
         debug_recorder: None,
         log_session_dir,
+        reset_pulse: 0,
+        reset_kind: ResetKind::Manual,
     };
 
     if let Err(error) = bootstrap_engine(&mut context, &state) {
@@ -523,6 +531,12 @@ fn handle_command(
         }
         UiCommand::ResetTimer => {
             log::info!("worker command: reset timer");
+            // Only animate when the timer was actually counting — a reset from
+            // zero is a no-op visually.
+            if context.last_elapsed_frames != 0 {
+                context.reset_pulse = context.reset_pulse.wrapping_add(1);
+                context.reset_kind = ResetKind::Manual;
+            }
             context
                 .timer_reset_undo
                 .remember_reset(context.last_elapsed_frames);
@@ -830,6 +844,14 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                             context
                                 .timer_reset_undo
                                 .remember_reset(context.last_elapsed_frames);
+                            // Animate the auto-reset only when the previous
+                            // timer was actually running; a reset from zero
+                            // (e.g. entering a stage fresh) stays silent.
+                            if context.last_elapsed_frames != 0 {
+                                context.reset_pulse =
+                                    context.reset_pulse.wrapping_add(1);
+                                context.reset_kind = ResetKind::Auto;
+                            }
                         }
                         context.last_elapsed_frames = result.elapsed_frames;
                         context.lap_start_frame = None;
@@ -851,6 +873,8 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                         .map(|start| context.last_elapsed_frames - start);
                     let active_profile = context.active_profile.clone();
                     let active_basename = active_profile.as_deref().map(calibration_basename);
+                    let reset_pulse = context.reset_pulse;
+                    let reset_kind = context.reset_kind;
                     state.update_ui(|ui, api| {
                         ui.mode = OverlayMode::Running;
                         ui.message.clear();
@@ -861,6 +885,8 @@ fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
                         ui.lap_frames = lap_frames;
                         ui.can_undo_reset = timer_reset_undo_enabled(context);
                         ui.total_frames_in_cycle = result.total_frames_in_cycle;
+                        ui.reset_pulse = reset_pulse;
+                        ui.reset_kind = reset_kind;
                         ui.active_profile = active_profile.clone();
                         ui.profiles = context.profiles.list(active_profile.as_deref());
                         api.is_running = result.logical_frame.is_some();
@@ -896,6 +922,8 @@ fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame:
     let lap_frames = context
         .lap_start_frame
         .map(|start| context.last_elapsed_frames - start);
+    let reset_pulse = context.reset_pulse;
+    let reset_kind = context.reset_kind;
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Running;
         ui.message.clear();
@@ -915,6 +943,8 @@ fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame:
         ui.lap_frames = lap_frames;
         ui.can_undo_reset = timer_reset_undo_enabled(context);
         ui.total_frames_in_cycle = total_frames;
+        ui.reset_pulse = reset_pulse;
+        ui.reset_kind = reset_kind;
         ui.active_profile = active_profile.clone();
         ui.profiles = context.profiles.list(active_profile.as_deref());
         api.is_running = frame.is_some();

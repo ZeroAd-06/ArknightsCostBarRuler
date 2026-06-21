@@ -1,6 +1,14 @@
 pub const FRAMES_PER_SECOND: i32 = 30;
 pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
+/// What triggered a timer reset — drives the overlay cover animation's label.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResetKind {
+    #[default]
+    Manual,
+    Auto,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FrameDisplayMode {
     #[default]
@@ -97,6 +105,11 @@ pub struct UiSnapshot {
     pub capture_dimensions: Option<(u32, u32)>,
     pub overlay_scale_pct: u16,
     pub should_exit: bool,
+    // Monotonic counter bumped each time the timer is reset (manual or auto).
+    // The overlay compares this against its own copy to detect new resets and
+    // drive the cover animation. Wrapping is fine — only inequality matters.
+    pub reset_pulse: u32,
+    pub reset_kind: ResetKind,
 }
 
 impl Default for UiSnapshot {
@@ -117,6 +130,8 @@ impl Default for UiSnapshot {
             capture_dimensions: None,
             overlay_scale_pct: 100,
             should_exit: false,
+            reset_pulse: 0,
+            reset_kind: ResetKind::Manual,
         }
     }
 }

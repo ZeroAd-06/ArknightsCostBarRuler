@@ -153,7 +153,7 @@ mod platform {
         },
         tray,
         ui::{Hud, HudMode, ProfileRow, RulerMenu},
-        ui_state::{FrameDisplayMode, OverlayMode},
+        ui_state::{FrameDisplayMode, OverlayMode, ResetKind},
         worker::SharedAppState,
     };
     use windows::{
@@ -204,6 +204,78 @@ mod platform {
     const LOGICAL_TOOLBAR_TOP_GAP: f32 = 2.0;
     const HTTRANSPARENT_RESULT: isize = -1;
 
+    // Reset cover animation timing (compact ~0.7s total). All three phases
+    // use a smoothstep curve so motion eases in/out non-linearly.
+    const RESET_EXPAND_MS: u128 = 180;
+    const RESET_HOLD_MS: u128 = 260;
+    const RESET_CONTRACT_MS: u128 = 240;
+
+    /// In-flight reset cover animation. `kind` selects the label text.
+    #[derive(Clone, Copy)]
+    struct ResetAnim {
+        start: Instant,
+        kind: ResetKind,
+    }
+
+    struct ResetPhase {
+        cover: f32,
+        top: f32,
+        text_opacity: f32,
+        done: bool,
+    }
+
+    /// Cubic smoothstep: 0 at t=0, 1 at t=1, zero slope at both ends.
+    fn smoothstep(t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Compute the cover/top/text-opacity for a reset animation at `elapsed`.
+    ///
+    /// - Expand: bar grows top-down (top pinned at 0), text fades in with cover.
+    /// - Hold: full cover, full text.
+    /// - Contract: bar wipes downward off the bottom (bottom edge pinned, top
+    ///   edge rises), text fades out as cover shrinks.
+    fn compute_reset_phase(elapsed_ms: u128) -> ResetPhase {
+        if elapsed_ms >= RESET_EXPAND_MS + RESET_HOLD_MS + RESET_CONTRACT_MS {
+            return ResetPhase {
+                cover: 0.0,
+                top: 0.0,
+                text_opacity: 0.0,
+                done: true,
+            };
+        }
+        if elapsed_ms < RESET_EXPAND_MS {
+            let s = smoothstep(elapsed_ms as f32 / RESET_EXPAND_MS as f32);
+            return ResetPhase {
+                cover: s,
+                top: 0.0,
+                text_opacity: s,
+                done: false,
+            };
+        }
+        if elapsed_ms < RESET_EXPAND_MS + RESET_HOLD_MS {
+            return ResetPhase {
+                cover: 1.0,
+                top: 0.0,
+                text_opacity: 1.0,
+                done: false,
+            };
+        }
+        // Contract: cover and text recede as `smoothstep`, top rises so the
+        // bottom edge (top + cover) stays pinned at 1.
+        let s = smoothstep(
+            (elapsed_ms - RESET_EXPAND_MS - RESET_HOLD_MS) as f32 / RESET_CONTRACT_MS as f32,
+        );
+        let cover = 1.0 - s;
+        ResetPhase {
+            cover,
+            top: 1.0 - cover,
+            text_opacity: cover,
+            done: false,
+        }
+    }
+
     struct WindowState {
         hud: Hud,
         window: Rc<MinimalSoftwareWindow>,
@@ -221,6 +293,10 @@ mod platform {
         scale_mult: f32,
         displayed_progress: f32,
         last_mode: OverlayMode,
+        // Reset cover animation: detects new resets via `reset_pulse` and plays
+        // the cover sweep. `None` when idle.
+        reset_anim: Option<ResetAnim>,
+        last_reset_pulse: u32,
         // factory slot, used to claim windows for menu/dialog popups
         window_slot: WindowSlot,
         // tray icon bound to this window (Shell_NotifyIcon)
@@ -325,6 +401,8 @@ mod platform {
                 scale_mult,
                 displayed_progress: 0.0,
                 last_mode: OverlayMode::Booting,
+                reset_anim: None,
+                last_reset_pulse: 0,
                 window_slot: Rc::clone(&slot),
                 nid: NOTIFYICONDATAW::default(),
                 tray_icon: None,
@@ -577,6 +655,7 @@ mod platform {
         }
 
         sync_properties(state, &snapshot.ui);
+        advance_reset_anim(state, &snapshot.ui);
 
         let w = state.buf_w;
         let h = state.buf_h;
@@ -667,6 +746,44 @@ mod platform {
         }
 
         state.last_mode = ui.mode.clone();
+    }
+
+    /// Detect new resets via `reset_pulse` and advance the cover animation.
+    /// A fresh pulse mid-animation restarts it (overriding the current kind),
+    /// so a manual reset right after an auto one re-arms cleanly.
+    fn advance_reset_anim(state: &mut WindowState, ui: &crate::ui_state::UiSnapshot) {
+        if ui.reset_pulse != state.last_reset_pulse {
+            state.last_reset_pulse = ui.reset_pulse;
+            // Always (re)start from the top so the sweep reads as a new event.
+            state.reset_anim = Some(ResetAnim {
+                start: Instant::now(),
+                kind: ui.reset_kind,
+            });
+        }
+
+        let Some(anim) = state.reset_anim else {
+            state.hud.set_reset_active(false);
+            return;
+        };
+
+        let elapsed = anim.start.elapsed().as_millis();
+        let phase = compute_reset_phase(elapsed);
+        let hud = &state.hud;
+        if phase.done {
+            state.reset_anim = None;
+            hud.set_reset_active(false);
+            return;
+        }
+
+        let label_key = match anim.kind {
+            ResetKind::Manual => "overlay.reset.manual",
+            ResetKind::Auto => "overlay.reset.auto",
+        };
+        hud.set_reset_active(true);
+        hud.set_reset_cover(phase.cover);
+        hud.set_reset_top(phase.top);
+        hud.set_reset_text(state.i18n.tr(label_key).into());
+        hud.set_reset_text_opacity(phase.text_opacity);
     }
 
     fn displayed_calibration_progress(
@@ -1614,6 +1731,72 @@ mod platform {
         #[test]
         fn displayed_progress_does_not_rewind_when_target_jitters_down() {
             assert_eq!(advance_displayed_progress(20.0, 18.0), 20.0);
+        }
+
+        #[test]
+        fn smoothstep_hits_endpoints_and_midpoint() {
+            assert_eq!(smoothstep(0.0), 0.0);
+            assert_eq!(smoothstep(1.0), 1.0);
+            assert!((smoothstep(0.5) - 0.5).abs() < 1e-6);
+        }
+
+        #[test]
+        fn smoothstep_clamps_outside_unit_interval() {
+            assert_eq!(smoothstep(-0.5), 0.0);
+            assert_eq!(smoothstep(1.5), 1.0);
+        }
+
+        #[test]
+        fn reset_phase_expand_starts_empty() {
+            let p = compute_reset_phase(0);
+            assert_eq!(p.cover, 0.0);
+            assert_eq!(p.top, 0.0);
+            assert_eq!(p.text_opacity, 0.0);
+            assert!(!p.done);
+        }
+
+        #[test]
+        fn reset_phase_expand_end_is_full() {
+            // At the boundary the expand phase should report full cover.
+            let p = compute_reset_phase(RESET_EXPAND_MS);
+            assert!((p.cover - 1.0).abs() < 1e-6);
+            assert_eq!(p.top, 0.0);
+            assert!(!p.done);
+        }
+
+        #[test]
+        fn reset_phase_hold_is_full_and_centered() {
+            let mid_hold = RESET_EXPAND_MS + RESET_HOLD_MS / 2;
+            let p = compute_reset_phase(mid_hold);
+            assert_eq!(p.cover, 1.0);
+            assert_eq!(p.top, 0.0);
+            assert_eq!(p.text_opacity, 1.0);
+            assert!(!p.done);
+        }
+
+        #[test]
+        fn reset_phase_contract_keeps_bottom_edge_pinned() {
+            // During the contract phase the bottom edge (top + cover) must
+            // stay at 1 so the bar wipes downward without sliding.
+            for ms in 0..RESET_CONTRACT_MS {
+                let elapsed = RESET_EXPAND_MS + RESET_HOLD_MS + ms;
+                let p = compute_reset_phase(elapsed);
+                assert!(!p.done, "phase should not be done at {elapsed}ms");
+                assert!(
+                    (p.top + p.cover - 1.0).abs() < 1e-5,
+                    "bottom edge drifted at {elapsed}ms: top={} cover={}",
+                    p.top,
+                    p.cover
+                );
+                assert!(p.cover >= 0.0 && p.cover <= 1.0);
+            }
+        }
+
+        #[test]
+        fn reset_phase_done_after_total_duration() {
+            let total = RESET_EXPAND_MS + RESET_HOLD_MS + RESET_CONTRACT_MS;
+            let p = compute_reset_phase(total);
+            assert!(p.done);
         }
     }
 }

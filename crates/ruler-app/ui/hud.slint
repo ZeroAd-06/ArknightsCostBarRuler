@@ -33,6 +33,19 @@ export component Hud inherits Window {
     in property <bool> force-controls: false; // preview/debug only
     in property <bool> undo-reset-enabled: false;
 
+    // ---- reset cover animation (driven from Rust each tick) ----
+    // A cyan bar sweeps down from the top to cover the panel, holds, then
+    // wipes downward off the bottom. `reset-cover` is the bar's height as a
+    // fraction of the panel; `reset-top` is its top-edge offset as a fraction
+    // (stays 0 while growing/holding, rises during the downward wipe so the
+    // bottom edge stays pinned). Text is centered on the whole panel and fades
+    // independently.
+    in property <bool> reset-active: false;
+    in property <float> reset-cover: 0;   // 0..1 of panel-height
+    in property <float> reset-top: 0;     // 0..1 of panel-height
+    in property <string> reset-text: "";
+    in property <float> reset-text-opacity: 0;
+
     // ---- outputs ----
     callback start-clicked();
     callback reset-clicked();
@@ -194,6 +207,36 @@ export component Hud inherits Window {
             wrap: word-wrap;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+    }
+
+    // ===== RESET COVER: cyan bar wipes down over the panel, then wipes off =====
+    // No TouchArea → clicks pass through to whatever is below (the panel / drag
+    // surface), so the 0.7s animation never blocks interaction.
+    Rectangle {
+        visible: root.reset-active;
+        x: 0;
+        y: root.panel-height * root.reset-top;
+        width: 100%;
+        height: root.panel-height * root.reset-cover;
+        background: Palette.accent;
+        clip: true;
+
+        // Text stays centered on the *whole* panel regardless of the bar's
+        // current height, so the label reads as "the panel was covered" rather
+        // than sliding with the bar edge.
+        Text {
+            x: 0;
+            y: -root.panel-height * root.reset-top;
+            width: 100%;
+            height: root.panel-height;
+            text: root.reset-text;
+            color: #0a0e12;
+            font-size: 18px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            opacity: root.reset-text-opacity;
         }
     }
 

@@ -34,6 +34,8 @@
     "overlay.menu.new_short": "新建",
     "overlay.msg.idle": "右键托盘或窗口\n选择一个配置",
     "overlay.msg.pre_cal": "进入关卡后\n点击此处校准",
+    "overlay.reset.manual": "已重置计时器",
+    "overlay.reset.auto": "行动开始",
     "overlay.dialog.cancel": "取消",
     "overlay.dialog.delete.confirm": "删除"
 }

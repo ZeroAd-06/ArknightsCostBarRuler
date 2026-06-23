@@ -136,10 +136,11 @@ impl AnalyzerConsumer {
                                 ctx.lap_start_frame = None;
                             }
                             AnalyzerCommand::ClearCalibration => {
-                                // There's no explicit "clear calibration" on Analyzer;
-                                // we reset the timer and let analyze_captured_frame
-                                // return "No calibration loaded" errors until a new
-                                // profile is loaded.
+                                // Unload the calibration so the analyzer goes
+                                // silent (see the recv_frame guard below) and
+                                // the worker-owned PreCalibration / Idle screen
+                                // is not clobbered by stale Running results.
+                                ctx.analyzer.clear_calibration();
                                 ctx.analyzer.reset_timer();
                                 ctx.last_elapsed_frames = 0;
                                 ctx.last_cost_is_negative = false;
@@ -195,9 +196,13 @@ impl AnalyzerConsumer {
 
                     match pipe.recv_frame() {
                         Ok(frame) => {
-                            if ctx.calibrating {
-                                // Skip publishing during calibration; the
-                                // calibration collector owns the UI.
+                            // Stay silent whenever the worker owns the UI:
+                            // during an explicit calibration (the collector
+                            // owns it) or whenever no calibration is loaded
+                            // (PreCalibration / Idle / first run). Publishing
+                            // here would clobber the worker-set OverlayMode on
+                            // the very next frame.
+                            if ctx.calibrating || !ctx.analyzer.has_calibration() {
                                 continue;
                             }
                             analyze_and_publish(&state, &mut ctx, &frame);

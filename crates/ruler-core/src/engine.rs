@@ -141,6 +141,17 @@ impl Analyzer {
         Ok(())
     }
 
+    /// Unload the current calibration. After this, [`Self::analyze_captured_frame`]
+    /// returns `Err("No calibration loaded")` until a new profile is loaded.
+    pub fn clear_calibration(&mut self) {
+        self.calibration = None;
+    }
+
+    /// Whether a calibration profile is currently loaded.
+    pub fn has_calibration(&self) -> bool {
+        self.calibration.is_some()
+    }
+
     pub fn analyze_captured_frame(
         &mut self,
         frame_data: &CapturedFrame,

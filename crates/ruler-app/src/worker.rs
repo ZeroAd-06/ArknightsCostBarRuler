@@ -301,8 +301,6 @@ struct WorkerContext {
     analyzer_command_tx: Option<Sender<AnalyzerCommand>>,
     analyzer: Option<AnalyzerConsumer>,
     debug_recorder: Option<DebugRecorderConsumer>,
-    #[cfg(windows)]
-    cursor_guard: Option<crate::pc_cursor_guard::SelfDrawnCursorGuard>,
 }
 
 fn run_worker_loop(
@@ -343,8 +341,6 @@ fn run_worker_loop(
         analyzer_command_tx: None,
         analyzer: None,
         debug_recorder: None,
-        #[cfg(windows)]
-        cursor_guard: None,
     };
 
     if let Err(error) = bootstrap(&mut context, Arc::clone(&state)) {
@@ -410,19 +406,19 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
 
     // Configure cursor guard (Windows only).
     #[cfg(windows)]
-    {
-        if context.config.capture_type == "window" {
-            let cursor_size = match crate::arknights_settings::read_pc_cursor_size() {
-                Ok(Some(value)) => value.clamp(0.0, 1.0),
-                Ok(None) => 1.0,
-                Err(_) => 1.0,
-            };
-            context.cursor_guard = Some(crate::pc_cursor_guard::SelfDrawnCursorGuard::new(
-                ui_scaler,
-                cursor_size,
-            ));
-        }
-    }
+    let cursor_guard = if context.config.capture_type == "window" {
+        let cursor_size = match crate::arknights_settings::read_pc_cursor_size() {
+            Ok(Some(value)) => value.clamp(0.0, 1.0),
+            Ok(None) => 1.0,
+            Err(_) => 1.0,
+        };
+        Some(crate::pc_cursor_guard::SelfDrawnCursorGuard::new(
+            ui_scaler,
+            cursor_size,
+        ))
+    } else {
+        None
+    };
 
     // Spawn the Layer 2 analyzer consumer (SkipToLatest).
     let analyzer_pipe = pipeline
@@ -441,6 +437,8 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         ui_scaler,
         calibration_path: initial_cal_path,
         pipeline_info: info.clone(),
+        #[cfg(windows)]
+        cursor_guard,
     };
     let analyzer = AnalyzerConsumer::spawn(
         analyzer_pipe,

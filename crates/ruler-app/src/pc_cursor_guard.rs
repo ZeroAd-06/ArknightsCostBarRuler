@@ -39,6 +39,7 @@ unsafe extern "system" {
     fn GetCursorInfo(cursor_info: *mut CursorInfo) -> BOOL;
     fn GetCursorPos(point: *mut POINT) -> BOOL;
     fn WindowFromPoint(point: POINT) -> HWND;
+    fn ScreenToClient(hwnd: HWND, point: *mut POINT) -> BOOL;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,6 +160,8 @@ fn cursor_state_in_client(window: WindowInfo) -> Option<CursorState> {
         return None;
     }
 
+    let hwnd = HWND(window.hwnd as *mut c_void);
+
     let mut point = POINT::default();
     unsafe {
         if !GetCursorPos(&mut point).as_bool() {
@@ -166,8 +169,19 @@ fn cursor_state_in_client(window: WindowInfo) -> Option<CursorState> {
         }
     }
 
-    let client_x = point.x - window.client_left;
-    let client_y = point.y - window.client_top;
+    // Use ScreenToClient so the conversion is always accurate even if the
+    // game window has been dragged since the pipeline was started (the
+    // cached client_left/client_top in WindowInfo would be stale in that case).
+    let screen_x = point.x;
+    let screen_y = point.y;
+    unsafe {
+        if !ScreenToClient(hwnd, &mut point).as_bool() {
+            return None;
+        }
+    }
+
+    let client_x = point.x;
+    let client_y = point.y;
     if client_x < 0
         || client_y < 0
         || client_x >= window.width as i32
@@ -176,7 +190,8 @@ fn cursor_state_in_client(window: WindowInfo) -> Option<CursorState> {
         return None;
     }
 
-    let top_hwnd = unsafe { WindowFromPoint(point) };
+    // WindowFromPoint still needs screen coordinates.
+    let top_hwnd = unsafe { WindowFromPoint(POINT { x: screen_x, y: screen_y }) };
     let uncovered = top_hwnd.0 as isize == window.hwnd;
     let native_visible = cursor_info()
         .map(|info| (info.flags & CURSOR_SHOWING) != 0)

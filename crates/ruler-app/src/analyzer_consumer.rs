@@ -63,6 +63,10 @@ pub struct AnalyzerConfig {
     pub calibration_path: Option<std::path::PathBuf>,
     /// Pipeline info (for window_info, used by the cursor guard).
     pub pipeline_info: PipelineInfo,
+    /// Windows-only cursor guard. Detects when the in-game self-drawn
+    /// cursor overlaps the cost bar so the frame is skipped.
+    #[cfg(windows)]
+    pub cursor_guard: Option<crate::pc_cursor_guard::SelfDrawnCursorGuard>,
 }
 
 /// The L2 analyzer consumer. Runs on its own thread; communicates with the
@@ -98,6 +102,8 @@ impl AnalyzerConsumer {
         let mut ctx = AnalyzerContext {
             analyzer,
             display_mode: config.display_mode,
+            #[cfg(windows)]
+            cursor_guard: config.cursor_guard,
             sample_index: 0,
             last_elapsed_frames: 0,
             last_total_frames: 0,
@@ -229,6 +235,8 @@ impl Drop for AnalyzerConsumer {
 struct AnalyzerContext {
     analyzer: Analyzer,
     display_mode: FrameDisplayMode,
+    #[cfg(windows)]
+    cursor_guard: Option<crate::pc_cursor_guard::SelfDrawnCursorGuard>,
     sample_index: u64,
     last_elapsed_frames: i32,
     last_total_frames: i32,
@@ -287,7 +295,7 @@ fn analyze_and_publish(state: &SharedAppState, ctx: &mut AnalyzerContext, frame:
     // Cursor guard check (Windows-only, uses pipeline_info.window_info).
     #[cfg(windows)]
     {
-        if cursor_blocks_cost_bar(&ctx.pipeline_info, ctx.analyzer.roi(), battle_state) {
+        if cursor_blocks_cost_bar(&ctx.pipeline_info, &mut ctx.cursor_guard, ctx.analyzer.roi(), battle_state) {
             publish_cursor_blocked(state, ctx);
             state.update_timing(WorkerTimingSnapshot {
                 sample_index: ctx.sample_index,
@@ -350,16 +358,17 @@ fn analyze_and_publish(state: &SharedAppState, ctx: &mut AnalyzerContext, frame:
 #[cfg(windows)]
 fn cursor_blocks_cost_bar(
     pipeline_info: &PipelineInfo,
+    cursor_guard: &mut Option<crate::pc_cursor_guard::SelfDrawnCursorGuard>,
     roi: Option<ruler_core::analysis::roi::Roi>,
-    _battle_state: BattleState,
+    battle_state: BattleState,
 ) -> bool {
-    // The cursor guard is a Windows-only feature that detects when the
-    // in-game self-drawn cursor overlaps the cost bar ROI. In the new
-    // architecture, this check moves here from the worker. For now we
-    // return false — the guard will be re-wired in a follow-up commit
-    // that passes the cursor guard state into the analyzer consumer.
-    let _ = (pipeline_info, roi);
-    false
+    // The cursor guard detects when the in-game self-drawn cursor overlaps
+    // the cost bar ROI and asks the consumer to skip that frame so the timer
+    // is not corrupted by an occluded capture.
+    let Some(guard) = cursor_guard.as_mut() else {
+        return false;
+    };
+    guard.should_pause_for_frame(pipeline_info.window_info, roi, battle_state)
 }
 
 fn publish_running(

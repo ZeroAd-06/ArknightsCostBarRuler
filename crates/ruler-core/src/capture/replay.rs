@@ -1,5 +1,6 @@
 use std::{
     io::Read,
+    path::Path,
     process::{Child, Command, Stdio},
     time::Instant,
 };
@@ -65,7 +66,8 @@ impl ReplayCaptureBackend {
     ///
     /// * `hevc_path` – path to the recorded video file to replay
     /// * `target_fps` – playback frame rate (e.g. `60.0`)
-    /// * `width`, `height` – video dimensions (obtain e.g. via `ffprobe`)
+    /// * `width`, `height` – video dimensions; pass `(0, 0)` to probe the
+    ///   file lazily in `connect()` via `ffprobe`
     /// * `pix_fmt` – pixel format to decode to (default: `Rgba`)
     #[must_use]
     pub fn new(
@@ -121,6 +123,83 @@ impl ReplayCaptureBackend {
             }
         }
     }
+
+    /// Resolve the real video dimensions if the backend was constructed
+    /// without them (`new(path, fps, 0, 0, fmt)`).
+    fn ensure_dimensions(&mut self) -> Result<(), String> {
+        if self.width != 0 && self.height != 0 {
+            self.frame_size = (self.width * self.height * self.bpp) as usize;
+            self.frame_buf.resize(self.frame_size, 0);
+            return Ok(());
+        }
+
+        let (width, height) = probe_dimensions(&self.hevc_path)?;
+        log::info!(
+            "replay: probed video dimensions: {}x{} for '{}'",
+            width,
+            height,
+            self.hevc_path
+        );
+        self.width = width;
+        self.height = height;
+        self.frame_size = (self.width * self.height * self.bpp) as usize;
+        self.frame_buf.resize(self.frame_size, 0);
+        Ok(())
+    }
+}
+
+/// Probe the dimensions of a video file via `ffprobe`.
+pub fn probe_dimensions(path: &str) -> Result<(u32, u32), String> {
+    probe_dimensions_path(Path::new(path))
+}
+
+fn probe_dimensions_path(path: &Path) -> Result<(u32, u32), String> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+            &path.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run ffprobe: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err("ffprobe failed to read video dimensions".to_string());
+        }
+        return Err(format!("ffprobe failed: {detail}"));
+    }
+
+    let dims = String::from_utf8_lossy(&output.stdout);
+    let dims = dims.trim();
+    let mut parts = dims.split('x');
+    let width = parts
+        .next()
+        .ok_or_else(|| format!("unexpected ffprobe output: {dims}"))?
+        .parse::<u32>()
+        .map_err(|_| format!("invalid ffprobe width: {dims}"))?;
+    let height = parts
+        .next()
+        .ok_or_else(|| format!("unexpected ffprobe output: {dims}"))?
+        .parse::<u32>()
+        .map_err(|_| format!("invalid ffprobe height: {dims}"))?;
+
+    if width == 0 || height == 0 {
+        return Err(format!("invalid video dimensions: {width}x{height}"));
+    }
+
+    Ok((width, height))
 }
 
 impl CaptureBackend for ReplayCaptureBackend {
@@ -130,6 +209,11 @@ impl CaptureBackend for ReplayCaptureBackend {
             self.hevc_path,
             self.target_fps
         );
+
+        // Resolve real video dimensions (the backend is built with 0x0 and
+        // discovers them here, mirroring the other backends).
+        self.ensure_dimensions()?;
+
         let pix_fmt_str = match self.pix_fmt {
             PixelFormat::Rgba => "rgba",
             PixelFormat::Bgr => "bgr24",
@@ -143,14 +227,18 @@ impl CaptureBackend for ReplayCaptureBackend {
                 "passthrough",
                 "-f",
                 "rawvideo",
-                "-pixel_format",
+                // `-pix_fmt` (not `-pixel_format`) selects the *output* pixel
+                // format; the latter is an input rawvideo demuxer option and is
+                // silently ignored, which makes ffmpeg emit its native decoded
+                // format (e.g. 3-byte yuv444p) instead of the requested RGBA.
+                "-pix_fmt",
                 pix_fmt_str,
-                "-video_size",
-                &format!("{}x{}", self.width, self.height),
                 "-an",
                 "-sn",
                 "-dn",
-                "pipe:0",
+                // `pipe:1` writes raw frames to stdout (which we pipe);
+                // `pipe:0` would target stdin, which is /dev/null here.
+                "pipe:1",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

@@ -1,6 +1,7 @@
 use crate::analysis::scanner::PixelFormat;
 
 pub mod adb;
+pub mod adb_resolver;
 pub(crate) mod android_settings;
 pub mod ldplayer;
 pub mod mumu;
@@ -9,6 +10,7 @@ pub mod replay;
 pub mod windows;
 
 pub use adb::AdbController;
+pub use adb_resolver::{adb_available, adb_command, resolve_adb_with, resolved_adb, AdbExecutable};
 pub use ldplayer::LDPlayerController;
 pub use mumu::MuMuController;
 pub use replay::ReplayCaptureBackend;

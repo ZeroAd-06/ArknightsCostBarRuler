@@ -39,5 +39,7 @@
     "overlay.reset.auto": "行动开始",
     "overlay.cursor.blocked": "不要遮挡费用条",
     "overlay.dialog.cancel": "取消",
-    "overlay.dialog.delete.confirm": "删除"
+    "overlay.dialog.delete.confirm": "删除",
+    "config.selector.adb_unavailable": "adb 不可用：PATH 中找不到 adb，也未检测到正在运行的 MuMu / 雷电模拟器自带的 adb。",
+    "config.selector.adb_unavailable_hint": "请安装 Android platform-tools 加入 PATH，或启动 MuMu / 雷电模拟器后点击刷新。"
 }

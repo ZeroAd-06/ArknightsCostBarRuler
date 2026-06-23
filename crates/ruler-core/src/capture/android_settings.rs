@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
+
+use super::adb_resolver::adb_command;
 
 const SYSTEM_NAMESPACE: &str = "system";
 const INPUT_OVERLAY_SETTINGS: [&str; 2] = ["show_touches", "pointer_location"];
@@ -238,8 +240,7 @@ fn parse_settings_value(output: &str) -> Option<String> {
 }
 
 fn run_adb_text(args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new("adb");
-    configure_hidden_command(&mut command);
+    let mut command = adb_command()?;
     let output = command
         .args(args)
         .stdin(Stdio::null())
@@ -257,16 +258,6 @@ fn run_adb_text(args: &[&str]) -> Result<String, String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn configure_hidden_command(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
 }
 
 #[cfg(test)]

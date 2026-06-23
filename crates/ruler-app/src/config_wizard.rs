@@ -227,6 +227,12 @@ mod platform {
         populate_captions(&wizard, i18n, previous_config, debug);
         wire_callbacks(&wizard, &core, &result, &closing, &drag_on_title);
 
+        // Resolve adb before the first discovery pass: the resolver cache is
+        // consulted by every adb call site (AdbController, LDPlayerController,
+        // AndroidInputOverlayGuard, target_discovery). Re-resolving here also
+        // picks up any emulator started since `main.rs` did its initial probe.
+        re_resolve_adb();
+
         // Initial discovery + probe.
         refresh_candidates(&mut core.borrow_mut());
 
@@ -352,6 +358,11 @@ mod platform {
         wizard.set_preview_placeholder(i18n.tr("config.window.preview.unavailable").into());
         wizard.set_auto_checked(false);
 
+        // adb-unavailable banner text. The flag itself is updated in
+        // `sync_to_slint` based on `ruler_core::capture::adb_resolver::adb_available()`.
+        wizard.set_adb_unavailable_message(i18n.tr("config.selector.adb_unavailable").into());
+        wizard.set_adb_unavailable_hint(i18n.tr("config.selector.adb_unavailable_hint").into());
+
         // Debug panel state + captions
         wizard.set_debug_expanded(debug);
         wizard.set_cap_debug_header(i18n.tr("config.selector.debug_header").into());
@@ -416,7 +427,14 @@ mod platform {
         });
         wizard.on_refresh({
             let core = Rc::clone(core);
-            move || refresh_candidates(&mut core.borrow_mut())
+            move || {
+                // The user likely clicked refresh because they started an
+                // emulator or installed platform-tools since opening the
+                // wizard — re-resolve adb so the cache reflects the new state
+                // before discover_targets() runs.
+                re_resolve_adb();
+                refresh_candidates(&mut core.borrow_mut())
+            }
         });
         wizard.on_cancel({
             let closing = Rc::clone(closing);
@@ -597,6 +615,36 @@ mod platform {
         sync_rows(wizard, core);
         sync_preview(wizard, core);
         sync_header_status(wizard, core);
+        sync_adb_availability(wizard);
+    }
+
+    /// Reflect the cached adb resolution onto the wizard's banner. The
+    /// resolver is updated by `run_config_wizard` at startup and by the
+    /// refresh callback (which re-runs `resolve_adb_with` in case the user
+    /// started an emulator after the wizard opened).
+    fn sync_adb_availability(wizard: &Wizard) {
+        let available = ruler_core::capture::adb_resolver::adb_available();
+        let currently_shown = wizard.get_adb_unavailable();
+        let should_show = !available;
+        if currently_shown != should_show {
+            wizard.set_adb_unavailable(should_show);
+        }
+    }
+
+    /// Re-probe `adb` on `PATH` and any emulator-bundled `adb.exe` from
+    /// currently running MuMu / LDPlayer processes. Updates the process-global
+    /// resolver cache. Cheap (one `adb version` call per candidate) and safe
+    /// to call repeatedly.
+    fn re_resolve_adb() {
+        let candidates = crate::target_discovery::discover_emulator_adb_paths();
+        match ruler_core::capture::adb_resolver::resolve_adb_with(&candidates) {
+            Some(exe) => log::info!(
+                "adb resolved for wizard: {} (from_path={})",
+                exe.path(),
+                exe.from_path()
+            ),
+            None => log::warn!("adb could not be resolved; wizard will show adb-unavailable banner"),
+        }
     }
 
     /// Reconcile the target list. On a structural change (a different candidate

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ruler_core::{
@@ -109,6 +110,19 @@ pub fn discover_targets(previous: Option<&RulerConfig>) -> Vec<TargetCandidate> 
     platform::discover_targets(previous)
 }
 
+/// Discover `adb.exe` paths bundled with running MuMu / LDPlayer emulators.
+///
+/// Returned paths are absolute and de-duplicated. The list is fed into
+/// `ruler_core::capture::adb_resolver::resolve_adb_with` so that adb-using
+/// capture backends fall back to a bundled adb when none is on `PATH`.
+///
+/// On non-Windows this always returns an empty vector (MuMu / LDPlayer are
+/// Windows-only).
+#[must_use]
+pub fn discover_emulator_adb_paths() -> Vec<PathBuf> {
+    platform::discover_emulator_adb_paths()
+}
+
 #[must_use]
 pub fn probe_candidate_once(candidate: &TargetCandidate) -> ProbeResult {
     probe_config_once(candidate.fingerprint.clone(), &candidate.config)
@@ -184,6 +198,10 @@ mod platform {
     pub fn discover_targets(_: Option<&RulerConfig>) -> Vec<TargetCandidate> {
         Vec::new()
     }
+
+    pub fn discover_emulator_adb_paths() -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 #[cfg(windows)]
@@ -199,6 +217,7 @@ mod platform {
     use netstat2::{
         get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
     };
+    use ruler_core::capture::adb_resolver::adb_command;
     use ruler_core::RulerConfig;
     use serde_json::Value;
     use sysinfo::System;
@@ -313,6 +332,78 @@ mod platform {
             .into_iter()
             .filter(|candidate| seen.insert(candidate.fingerprint.clone()))
             .collect()
+    }
+
+    /// Walk running processes for MuMu / LDPlayer install roots and return
+    /// each bundled `adb.exe` found under them. De-duplicated, absolute paths.
+    ///
+    /// This feeds `ruler_core::capture::adb_resolver::resolve_adb_with` so
+    /// the wizard and capture backends can fall back to a bundled adb when
+    /// none is on `PATH`. Modeled after MaaFramework's emulator-bundled adb
+    /// lookup.
+    pub fn discover_emulator_adb_paths() -> Vec<PathBuf> {
+        let processes = query_processes();
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let mumu_relatives: &[&str] = &[
+            "shell\\adb.exe",
+            "nx_main\\adb.exe",
+            "nx_device\\12.0\\shell\\adb.exe",
+            "adb.exe",
+        ];
+        // Pull install roots both from the MuMu manager tool scan (covers
+        // `MuMuManager.exe` and friends) and from any running headless VM
+        // process (covers the case where the manager isn't running but the
+        // emulator itself is).
+        let mut mumu_roots: Vec<PathBuf> = discover_mumu_tool_installs(&processes)
+            .into_iter()
+            .map(|install| install.install_path)
+            .collect();
+        for process in processes
+            .iter()
+            .filter(|process| process.name.eq_ignore_ascii_case("MuMuVMMHeadless.exe"))
+        {
+            if let Some(exe) = process.executable_path.as_deref() {
+                if let Some(root) = resolve_mumu_install_path(exe) {
+                    mumu_roots.push(root);
+                }
+            }
+        }
+        for root in mumu_roots {
+            for relative in mumu_relatives {
+                push_unique_adb(&mut paths, &mut seen, root.join(relative));
+            }
+        }
+
+        // LDPlayer: install root is the directory containing both
+        // `dnconsole.exe` and `ldopengl64.dll`; `adb.exe` lives at the root.
+        let mut ldplayer_roots: Vec<PathBuf> = discover_ldplayer_tool_installs(&processes);
+        for process in processes
+            .iter()
+            .filter(|process| process.name.eq_ignore_ascii_case("Ld9BoxHeadless.exe"))
+        {
+            if let Some(exe) = process.executable_path.as_deref() {
+                if let Some(root) = resolve_ldplayer_install_path(exe) {
+                    ldplayer_roots.push(root);
+                }
+            }
+        }
+        for root in ldplayer_roots {
+            push_unique_adb(&mut paths, &mut seen, root.join("adb.exe"));
+        }
+
+        paths
+    }
+
+    fn push_unique_adb(paths: &mut Vec<PathBuf>, seen: &mut HashSet<String>, candidate: PathBuf) {
+        if !candidate.is_file() {
+            return;
+        }
+        let key = candidate.to_string_lossy().to_ascii_lowercase();
+        if seen.insert(key) {
+            paths.push(candidate);
+        }
     }
 
     fn discover_mumu(
@@ -1308,9 +1399,9 @@ mod platform {
             .iter()
             .any(|connected| connected == &serial)
         {
-            let _ = run_command_text("adb", &["connect", &serial], COMMAND_TIMEOUT).ok()?;
+            let _ = run_adb_text(&["connect", &serial], COMMAND_TIMEOUT).ok()?;
         }
-        let state = run_command_text("adb", &["-s", &serial, "get-state"], COMMAND_TIMEOUT).ok()?;
+        let state = run_adb_text(&["-s", &serial, "get-state"], COMMAND_TIMEOUT).ok()?;
         (state.trim() == "device").then_some(serial)
     }
 
@@ -1333,7 +1424,7 @@ mod platform {
     }
 
     fn adb_connected_serials() -> Vec<String> {
-        let Ok(output) = run_command_text("adb", &["devices"], COMMAND_TIMEOUT) else {
+        let Ok(output) = run_adb_text(&["devices"], COMMAND_TIMEOUT) else {
             return Vec::new();
         };
         output
@@ -1354,8 +1445,7 @@ mod platform {
 
     fn adb_has_arknights_package(serial: &str) -> bool {
         PACKAGE_NAMES.iter().any(|package| {
-            run_command_text(
-                "adb",
+            run_adb_text(
                 &["-s", serial, "shell", "pm", "path", package],
                 COMMAND_TIMEOUT,
             )
@@ -1443,6 +1533,23 @@ mod platform {
         log::trace!("target discovery command: {} {}", program, args.join(" "));
         let mut command = Command::new(program);
         configure_hidden_command(&mut command);
+        run_command_text_impl(&mut command, program, args, timeout)
+    }
+
+    /// Same as `run_command_text` but uses the resolved adb executable
+    /// (PATH or emulator-bundled) instead of a literal `"adb"` lookup.
+    fn run_adb_text(args: &[&str], timeout: Duration) -> Result<String, String> {
+        log::trace!("target discovery adb command: adb {}", args.join(" "));
+        let mut command = adb_command()?;
+        run_command_text_impl(&mut command, "adb", args, timeout)
+    }
+
+    fn run_command_text_impl(
+        command: &mut Command,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, String> {
         let mut child = command
             .args(args)
             .stdin(Stdio::null())

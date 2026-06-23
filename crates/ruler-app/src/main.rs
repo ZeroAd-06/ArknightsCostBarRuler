@@ -157,6 +157,31 @@ fn run(
 ) -> Result<(), app::StartupError> {
     log::info!("bootstrapping ruler-app for Windows runtime (debug={debug})");
 
+    // Resolve adb early so any subsequent adb call (capture backend, Android
+    // settings guard, target discovery, first-launch wizard) sees the same
+    // cached executable. Mirrors the MaaFramework pattern: try `adb` on PATH
+    // first, then fall back to the bundled adb.exe from a running MuMu /
+    // LDPlayer emulator.
+    #[cfg(windows)]
+    {
+        let candidates = target_discovery::discover_emulator_adb_paths();
+        match ruler_core::capture::adb_resolver::resolve_adb_with(&candidates) {
+            Some(exe) => log::info!(
+                "adb resolved at startup: {} (from_path={})",
+                exe.path(),
+                exe.from_path()
+            ),
+            None => log::warn!(
+                "adb could not be resolved at startup; first-launch wizard \
+                 will report it as unavailable"
+            ),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ruler_core::capture::adb_resolver::resolve_adb_with(&[]);
+    }
+
     let app = RulerApp::build(debug, resources, logging)?;
     app.run()
 }

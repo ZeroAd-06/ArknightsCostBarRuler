@@ -36,6 +36,13 @@ export component Wizard inherits Window {
     in property <string> cap-cancel;
     in property <string> preview-placeholder;
 
+    // adb-unavailability banner: shown when neither PATH adb nor a bundled
+    // emulator adb could be launched. Set by the Rust side via
+    // `wizard.set_adb_unavailable(...)` after `adb_resolver::resolve_adb_with`.
+    in property <bool> adb-unavailable;
+    in property <string> adb-unavailable-message;
+    in property <string> adb-unavailable-hint;
+
     in-out property <bool> auto-checked;
 
     // debug-related state
@@ -134,6 +141,33 @@ export component Wizard inherits Window {
             font-size: 11px;
             wrap: word-wrap;
             horizontal-alignment: left;
+        }
+
+        // ===== adb unavailable banner =====
+        if (root.adb-unavailable): Rectangle {
+            border-width: 1px;
+            border-color: Palette.danger;
+            background: #2a0d0d;
+            height: 56px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 2px;
+                Text {
+                    text: root.adb-unavailable-message;
+                    color: Palette.danger;
+                    font-size: 11px;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                    horizontal-alignment: left;
+                }
+                Text {
+                    text: root.adb-unavailable-hint;
+                    color: Palette.text-faint;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                    horizontal-alignment: left;
+                }
+            }
         }
 
         // ===== body: target list (left) + live preview (right) =====

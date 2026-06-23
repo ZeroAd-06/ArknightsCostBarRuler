@@ -39,5 +39,7 @@
     "overlay.reset.auto": "Action Start",
     "overlay.cursor.blocked": "Don't cover the cost bar",
     "overlay.dialog.cancel": "Cancel",
-    "overlay.dialog.delete.confirm": "Delete"
+    "overlay.dialog.delete.confirm": "Delete",
+    "config.selector.adb_unavailable": "adb is unavailable: not found on PATH, and no bundled adb from a running MuMu / LDPlayer emulator was detected.",
+    "config.selector.adb_unavailable_hint": "Install Android platform-tools on PATH, or start MuMu / LDPlayer and click Refresh."
 }

@@ -5,6 +5,7 @@ use std::ptr;
 
 use libloading::{Library, Symbol};
 
+use super::adb_resolver::adb_command;
 use super::android_settings::AndroidInputOverlayGuard;
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame};
@@ -56,8 +57,13 @@ impl LDPlayerController {
 
     fn run_command(&self, program: &str, args: &[&str]) -> Result<String, String> {
         log::trace!("LDPlayer command: {} {}", program, args.join(" "));
-        let mut command = Command::new(program);
-        configure_hidden_command(&mut command);
+        let mut command = if program.eq_ignore_ascii_case("adb") {
+            adb_command()?
+        } else {
+            let mut command = std::process::Command::new(program);
+            configure_hidden_command(&mut command);
+            command
+        };
         let output = command
             .args(args)
             .stdin(Stdio::null())

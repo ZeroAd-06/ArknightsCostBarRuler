@@ -1,7 +1,8 @@
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use image::ImageFormat;
 
+use super::adb_resolver::adb_command;
 use super::android_settings::AndroidInputOverlayGuard;
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame};
@@ -25,8 +26,7 @@ impl AdbController {
 
     fn run_adb_text(args: &[&str]) -> Result<String, String> {
         log::trace!("adb text command: adb {}", args.join(" "));
-        let mut command = Command::new("adb");
-        configure_hidden_command(&mut command);
+        let mut command = adb_command()?;
         let output = command
             .args(args)
             .stdin(Stdio::null())
@@ -48,8 +48,7 @@ impl AdbController {
 
     fn run_adb_bytes(args: &[&str]) -> Result<Vec<u8>, String> {
         log::trace!("adb bytes command: adb {}", args.join(" "));
-        let mut command = Command::new("adb");
-        configure_hidden_command(&mut command);
+        let mut command = adb_command()?;
         let output = command
             .args(args)
             .stdin(Stdio::null())
@@ -168,16 +167,6 @@ impl CaptureBackend for AdbController {
 
     fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
-    }
-}
-
-fn configure_hidden_command(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 

@@ -16,7 +16,7 @@ use ruler_core::{
     },
     capture::create_backend,
     config::RulerConfig,
-    RulerEngine,
+    Analyzer,
 };
 
 #[derive(Clone, Debug)]
@@ -86,7 +86,7 @@ fn run() -> Result<(), String> {
     println!("format      : {:?}", first.format);
     println!("cost_bar_roi: ({}, {}, {})", roi.0, roi.1, roi.2);
 
-    let mut engine = RulerEngine::new();
+    let mut engine = Analyzer::new();
     if let Some(path) = &calibration_path {
         engine.load_calibration(path)?;
         engine.set_roi(first.width as i32, first.height as i32);

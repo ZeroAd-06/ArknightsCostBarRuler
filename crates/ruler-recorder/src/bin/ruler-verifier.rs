@@ -1,7 +1,7 @@
 //! ruler-verifier — offline per-frame analysis of a recorded video file
 //!
 //! Reads an existing recorded video file, decodes it sequentially through ffmpeg,
-//! runs the standard `RulerEngine` analysis on every frame, and writes the
+//! runs the standard `Analyzer` analysis on every frame, and writes the
 //! results to a CSV file using the same schema as `ruler-recorder`.
 //!
 //! Usage:
@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 
 use ruler_core::config::RulerConfig;
-use ruler_core::engine::RulerEngine;
+use ruler_core::Analyzer;
 use ruler_core::PixelFormat;
 use ruler_recorder::{bytes_per_pixel, flip_rows, resolve_calibration_path, CsvWriter};
 
@@ -553,7 +553,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let mut engine = RulerEngine::new();
+    let mut engine = Analyzer::new();
     engine.set_ui_scaler(
         options
             .ui_scaler

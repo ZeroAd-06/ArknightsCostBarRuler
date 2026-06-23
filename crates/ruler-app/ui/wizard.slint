@@ -50,24 +50,47 @@ export component Wizard inherits Window {
     in-out property <bool> record-video;
     in-out property <bool> record-csv;
     in-out property <bool> trace-logging;
-    in-out property <bool> replay-mode;
-    in-out property <string> replay-path;
-    in-out property <string> replay-fps-text;
-    in property <string> cap-replay-path;
-    in property <string> cap-replay-fps-label;
     in property <string> cap-debug-header;
     in property <string> cap-debug-show;
     in property <string> cap-debug-hide;
     in property <string> cap-debug-video;
     in property <string> cap-debug-csv;
     in property <string> cap-debug-trace;
-    in property <string> cap-mode-header;
-    in property <string> cap-mode-real;
-    in property <string> cap-mode-replay;
-    in property <string> cap-replay-fps;
+
+    // manual target selection (debug-only). The trailing "manual" list row
+    // reveals a small panel that builds a target from a typed type + params,
+    // replacing the old real/replay capture-mode toggle.
+    in property <bool> show-manual-row;
+    in-out property <bool> manual-selected;
+    in-out property <int> manual-kind;          // 0 MuMu 1 LDPlayer 2 Adb 3 Windows 4 Replay
+    in-out property <bool> manual-kind-open;     // dropdown expanded (Slint-only state)
+    in-out property <string> manual-install-path;
+    in-out property <string> manual-instance-index;
+    in-out property <string> manual-device-id;
+    in-out property <string> manual-window-title;
+    in-out property <string> replay-path;        // reused by the Virtual manual kind
+    in-out property <string> replay-fps-text;
+    in property <string> cap-manual-row;
+    in property <string> cap-manual-header;
+    in property <string> cap-manual-type;
+    in property <string> cap-manual-type-mumu;
+    in property <string> cap-manual-type-ldplayer;
+    in property <string> cap-manual-type-adb;
+    in property <string> cap-manual-type-pc;
+    in property <string> cap-manual-type-virtual;
+    in property <string> cap-manual-install;
+    in property <string> cap-manual-instance;
+    in property <string> cap-manual-serial;
+    in property <string> cap-manual-window;
+    in property <string> cap-manual-browse;
+    in property <string> cap-replay-path;
+    in property <string> cap-replay-fps-label;
 
     // ---- outputs ----
     callback select-target(int);
+    callback select-manual();
+    callback browse-install();
+    callback browse-replay();
     callback refresh();
     callback confirm();
     callback cancel();
@@ -86,6 +109,15 @@ export component Wizard inherits Window {
             : cls == 3 ? #ff9d3f
             : cls == 4 ? #ff6b5e
             : Palette.text-faint;
+    }
+
+    // Label for the manual target-type dropdown (closed field + selected row).
+    function manual-type-label(k: int) -> string {
+        return k == 0 ? root.cap-manual-type-mumu
+            : k == 1 ? root.cap-manual-type-ldplayer
+            : k == 2 ? root.cap-manual-type-adb
+            : k == 3 ? root.cap-manual-type-pc
+            : root.cap-manual-type-virtual;
     }
 
     // ---- panel + top accent ----
@@ -184,7 +216,7 @@ export component Wizard inherits Window {
                 clip: true;
 
                 // empty / scanning placeholder
-                if (root.rows.length == 0): Text {
+                if (root.rows.length == 0 && !root.show-manual-row): Text {
                     x: 10px;
                     width: parent.width - 20px;
                     height: 100%;
@@ -258,6 +290,49 @@ export component Wizard inherits Window {
                                     font-weight: 700;
                                     vertical-alignment: center;
                                     horizontal-alignment: right;
+                                }
+                            }
+                        }
+
+                        // trailing "manual select" row (debug-only). Lives in the
+                        // list so it scrolls with the candidates, but is not part of
+                        // `root.rows`, so candidate indices stay 1:1 with the model.
+                        if (root.show-manual-row): Rectangle {
+                            height: 38px;
+                            background: root.manual-selected ? Palette.accent-dim
+                                : (mta.has-hover ? Palette.hover-fill : transparent);
+                            animate background { duration: 90ms; }
+                            mta := TouchArea {
+                                clicked => { root.select-manual(); }
+                            }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+                                // plus glyph in the selection-dot column
+                                Rectangle {
+                                    width: 8px;
+                                    Path {
+                                        width: 12px;
+                                        height: 12px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        viewbox-x: 0;
+                                        viewbox-y: -960;
+                                        viewbox-width: 960;
+                                        viewbox-height: 960;
+                                        commands: Icons.plus;
+                                        fill: root.manual-selected ? Palette.accent : Palette.text-secondary;
+                                    }
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.cap-manual-row;
+                                    color: Palette.text-primary;
+                                    font-size: 13px;
+                                    font-weight: root.manual-selected ? 700 : 500;
+                                    vertical-alignment: center;
+                                    overflow: elide;
                                 }
                             }
                         }
@@ -493,87 +568,32 @@ export component Wizard inherits Window {
                 }
             }
 
-            // ---- Capture Mode section ----
-            Rectangle {
-                height: 22px;
+            // ---- Manual target panel ----
+            // Shown when the trailing "manual" row is selected. The target-type
+            // control is a self-drawn dropdown: clicking it swaps the parameter
+            // fields below for the list of types (in place — no floating popup,
+            // matching the codebase's no-std-widgets self-rendered style and
+            // keeping the layout height bounded).
+            if (root.manual-selected): VerticalLayout {
+                spacing: 6px;
+
                 Text {
-                    y: 4px;
-                    text: root.cap-mode-header;
+                    height: 18px;
+                    text: root.cap-manual-header;
                     color: Palette.text-secondary;
                     font-size: 11px;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
-            }
 
-            // Real capture radio
-            Rectangle {
-                height: 18px;
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: start;
-                    Rectangle {
-                        width: 14px;
-                        height: 14px;
-                        y: (parent.height - self.height) / 2;
-                        border-radius: 7px;
-                        border-width: 1px;
-                        border-color: !root.replay-mode ? Palette.accent : Palette.hairline-faint;
-                        background: !root.replay-mode ? Palette.accent : transparent;
-                        animate background, border-color { duration: 110ms; }
-                        real-ta := TouchArea {
-                            clicked => { root.replay-mode = false; }
-                        }
-                    }
-                    Text {
-                        text: root.cap-mode-real;
-                        color: Palette.text-secondary;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            // Replay radio
-            Rectangle {
-                height: 18px;
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: start;
-                    Rectangle {
-                        width: 14px;
-                        height: 14px;
-                        y: (parent.height - self.height) / 2;
-                        border-radius: 7px;
-                        border-width: 1px;
-                        border-color: root.replay-mode ? Palette.accent : Palette.hairline-faint;
-                        background: root.replay-mode ? Palette.accent : transparent;
-                        animate background, border-color { duration: 110ms; }
-                        play-ta := TouchArea {
-                            clicked => { root.replay-mode = true; }
-                        }
-                    }
-                    Text {
-                        text: root.cap-mode-replay;
-                        color: Palette.text-secondary;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            // Replay path + FPS (visible only when replay-mode is on)
-            if (root.replay-mode): VerticalLayout {
-                spacing: 6px;
-                padding-left: 22px;
-
-                // HEVC file path
+                // type dropdown — closed field
                 Rectangle {
                     height: 24px;
                     HorizontalLayout {
                         spacing: 6px;
                         Text {
-                            text: root.cap-replay-path;
+                            width: 84px;
+                            text: root.cap-manual-type;
                             color: Palette.text-faint;
                             font-size: 10px;
                             vertical-alignment: center;
@@ -581,56 +601,305 @@ export component Wizard inherits Window {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-width: 1px;
-                            border-color: Palette.hairline-faint;
+                            border-color: root.manual-kind-open ? Palette.accent : Palette.hairline-faint;
                             background: #00000060;
                             height: 22px;
-                            TextInput {
-                                x: 4px;
-                                width: parent.width - 8px;
-                                height: 100%;
-                                text <=> root.replay-path;
-                                color: Palette.text-primary;
-                                font-size: 11px;
-                                single-line: true;
-                                vertical-alignment: center;
+                            ddta := TouchArea {
+                                clicked => { root.manual-kind-open = !root.manual-kind-open; }
+                            }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 6px;
+                                spacing: 6px;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.manual-type-label(root.manual-kind);
+                                    color: Palette.text-primary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Path {
+                                    width: 12px;
+                                    height: 12px;
+                                    y: (parent.height - self.height) / 2;
+                                    viewbox-x: 0;
+                                    viewbox-y: -960;
+                                    viewbox-width: 960;
+                                    viewbox-height: 960;
+                                    // Material Symbols "expand_more" (down chevron)
+                                    commands: "M480-345 240-585l56-56 184 184 184-184 56 56-240 240Z";
+                                    fill: Palette.text-secondary;
+                                }
                             }
                         }
                     }
                 }
 
-                // FPS
-                Rectangle {
-                    height: 24px;
-                    HorizontalLayout {
-                        spacing: 6px;
-                        Text {
-                            text: root.cap-replay-fps-label;
-                            color: Palette.text-faint;
-                            font-size: 10px;
-                            vertical-alignment: center;
-                        }
-                        Rectangle {
-                            width: 60px;
-                            border-width: 1px;
-                            border-color: Palette.hairline-faint;
-                            background: #00000060;
-                            height: 22px;
-                            TextInput {
-                                x: 4px;
-                                width: parent.width - 8px;
-                                height: 100%;
-                                text <=> root.replay-fps-text;
-                                color: Palette.text-primary;
-                                font-size: 11px;
-                                single-line: true;
-                                vertical-alignment: center;
+                // dropdown OPEN: the type options replace the parameter fields
+                if (root.manual-kind-open): VerticalLayout {
+                    spacing: 1px;
+                    for label[i] in [
+                        root.cap-manual-type-mumu,
+                        root.cap-manual-type-ldplayer,
+                        root.cap-manual-type-adb,
+                        root.cap-manual-type-pc,
+                        root.cap-manual-type-virtual,
+                    ] : Rectangle {
+                        height: 24px;
+                        border-width: 1px;
+                        border-color: root.manual-kind == i ? Palette.accent : Palette.hairline-faint;
+                        background: root.manual-kind == i ? Palette.accent-dim
+                            : (ota.has-hover ? Palette.hover-fill : transparent);
+                        animate background { duration: 90ms; }
+                        ota := TouchArea {
+                            clicked => {
+                                root.manual-kind = i;
+                                root.manual-kind-open = false;
                             }
                         }
                         Text {
-                            text: "fps";
-                            color: Palette.text-faint;
-                            font-size: 10px;
+                            x: 10px;
+                            text: label;
+                            color: Palette.text-primary;
+                            font-size: 12px;
+                            font-weight: root.manual-kind == i ? 700 : 500;
                             vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // dropdown CLOSED: parameter fields for the selected type
+                if (!root.manual-kind-open): VerticalLayout {
+                    spacing: 6px;
+
+                    // MuMu / LDPlayer: install path
+                    if (root.manual-kind == 0 || root.manual-kind == 1): Rectangle {
+                        height: 24px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                width: 84px;
+                                text: root.cap-manual-install;
+                                color: Palette.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: #00000060;
+                                height: 22px;
+                                TextInput {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: 100%;
+                                    text <=> root.manual-install-path;
+                                    color: Palette.text-primary;
+                                    font-size: 11px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            // browse for the emulator install folder
+                            Rectangle {
+                                width: 52px;
+                                height: 22px;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: bia.has-hover ? Palette.hover-fill : transparent;
+                                animate background { duration: 110ms; }
+                                Text {
+                                    text: root.cap-manual-browse;
+                                    color: Palette.text-secondary;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                bia := TouchArea {
+                                    clicked => { root.browse-install(); }
+                                }
+                            }
+                        }
+                    }
+                    // MuMu / LDPlayer: instance index
+                    if (root.manual-kind == 0 || root.manual-kind == 1): Rectangle {
+                        height: 24px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                width: 84px;
+                                text: root.cap-manual-instance;
+                                color: Palette.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 60px;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: #00000060;
+                                height: 22px;
+                                TextInput {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: 100%;
+                                    text <=> root.manual-instance-index;
+                                    color: Palette.text-primary;
+                                    font-size: 11px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    // MuMu / LDPlayer / Generic ADB: device serial
+                    if (root.manual-kind == 0 || root.manual-kind == 1 || root.manual-kind == 2): Rectangle {
+                        height: 24px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                width: 84px;
+                                text: root.cap-manual-serial;
+                                color: Palette.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: #00000060;
+                                height: 22px;
+                                TextInput {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: 100%;
+                                    text <=> root.manual-device-id;
+                                    color: Palette.text-primary;
+                                    font-size: 11px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    // PC / Windows: window title
+                    if (root.manual-kind == 3): Rectangle {
+                        height: 24px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                width: 84px;
+                                text: root.cap-manual-window;
+                                color: Palette.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: #00000060;
+                                height: 22px;
+                                TextInput {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: 100%;
+                                    text <=> root.manual-window-title;
+                                    color: Palette.text-primary;
+                                    font-size: 11px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    // Virtual / Replay: recorded video path
+                    if (root.manual-kind == 4): Rectangle {
+                        height: 24px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                width: 84px;
+                                text: root.cap-replay-path;
+                                color: Palette.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: #00000060;
+                                height: 22px;
+                                TextInput {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: 100%;
+                                    text <=> root.replay-path;
+                                    color: Palette.text-primary;
+                                    font-size: 11px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            // browse for the recorded video file
+                            Rectangle {
+                                width: 52px;
+                                height: 22px;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: bra.has-hover ? Palette.hover-fill : transparent;
+                                animate background { duration: 110ms; }
+                                Text {
+                                    text: root.cap-manual-browse;
+                                    color: Palette.text-secondary;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                bra := TouchArea {
+                                    clicked => { root.browse-replay(); }
+                                }
+                            }
+                        }
+                    }
+                    // Virtual / Replay: fallback fps
+                    if (root.manual-kind == 4): Rectangle {
+                        height: 24px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                width: 84px;
+                                text: root.cap-replay-fps-label;
+                                color: Palette.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 60px;
+                                border-width: 1px;
+                                border-color: Palette.hairline-faint;
+                                background: #00000060;
+                                height: 22px;
+                                TextInput {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: 100%;
+                                    text <=> root.replay-fps-text;
+                                    color: Palette.text-primary;
+                                    font-size: 11px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Text {
+                                text: "fps";
+                                color: Palette.text-faint;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }

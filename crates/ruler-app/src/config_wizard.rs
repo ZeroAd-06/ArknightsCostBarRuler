@@ -48,29 +48,42 @@ mod platform {
     use slint::{
         platform::{
             software_renderer::{MinimalSoftwareWindow, SoftwareRenderer},
-            PointerEventButton, WindowAdapter, WindowEvent,
+            Key, PointerEventButton, WindowAdapter, WindowEvent,
         },
         ComponentHandle, Image, Model, ModelRc, PhysicalSize, Rgba8Pixel, SharedPixelBuffer,
-        VecModel,
+        SharedString, VecModel,
     };
     use windows::{
-        core::PCWSTR,
+        core::{PCWSTR, PWSTR},
         Win32::{
             Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
             Graphics::Gdi::{DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ},
-            System::LibraryLoader::GetModuleHandleW,
+            System::{
+                Com::{
+                    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+                    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+                },
+                LibraryLoader::GetModuleHandleW,
+            },
             UI::{
-                Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE},
+                Input::KeyboardAndMouse::{
+                    ReleaseCapture, SetCapture, VK_BACK, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME,
+                    VK_LEFT, VK_RETURN, VK_RIGHT,
+                },
+                Shell::{
+                    Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, IShellItem,
+                    FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+                },
                 WindowsAndMessaging::{
-                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-                    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, LoadCursorW,
-                    RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
-                    ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-                    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
-                    SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY,
-                    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-                    WM_NCCREATE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
-                    WS_VISIBLE,
+                    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+                    GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+                    GetWindowLongPtrW, GetWindowRect, LoadCursorW, RegisterClassW,
+                    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                    TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU,
+                    IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_DESTROY, WM_KEYDOWN,
+                    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+                    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
                 },
             },
         },
@@ -100,7 +113,11 @@ mod platform {
     // Fixed logical design size of `wizard.slint` (physical = logical * scale).
     const WIZARD_LOGICAL_W: f32 = 560.0;
     const WIZARD_LOGICAL_H: f32 = 404.0;
-    const WIZARD_DEBUG_EXTRA_H: f32 = 248.0;
+    // Extra logical height for the debug panel. Two budgets: the recording-only
+    // section (manual target off) and the taller recording + manual-target panel
+    // (sized for the dropdown-open type list / the 3-field MuMu-LDPlayer case).
+    const WIZARD_DEBUG_RECORDING_H: f32 = 150.0;
+    const WIZARD_DEBUG_MANUAL_H: f32 = 300.0;
 
     #[derive(Clone, Debug)]
     struct ProbeMessage {
@@ -121,6 +138,14 @@ mod platform {
         previous_config: Option<RulerConfig>,
         candidates: Vec<TargetCandidate>,
         selected_index: Option<usize>,
+        // When the trailing "manual" list row is active the candidate path is
+        // bypassed: the target is built from typed fields (held in the Slint
+        // in-out properties) on confirm. `selected_index` is `None` while this
+        // is set, so no candidate is highlighted or probed for the selection.
+        manual_mode: bool,
+        // Set when a manual confirm fails validation; rendered on the status line
+        // until the selection or fields change.
+        manual_error: Option<String>,
         probe_tx: Sender<ProbeMessage>,
         probe_rx: Receiver<ProbeMessage>,
         probe_generation: u64,
@@ -166,7 +191,12 @@ mod platform {
         core: Rc<RefCell<WizardCore>>,
         closing: Rc<Cell<bool>>,
         drag_on_title: Rc<Cell<bool>>,
-        debug_expanded: bool,
+        // Currently applied logical window height; the render tick recomputes the
+        // target height (debug panel + manual panel toggles) and resizes on change.
+        logical_h: f32,
+        // Buffers the high half of a UTF-16 surrogate pair across WM_CHAR messages
+        // while forwarding text input to the focused Slint TextInput.
+        pending_high: Cell<u16>,
         mem_dc: HDC,
         dib: HBITMAP,
         bits: *mut PreBgra,
@@ -216,6 +246,8 @@ mod platform {
             previous_config: previous_config.cloned(),
             candidates: Vec::new(),
             selected_index: None,
+            manual_mode: false,
+            manual_error: None,
             probe_tx,
             probe_rx,
             probe_generation: 0,
@@ -230,9 +262,19 @@ mod platform {
         let result: Rc<RefCell<Option<RulerConfig>>> = Rc::new(RefCell::new(None));
         let closing = Rc::new(Cell::new(false));
         let drag_on_title = Rc::new(Cell::new(false));
+        // Browse buttons stage their file dialog here; the message loop runs it
+        // outside the pointer handler's `&mut WizardWindow` borrow (see BrowseAction).
+        let pending_browse: Rc<Cell<Option<BrowseAction>>> = Rc::new(Cell::new(None));
 
         populate_captions(&wizard, i18n, previous_config, debug);
-        wire_callbacks(&wizard, &core, &result, &closing, &drag_on_title);
+        wire_callbacks(
+            &wizard,
+            &core,
+            &result,
+            &closing,
+            &drag_on_title,
+            &pending_browse,
+        );
 
         // Resolve adb before the first discovery pass: the resolver cache is
         // consulted by every adb call site (AdbController, LDPlayerController,
@@ -244,7 +286,7 @@ mod platform {
         refresh_candidates(&mut core.borrow_mut());
 
         let width = (WIZARD_LOGICAL_W * scale).round() as i32;
-        let logical_h = wizard_logical_height(debug);
+        let logical_h = wizard_logical_height(debug, false);
         let height = (logical_h * scale).round() as i32;
         let _ = window
             .window()
@@ -285,7 +327,8 @@ mod platform {
                 core,
                 closing: Rc::clone(&closing),
                 drag_on_title,
-                debug_expanded: debug,
+                logical_h,
+                pending_high: Cell::new(0),
                 mem_dc,
                 dib,
                 bits,
@@ -335,6 +378,12 @@ mod platform {
                 }
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
+                // Run any browse dialog staged by a button this iteration. We are
+                // back at the top level here, so no `&mut WizardWindow` is held
+                // while the dialog pumps its own (re-entrant) message loop.
+                if let Some(action) = pending_browse.take() {
+                    action();
+                }
             }
 
             let _ = DestroyWindow(hwnd);
@@ -378,11 +427,25 @@ mod platform {
         wizard.set_cap_debug_video(i18n.tr("config.selector.debug_video").into());
         wizard.set_cap_debug_csv(i18n.tr("config.selector.debug_csv").into());
         wizard.set_cap_debug_trace(i18n.tr("config.selector.debug_trace").into());
-        wizard.set_cap_mode_header(i18n.tr("config.selector.mode_header").into());
-        wizard.set_cap_mode_real(i18n.tr("config.selector.mode_real").into());
-        wizard.set_cap_mode_replay(i18n.tr("config.selector.mode_replay").into());
         wizard.set_cap_replay_path(i18n.tr("config.selector.replay_path").into());
         wizard.set_cap_replay_fps_label(i18n.tr("config.selector.replay_fps").into());
+
+        // Manual target panel captions (replaces the old real/replay toggle).
+        wizard.set_cap_manual_row(i18n.tr("config.selector.manual_row").into());
+        wizard.set_cap_manual_header(i18n.tr("config.selector.manual_header").into());
+        wizard.set_cap_manual_type(i18n.tr("config.selector.manual_type").into());
+        wizard.set_cap_manual_type_mumu(i18n.tr("config.selector.manual_type_mumu").into());
+        wizard
+            .set_cap_manual_type_ldplayer(i18n.tr("config.selector.manual_type_ldplayer").into());
+        wizard.set_cap_manual_type_adb(i18n.tr("config.selector.manual_type_adb").into());
+        wizard.set_cap_manual_type_pc(i18n.tr("config.selector.manual_type_pc").into());
+        wizard.set_cap_manual_type_virtual(i18n.tr("config.selector.manual_type_virtual").into());
+        wizard.set_cap_manual_install(i18n.tr("config.selector.manual_install").into());
+        wizard.set_cap_manual_instance(i18n.tr("config.selector.manual_instance").into());
+        wizard.set_cap_manual_serial(i18n.tr("config.selector.manual_serial").into());
+        wizard.set_cap_manual_window(i18n.tr("config.selector.manual_window").into());
+        wizard.set_cap_manual_browse(i18n.tr("config.selector.manual_browse").into());
+
         wizard.set_record_video(
             previous_config
                 .map(|config| config.debug_recording_video)
@@ -398,10 +461,35 @@ mod platform {
                 .map(|config| config.trace_logging_enabled)
                 .unwrap_or(false),
         );
-        wizard.set_replay_mode(
+
+        // Seed the manual fields + type from the previous config so re-opening
+        // the wizard pre-fills whatever was last used.
+        wizard.set_manual_kind(manual_kind_for(previous_config));
+        wizard.set_manual_kind_open(false);
+        wizard.set_manual_install_path(
             previous_config
-                .map(|config| config.capture_type == "replay")
-                .unwrap_or(false),
+                .and_then(|config| config.install_path.clone())
+                .unwrap_or_default()
+                .into(),
+        );
+        wizard.set_manual_instance_index(
+            previous_config
+                .and_then(|config| config.instance_index)
+                .map(|index| index.to_string())
+                .unwrap_or_default()
+                .into(),
+        );
+        wizard.set_manual_device_id(
+            previous_config
+                .and_then(|config| config.device_id.clone())
+                .unwrap_or_default()
+                .into(),
+        );
+        wizard.set_manual_window_title(
+            previous_config
+                .and_then(|config| config.window_title.clone())
+                .unwrap_or_default()
+                .into(),
         );
         wizard.set_replay_path(
             previous_config
@@ -418,18 +506,88 @@ mod platform {
         );
     }
 
+    /// Map a previous config's capture type onto the manual dropdown index
+    /// (0 MuMu, 1 LDPlayer, 2 Adb, 3 Windows, 4 Replay).
+    fn manual_kind_for(previous_config: Option<&RulerConfig>) -> i32 {
+        match previous_config.map(|config| config.capture_type.as_str()) {
+            Some("ldplayer") => 1,
+            Some("adb" | "minicap") => 2,
+            Some("window") => 3,
+            Some("replay") => 4,
+            _ => 0,
+        }
+    }
+
+    /// A deferred browse action. Native file dialogs run their own modal message
+    /// loop, which re-enters the wizard's `WM_TIMER`/`tick`; opening one from
+    /// inside a Slint callback would alias the `&mut WizardWindow` that the
+    /// pointer handler still holds. So the callback only *stages* the action here
+    /// and the top-level message loop runs it once that borrow is released.
+    type BrowseAction = Box<dyn FnOnce()>;
+
     fn wire_callbacks(
         wizard: &Wizard,
         core: &Rc<RefCell<WizardCore>>,
         result: &Rc<RefCell<Option<RulerConfig>>>,
         closing: &Rc<Cell<bool>>,
         drag_on_title: &Rc<Cell<bool>>,
+        pending_browse: &Rc<Cell<Option<BrowseAction>>>,
     ) {
         wizard.on_select_target({
             let core = Rc::clone(core);
             move |idx| {
                 let mut core = core.borrow_mut();
+                // Picking a discovered candidate leaves manual mode; the manual
+                // panel / dropdown are reconciled to hidden by `sync_to_slint`.
+                core.manual_mode = false;
+                core.manual_error = None;
+                // Force the preview to re-push: it was suppressed while manual.
+                core.preview_token = None;
                 core.selected_index = (idx >= 0).then_some(idx as usize);
+            }
+        });
+        wizard.on_select_manual({
+            let core = Rc::clone(core);
+            move || {
+                let mut core = core.borrow_mut();
+                core.manual_mode = true;
+                core.manual_error = None;
+                core.preview_token = None;
+                core.selected_index = None;
+            }
+        });
+        wizard.on_browse_install({
+            let pending = Rc::clone(pending_browse);
+            let weak = wizard.as_weak();
+            move || {
+                let weak = weak.clone();
+                pending.set(Some(Box::new(move || {
+                    if let Some(path) = pick_path(PickKind::Folder) {
+                        if let Some(wizard) = weak.upgrade() {
+                            wizard.set_manual_install_path(path.into());
+                        }
+                    }
+                })));
+            }
+        });
+        wizard.on_browse_replay({
+            let pending = Rc::clone(pending_browse);
+            let core = Rc::clone(core);
+            let weak = wizard.as_weak();
+            move || {
+                let weak = weak.clone();
+                let core = Rc::clone(&core);
+                pending.set(Some(Box::new(move || {
+                    let filter_name = core.borrow().i18n.tr("config.selector.manual_filter_video");
+                    if let Some(path) = pick_path(PickKind::File {
+                        filter_name: &filter_name,
+                        filter_spec: "*.mkv;*.mp4;*.mov;*.avi;*.webm;*.flv;*.ts;*.m4v",
+                    }) {
+                        if let Some(wizard) = weak.upgrade() {
+                            wizard.set_replay_path(path.into());
+                        }
+                    }
+                })));
             }
         });
         wizard.on_refresh({
@@ -470,58 +628,37 @@ mod platform {
                 let record_video = wizard.get_record_video();
                 let record_csv = wizard.get_record_csv();
                 let trace_logging = wizard.get_trace_logging();
-                let replay_mode = wizard.get_replay_mode();
-                let replay_path = wizard.get_replay_path();
-                let replay_fps_text = wizard.get_replay_fps_text();
 
-                let config = if replay_mode {
-                    // Build a replay config from scratch
-                    let fps: f64 = replay_fps_text.parse().unwrap_or(60.0);
-                    RulerConfig {
-                        capture_type: "replay".to_string(),
-                        install_path: None,
-                        instance_index: None,
-                        device_id: None,
-                        window_handle: None,
-                        window_title: None,
-                        window_class: None,
-                        active_calibration_profile: core
-                            .borrow()
-                            .previous_config
-                            .as_ref()
-                            .and_then(|p| p.active_calibration_profile.clone()),
-                        frame_display_mode: core
-                            .borrow()
-                            .previous_config
-                            .as_ref()
-                            .and_then(|p| p.frame_display_mode.clone()),
-                        language: core
-                            .borrow()
-                            .previous_config
-                            .as_ref()
-                            .and_then(|p| p.language.clone())
-                            .or_else(|| Some(core.borrow().i18n.locale().to_string())),
-                        auto_select_target: false,
-                        target_fingerprint: None,
-                        overlay_pos_x: None,
-                        overlay_pos_y: None,
-                        overlay_scale: None,
-                        ui_scaler: core
-                            .borrow()
-                            .previous_config
-                            .as_ref()
-                            .and_then(|p| p.ui_scaler),
-                        debug_recording_enabled: record_video || record_csv,
-                        debug_recording_video: record_video,
-                        debug_recording_csv: record_csv,
-                        trace_logging_enabled: trace_logging,
-                        log_output_dir: core
-                            .borrow()
-                            .previous_config
-                            .as_ref()
-                            .and_then(|p| p.log_output_dir.clone()),
-                        replay_hevc_path: Some(replay_path.to_string()),
-                        replay_fps: Some(fps),
+                let config = if core.borrow().manual_mode {
+                    // Manual target: build the config from the typed fields,
+                    // validating the required ones for the chosen type.
+                    let draft = ManualDraft {
+                        kind: wizard.get_manual_kind(),
+                        install_path: wizard.get_manual_install_path().to_string(),
+                        instance_index: wizard.get_manual_instance_index().to_string(),
+                        device_id: wizard.get_manual_device_id().to_string(),
+                        window_title: wizard.get_manual_window_title().to_string(),
+                        replay_path: wizard.get_replay_path().to_string(),
+                        replay_fps_text: wizard.get_replay_fps_text().to_string(),
+                        auto,
+                        record_video,
+                        record_csv,
+                        trace_logging,
+                    };
+                    let core_ref = core.borrow();
+                    let built = build_manual_config(
+                        &draft,
+                        core_ref.previous_config.as_ref(),
+                        core_ref.i18n.locale(),
+                        &core_ref.i18n.tr("config.selector.manual_invalid"),
+                    );
+                    drop(core_ref);
+                    match built {
+                        Ok(config) => config,
+                        Err(error) => {
+                            core.borrow_mut().manual_error = Some(error);
+                            return;
+                        }
                     }
                 } else {
                     let core = core.borrow();
@@ -551,6 +688,105 @@ mod platform {
         });
     }
 
+    /// Typed manual-target inputs read from the Slint properties on confirm.
+    struct ManualDraft {
+        kind: i32,
+        install_path: String,
+        instance_index: String,
+        device_id: String,
+        window_title: String,
+        replay_path: String,
+        replay_fps_text: String,
+        auto: bool,
+        record_video: bool,
+        record_csv: bool,
+        trace_logging: bool,
+    }
+
+    /// Build a `RulerConfig` from a manual draft, validating the fields the
+    /// chosen capture type requires. Shared fields (calibration, overlay,
+    /// language, log dir, ...) are seeded from `previous`, mirroring
+    /// `target_discovery::base_config`. Returns `invalid_msg` when a required
+    /// field is empty.
+    fn build_manual_config(
+        draft: &ManualDraft,
+        previous: Option<&RulerConfig>,
+        locale: &str,
+        invalid_msg: &str,
+    ) -> Result<RulerConfig, String> {
+        let non_empty = |value: &str| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+        let install_path = non_empty(&draft.install_path);
+        let instance_index = draft.instance_index.trim().parse::<u32>().ok();
+        let device_id = non_empty(&draft.device_id);
+        let window_title = non_empty(&draft.window_title);
+        let replay_path = non_empty(&draft.replay_path);
+
+        let capture_type = match draft.kind {
+            0 => "mumu",
+            1 => "ldplayer",
+            2 => "adb",
+            3 => "window",
+            4 => "replay",
+            _ => return Err(invalid_msg.to_string()),
+        };
+        // Required-field validation per type.
+        match draft.kind {
+            0 | 1 if install_path.is_none() => return Err(invalid_msg.to_string()),
+            2 if device_id.is_none() => return Err(invalid_msg.to_string()),
+            3 if window_title.is_none() => return Err(invalid_msg.to_string()),
+            4 if replay_path.is_none() => return Err(invalid_msg.to_string()),
+            _ => {}
+        }
+
+        let is_emulator = draft.kind == 0 || draft.kind == 1;
+        let fingerprint = match draft.kind {
+            0 | 1 => format!(
+                "manual:{capture_type}:{}:{}",
+                install_path.as_deref().unwrap_or_default(),
+                instance_index.unwrap_or(0)
+            ),
+            2 => format!("manual:adb:{}", device_id.as_deref().unwrap_or_default()),
+            3 => format!("manual:window:{}", window_title.as_deref().unwrap_or_default()),
+            _ => format!("manual:replay:{}", replay_path.as_deref().unwrap_or_default()),
+        };
+        let replay_fps = (draft.kind == 4)
+            .then(|| draft.replay_fps_text.trim().parse::<f64>().unwrap_or(60.0));
+
+        Ok(RulerConfig {
+            capture_type: capture_type.to_string(),
+            install_path: is_emulator.then_some(install_path).flatten(),
+            instance_index: is_emulator.then_some(instance_index).flatten(),
+            device_id: matches!(draft.kind, 0..=2).then_some(device_id).flatten(),
+            window_handle: None,
+            window_title: (draft.kind == 3).then_some(window_title).flatten(),
+            window_class: None,
+            active_calibration_profile: previous
+                .and_then(|config| config.active_calibration_profile.clone()),
+            frame_display_mode: previous
+                .and_then(|config| config.frame_display_mode.clone())
+                .or_else(|| Some("0_to_n-1".to_string())),
+            language: previous
+                .and_then(|config| config.language.clone())
+                .or_else(|| Some(locale.to_string())),
+            auto_select_target: draft.auto,
+            target_fingerprint: Some(fingerprint),
+            overlay_pos_x: previous.and_then(|config| config.overlay_pos_x),
+            overlay_pos_y: previous.and_then(|config| config.overlay_pos_y),
+            overlay_scale: previous.and_then(|config| config.overlay_scale),
+            ui_scaler: previous.and_then(|config| config.ui_scaler),
+            debug_recording_enabled: draft.record_video || draft.record_csv,
+            debug_recording_video: draft.record_video,
+            debug_recording_csv: draft.record_csv,
+            trace_logging_enabled: draft.trace_logging,
+            log_output_dir: previous.and_then(|config| config.log_output_dir.clone()),
+            replay_hevc_path: (draft.kind == 4).then_some(replay_path).flatten(),
+            replay_fps,
+        })
+    }
+
     // ===================== render / sync tick =====================
 
     unsafe fn tick(hwnd: HWND) {
@@ -564,8 +800,10 @@ mod platform {
             sync_to_slint(&state.wizard, &mut core);
         }
         let debug_expanded = state.wizard.get_debug_expanded();
-        if debug_expanded != state.debug_expanded {
-            resize_wizard(hwnd, state, debug_expanded);
+        let manual_mode = state.core.borrow().manual_mode;
+        let want_h = wizard_logical_height(debug_expanded, manual_mode);
+        if (want_h - state.logical_h).abs() > 0.5 {
+            resize_wizard(hwnd, state, want_h);
         }
 
         let w = state.buf_w;
@@ -580,17 +818,19 @@ mod platform {
         }
     }
 
-    fn wizard_logical_height(debug_expanded: bool) -> f32 {
-        if debug_expanded {
-            WIZARD_LOGICAL_H + WIZARD_DEBUG_EXTRA_H
-        } else {
+    fn wizard_logical_height(debug_expanded: bool, manual_mode: bool) -> f32 {
+        if !debug_expanded {
             WIZARD_LOGICAL_H
+        } else if manual_mode {
+            WIZARD_LOGICAL_H + WIZARD_DEBUG_MANUAL_H
+        } else {
+            WIZARD_LOGICAL_H + WIZARD_DEBUG_RECORDING_H
         }
     }
 
-    unsafe fn resize_wizard(hwnd: HWND, state: &mut WizardWindow, debug_expanded: bool) {
+    unsafe fn resize_wizard(hwnd: HWND, state: &mut WizardWindow, logical_h: f32) {
         let width = state.buf_w as i32;
-        let height = (wizard_logical_height(debug_expanded) * state.scale).round() as i32;
+        let height = (logical_h * state.scale).round() as i32;
         let _ = DeleteDC(state.mem_dc);
         let _ = DeleteObject(HGDIOBJ(state.dib.0));
         if let Some((mem_dc, dib, bits)) = create_dib(width, height) {
@@ -599,7 +839,7 @@ mod platform {
             state.bits = bits;
             state.buf_h = height as usize;
         }
-        state.debug_expanded = debug_expanded;
+        state.logical_h = logical_h;
         state
             .window
             .set_size(PhysicalSize::new(width as u32, height as u32));
@@ -619,10 +859,53 @@ mod platform {
     /// preview is rebuilt only when a new frame arrives for the selection, and
     /// the header/status assignments rely on Slint's own equality check.
     fn sync_to_slint(wizard: &Wizard, core: &mut WizardCore) {
+        // The manual row only exists while the debug panel is expanded. Collapsing
+        // the panel therefore also exits manual mode (its UI is gone).
+        let debug_expanded = wizard.get_debug_expanded();
+        if wizard.get_show_manual_row() != debug_expanded {
+            wizard.set_show_manual_row(debug_expanded);
+        }
+        if !debug_expanded && core.manual_mode {
+            core.manual_mode = false;
+            core.manual_error = None;
+            core.preview_token = None;
+        }
+
         sync_rows(wizard, core);
-        sync_preview(wizard, core);
-        sync_header_status(wizard, core);
+        if core.manual_mode {
+            sync_manual(wizard, core);
+        } else {
+            if wizard.get_manual_selected() {
+                wizard.set_manual_selected(false);
+            }
+            if wizard.get_manual_kind_open() {
+                wizard.set_manual_kind_open(false);
+            }
+            sync_preview(wizard, core);
+            sync_header_status(wizard, core);
+        }
         sync_adb_availability(wizard);
+    }
+
+    /// Render the manual-target state: the manual row is highlighted, there is no
+    /// live preview, and the status line shows a hint (or the last validation
+    /// error). The typed parameter values live in the Slint properties.
+    fn sync_manual(wizard: &Wizard, core: &WizardCore) {
+        if !wizard.get_manual_selected() {
+            wizard.set_manual_selected(true);
+        }
+        wizard.set_has_preview(false);
+        wizard.set_header_text(core.i18n.tr("config.selector.manual_header").into());
+        match &core.manual_error {
+            Some(error) => {
+                wizard.set_status_text(error.clone().into());
+                wizard.set_status_error(true);
+            }
+            None => {
+                wizard.set_status_text(core.i18n.tr("config.selector.manual_hint").into());
+                wizard.set_status_error(false);
+            }
+        }
     }
 
     /// Reflect the cached adb resolution onto the wizard's banner. The
@@ -880,7 +1163,9 @@ mod platform {
         let selected =
             preferred_selection_index(&core.candidates, preferred_fingerprint.as_deref())
                 .unwrap_or(0);
-        core.selected_index = Some(selected);
+        // A refresh re-discovers candidates but must not steal the selection from
+        // an active manual target (the manual row stays selected, no candidate is).
+        core.selected_index = (!core.manual_mode).then_some(selected);
         start_probe_workers(core);
     }
 
@@ -1239,12 +1524,12 @@ mod platform {
                 handle_left_up(hwnd);
                 LRESULT(0)
             }
+            WM_CHAR => {
+                handle_char(hwnd, wparam);
+                LRESULT(0)
+            }
             WM_KEYDOWN => {
-                if wparam.0 as u16 == VK_ESCAPE.0 {
-                    if let Some(state) = wizard_window(hwnd) {
-                        state.closing.set(true);
-                    }
-                }
+                handle_key_down(hwnd, wparam);
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -1381,6 +1666,135 @@ mod platform {
                 position,
                 button: PointerEventButton::Left,
             });
+    }
+
+    fn dispatch_key(window: &Rc<MinimalSoftwareWindow>, text: SharedString) {
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        let _ = window
+            .window()
+            .try_dispatch_event(WindowEvent::KeyReleased { text });
+    }
+
+    /// Decode one WM_CHAR UTF-16 code unit into text, buffering the high half of a
+    /// surrogate pair across calls. Returns `None` for control characters and for
+    /// the (stashed) high surrogate. Mirrors the menu's inline-rename input path.
+    fn decode_wm_char(pending_high: &Cell<u16>, unit: u16) -> Option<SharedString> {
+        if (0xd800..0xdc00).contains(&unit) {
+            pending_high.set(unit);
+            return None;
+        }
+        let units: Vec<u16> = if (0xdc00..0xe000).contains(&unit) {
+            let high = pending_high.replace(0);
+            if high == 0 {
+                return None;
+            }
+            vec![high, unit]
+        } else {
+            pending_high.set(0);
+            if unit < 0x20 || unit == 0x7f {
+                return None;
+            }
+            vec![unit]
+        };
+        Some(String::from_utf16_lossy(&units).into())
+    }
+
+    /// Forward a typed character to the focused Slint `TextInput` (the manual-panel
+    /// parameter fields). Control codes arrive via WM_KEYDOWN instead.
+    unsafe fn handle_char(hwnd: HWND, wparam: WPARAM) {
+        let Some(state) = wizard_window(hwnd) else {
+            return;
+        };
+        if let Some(text) = decode_wm_char(&state.pending_high, wparam.0 as u16) {
+            dispatch_key(&state.window, text);
+        }
+    }
+
+    /// Esc closes the wizard; editing / navigation keys are forwarded to the
+    /// focused Slint `TextInput` (printable characters come through WM_CHAR).
+    unsafe fn handle_key_down(hwnd: HWND, wparam: WPARAM) {
+        let Some(state) = wizard_window(hwnd) else {
+            return;
+        };
+        let vk = wparam.0 as u16;
+        if vk == VK_ESCAPE.0 {
+            state.closing.set(true);
+            return;
+        }
+        let key = match vk {
+            v if v == VK_BACK.0 => Some(Key::Backspace),
+            v if v == VK_DELETE.0 => Some(Key::Delete),
+            v if v == VK_LEFT.0 => Some(Key::LeftArrow),
+            v if v == VK_RIGHT.0 => Some(Key::RightArrow),
+            v if v == VK_HOME.0 => Some(Key::Home),
+            v if v == VK_END.0 => Some(Key::End),
+            v if v == VK_RETURN.0 => Some(Key::Return),
+            _ => None,
+        };
+        if let Some(key) = key {
+            dispatch_key(&state.window, key.into());
+        }
+    }
+
+    /// What a browse button should pick.
+    enum PickKind<'a> {
+        /// A folder — the emulator install directory.
+        Folder,
+        /// A single existing file, restricted to one filter (name, spec).
+        File { filter_name: &'a str, filter_spec: &'a str },
+    }
+
+    /// Show a native Common Item Dialog and return the chosen filesystem path, or
+    /// `None` if the user cancelled or the dialog could not be created. The dialog
+    /// is owned by the active wizard window so it surfaces above the topmost
+    /// layered window. Uses `IFileOpenDialog` directly (the `windows` crate is
+    /// already a dependency); no third-party file-dialog crate is pulled in.
+    fn pick_path(kind: PickKind) -> Option<String> {
+        unsafe {
+            // The wizard thread is not otherwise COM-initialized; bring up an STA
+            // apartment for the dialog and tear it back down when we own the init.
+            let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let picked = pick_path_inner(kind);
+            if init.is_ok() {
+                CoUninitialize();
+            }
+            picked
+        }
+    }
+
+    unsafe fn pick_path_inner(kind: PickKind) -> Option<String> {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let mut options = dialog.GetOptions().ok()?;
+        options |= FOS_FORCEFILESYSTEM;
+        // `name`/`spec` must outlive `SetFileTypes`; keep them in this scope.
+        let (name, spec);
+        match kind {
+            PickKind::Folder => options |= FOS_PICKFOLDERS,
+            PickKind::File {
+                filter_name,
+                filter_spec,
+            } => {
+                options |= FOS_FILEMUSTEXIST;
+                name = wide(filter_name);
+                spec = wide(filter_spec);
+                let filters = [COMDLG_FILTERSPEC {
+                    pszName: PCWSTR(name.as_ptr()),
+                    pszSpec: PCWSTR(spec.as_ptr()),
+                }];
+                dialog.SetFileTypes(&filters).ok()?;
+            }
+        }
+        dialog.SetOptions(options).ok()?;
+        // `Show` returns Err when the user cancels.
+        dialog.Show(GetForegroundWindow()).ok()?;
+        let item: IShellItem = dialog.GetResult().ok()?;
+        let raw: PWSTR = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = raw.to_string().ok();
+        CoTaskMemFree(Some(raw.0 as *const std::ffi::c_void));
+        path
     }
 
     unsafe fn wizard_window<'a>(hwnd: HWND) -> Option<&'a WizardWindow> {
@@ -1523,9 +1937,89 @@ mod platform {
         }
 
         #[test]
-        fn wizard_logical_height_tracks_debug_panel_visibility() {
-            assert_eq!(wizard_logical_height(false), 404.0);
-            assert_eq!(wizard_logical_height(true), 652.0);
+        fn wizard_logical_height_tracks_debug_and_manual_panels() {
+            // Collapsed debug panel: just the base height.
+            assert_eq!(wizard_logical_height(false, false), 404.0);
+            assert_eq!(wizard_logical_height(false, true), 404.0);
+            // Expanded: recording-only vs the taller manual-target panel.
+            assert_eq!(
+                wizard_logical_height(true, false),
+                404.0 + WIZARD_DEBUG_RECORDING_H
+            );
+            assert_eq!(
+                wizard_logical_height(true, true),
+                404.0 + WIZARD_DEBUG_MANUAL_H
+            );
+            assert!(
+                wizard_logical_height(true, true) > wizard_logical_height(true, false),
+                "the manual panel is taller than the recording-only panel"
+            );
+        }
+
+        fn manual_draft(kind: i32) -> ManualDraft {
+            ManualDraft {
+                kind,
+                install_path: String::new(),
+                instance_index: String::new(),
+                device_id: String::new(),
+                window_title: String::new(),
+                replay_path: String::new(),
+                replay_fps_text: String::new(),
+                auto: false,
+                record_video: false,
+                record_csv: false,
+                trace_logging: false,
+            }
+        }
+
+        #[test]
+        fn build_manual_config_validates_required_fields() {
+            // MuMu needs an install path; empty -> the invalid message.
+            let draft = manual_draft(0);
+            assert_eq!(
+                build_manual_config(&draft, None, "zh_CN", "missing").unwrap_err(),
+                "missing"
+            );
+            // Generic ADB needs a serial.
+            assert_eq!(
+                build_manual_config(&manual_draft(2), None, "zh_CN", "missing").unwrap_err(),
+                "missing"
+            );
+            // An out-of-range kind is rejected too.
+            assert_eq!(
+                build_manual_config(&manual_draft(9), None, "zh_CN", "missing").unwrap_err(),
+                "missing"
+            );
+        }
+
+        #[test]
+        fn build_manual_config_maps_virtual_and_adb_fields() {
+            // Virtual: video path required, fps parsed (default 60 when blank).
+            let mut draft = manual_draft(4);
+            draft.replay_path = "  C:/clip.mkv  ".to_string();
+            let config = build_manual_config(&draft, None, "en_US", "missing").unwrap();
+            assert_eq!(config.capture_type, "replay");
+            assert_eq!(config.replay_hevc_path.as_deref(), Some("C:/clip.mkv"));
+            assert_eq!(config.replay_fps, Some(60.0));
+            assert_eq!(config.language.as_deref(), Some("en_US"));
+
+            // Generic ADB: serial maps onto device_id, no install/window fields.
+            let mut adb = manual_draft(2);
+            adb.device_id = "127.0.0.1:16384".to_string();
+            let config = build_manual_config(&adb, None, "zh_CN", "missing").unwrap();
+            assert_eq!(config.capture_type, "adb");
+            assert_eq!(config.device_id.as_deref(), Some("127.0.0.1:16384"));
+            assert!(config.install_path.is_none());
+            assert!(config.window_title.is_none());
+
+            // MuMu: install path + instance index, blank index defaults later to 0.
+            let mut mumu = manual_draft(0);
+            mumu.install_path = "D:/MuMu".to_string();
+            mumu.instance_index = "2".to_string();
+            let config = build_manual_config(&mumu, None, "zh_CN", "missing").unwrap();
+            assert_eq!(config.capture_type, "mumu");
+            assert_eq!(config.install_path.as_deref(), Some("D:/MuMu"));
+            assert_eq!(config.instance_index, Some(2));
         }
 
         fn candidate(fingerprint: &str, error: Option<&str>) -> TargetCandidate {

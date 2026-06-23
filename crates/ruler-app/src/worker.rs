@@ -10,32 +10,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ruler_core::{
-    analysis::{
-        calibration::infer_calibration_from_samples_with_ui_scaler_and_total_bar_width,
-        scanner::{self, BattleState},
-    },
-    RulerConfig, RulerEngine,
-};
+use ruler_core::RulerConfig;
 
 use crate::{
     commands::UiCommand,
-    debug_recorder::DebugRecorder,
-    profiles::{calibration_basename, ProfileStore},
+    profiles::ProfileStore,
     resources::ResourceLocator,
-    ui_state::{
-        format_time_from_frames, ApiStateSnapshot, FrameDisplayMode, OverlayMode, ResetKind,
-        UiSnapshot,
-    },
+    ui_state::{ApiStateSnapshot, UiSnapshot},
 };
-
-const CALIBRATION_CYCLES: usize = 2;
-
-/// Sentinel error string used to distinguish a user-initiated cancellation
-/// from a real failure inside `run_calibration`. `handle_command` checks for
-/// this exact value to decide whether to return to PreCalibration (cancel) or
-/// publish an error (failure).
-const CALIBRATION_CANCELLED: &str = "calibration_cancelled";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WorkerTimingSnapshot {
@@ -281,52 +263,46 @@ impl Drop for WorkerRuntime {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Worker context + main loop (three-layer architecture)
+// ---------------------------------------------------------------------------
+
+use std::sync::mpsc::Sender;
+
+use ruler_core::{
+    analysis::roi,
+    pipeline::{
+        ConsumerPipe, PipelineConfig, PipelineError, PipelineInfo,
+    },
+    CapturePipeline,
+};
+
+use crate::{
+    analyzer_consumer::{AnalyzerCommand, AnalyzerConfig, AnalyzerConsumer},
+    calibration,
+    debug_recorder::{DebugRecorderConfig, DebugRecorderConsumer},
+    profiles::calibration_basename,
+    ui_state::{FrameDisplayMode, OverlayMode},
+};
+
+/// The worker context in the three-layer architecture. The worker owns the
+/// Layer 1 pipeline and the Layer 2 analyzer consumer, and is responsible
+/// for command dispatch and lifecycle management.
 struct WorkerContext {
     config: RulerConfig,
     config_path: PathBuf,
     profiles: ProfileStore,
-    engine: RulerEngine,
-    connected: bool,
     active_profile: Option<String>,
     display_mode: FrameDisplayMode,
-    lap_start_frame: Option<i32>,
-    timer_reset_undo: TimerResetUndo,
-    last_elapsed_frames: i32,
-    last_total_frames: i32,
-    last_cost_is_negative: bool,
-    sample_index: u64,
-    debug_recorder: Option<DebugRecorder>,
     log_session_dir: PathBuf,
+    session_id: String,
+    pipeline: Option<CapturePipeline>,
+    pipeline_info: Option<PipelineInfo>,
+    analyzer_command_tx: Option<Sender<AnalyzerCommand>>,
+    analyzer: Option<AnalyzerConsumer>,
+    debug_recorder: Option<DebugRecorderConsumer>,
     #[cfg(windows)]
     cursor_guard: Option<crate::pc_cursor_guard::SelfDrawnCursorGuard>,
-    // Bumped (and tagged with the trigger kind) whenever the timer is reset
-    // while it was actually running (elapsed != 0). The overlay reads this via
-    // UiSnapshot to drive the reset cover animation.
-    reset_pulse: u32,
-    reset_kind: ResetKind,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct TimerResetUndo {
-    previous_elapsed_frames: Option<i32>,
-}
-
-impl TimerResetUndo {
-    fn remember_reset(&mut self, elapsed_frames: i32) {
-        self.previous_elapsed_frames = (elapsed_frames != 0).then_some(elapsed_frames);
-    }
-
-    fn take(&mut self) -> Option<i32> {
-        self.previous_elapsed_frames.take()
-    }
-
-    fn clear(&mut self) {
-        self.previous_elapsed_frames = None;
-    }
-
-    fn is_available(self) -> bool {
-        self.previous_elapsed_frames.is_some()
-    }
 }
 
 fn run_worker_loop(
@@ -346,6 +322,13 @@ fn run_worker_loop(
     };
 
     let profiles = ProfileStore::new(&resources);
+    let session_id = format!(
+        "{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
 
     let mut context = WorkerContext {
         display_mode: FrameDisplayMode::from_config(config.frame_display_mode.as_deref()),
@@ -353,23 +336,18 @@ fn run_worker_loop(
         config,
         config_path: resources.config_path(),
         profiles,
-        engine: RulerEngine::new(),
-        connected: false,
-        lap_start_frame: None,
-        timer_reset_undo: TimerResetUndo::default(),
-        last_elapsed_frames: 0,
-        last_total_frames: 0,
-        last_cost_is_negative: false,
-        sample_index: 0,
-        debug_recorder: None,
         log_session_dir,
+        session_id,
+        pipeline: None,
+        pipeline_info: None,
+        analyzer_command_tx: None,
+        analyzer: None,
+        debug_recorder: None,
         #[cfg(windows)]
         cursor_guard: None,
-        reset_pulse: 0,
-        reset_kind: ResetKind::Manual,
     };
 
-    if let Err(error) = bootstrap_engine(&mut context, &state) {
+    if let Err(error) = bootstrap(&mut context, Arc::clone(&state)) {
         publish_error(&state, &context, error);
     }
 
@@ -378,19 +356,23 @@ fn run_worker_loop(
         if !drain_commands(&state, &mut context, &commands, &running) {
             break;
         }
-
-        if context.connected && context.active_profile.is_some() {
-            analyze_once(&state, &mut context);
-        }
-
         next_poll_at = next_poll_at.max(Instant::now()) + interval;
         sleep_until(next_poll_at, &running);
     }
+
+    // Shutdown: stop the analyzer first, then the pipeline.
+    if let Some(tx) = context.analyzer_command_tx.take() {
+        let _ = tx.send(AnalyzerCommand::Shutdown);
+    }
+    drop(context.analyzer.take());
+    drop(context.debug_recorder.take());
+    if let Some(mut pipeline) = context.pipeline.take() {
+        pipeline.shutdown();
+    }
 }
 
-fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Result<(), String> {
-    // Always re-read ui_scaler from the registry at connect time so that
-    // in-game changes take effect without requiring a config wipe.
+fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<(), String> {
+    // Read ui_scaler (same logic as the old bootstrap_engine).
     let ui_scaler = if context.config.capture_type == "window" {
         match crate::arknights_settings::read_pc_ui_scaler() {
             Ok(Some(value)) => value.clamp(0.0, 1.0),
@@ -406,81 +388,116 @@ fn bootstrap_engine(context: &mut WorkerContext, state: &SharedAppState) -> Resu
     } else {
         context.config.effective_ui_scaler()
     };
-    context.engine.set_ui_scaler(ui_scaler);
+
+    // Start the Layer 1 capture pipeline.
     let capture_config = context
         .config
         .to_capture_config()
-        .map_err(|error| error.to_string())?;
+        .map_err(|e| e.to_string())?;
+    let spill_dir = context.log_session_dir.join("frame_spill");
+    let pipeline_config = PipelineConfig::new(capture_config, spill_dir, context.session_id.clone());
+    let (mut pipeline, info) = CapturePipeline::start(pipeline_config).map_err(|e| e.to_string())?;
     log::info!(
-        "connecting capture backend for '{}'",
-        context.config.capture_type
+        "capture pipeline started: {}x{}, pipe={}",
+        info.width,
+        info.height,
+        info.pipe_name
     );
-    let dims = context.engine.connect(capture_config)?;
-    context.connected = true;
-    log::info!("capture backend connected: {}x{}", dims.0, dims.1);
     state.update_ui(|ui, _| {
-        ui.capture_dimensions = Some(dims);
+        ui.capture_dimensions = Some((info.width, info.height));
         ui.cursor_blocked = false;
     });
+
+    // Configure cursor guard (Windows only).
     #[cfg(windows)]
-    configure_cursor_guard(context, ui_scaler);
-
-    if let Some(profile) = context.active_profile.clone() {
-        load_profile(context, &profile)?;
-        publish_running_state(state, context, None);
-    } else {
-        publish_idle(state, context);
+    {
+        if context.config.capture_type == "window" {
+            let cursor_size = match crate::arknights_settings::read_pc_cursor_size() {
+                Ok(Some(value)) => value.clamp(0.0, 1.0),
+                Ok(None) => 1.0,
+                Err(_) => 1.0,
+            };
+            context.cursor_guard = Some(crate::pc_cursor_guard::SelfDrawnCursorGuard::new(
+                ui_scaler,
+                cursor_size,
+            ));
+        }
     }
 
-    Ok(())
-}
-
-#[cfg(windows)]
-fn configure_cursor_guard(context: &mut WorkerContext, ui_scaler: f64) {
-    context.cursor_guard = None;
-    if context.config.capture_type != "window" {
-        return;
-    }
-
-    let cursor_size = match crate::arknights_settings::read_pc_cursor_size() {
-        Ok(Some(value)) => value.clamp(0.0, 1.0),
-        Ok(None) => {
-            log::info!("Arknights PC cursorSize registry value not found; using 1.0");
-            1.0
-        }
-        Err(error) => {
-            log::warn!("failed to read Arknights PC cursorSize: {error}; using 1.0");
-            1.0
-        }
-    };
-    log::info!("Arknights PC cursorSize={cursor_size:.3}; enabling cursor occlusion guard");
-    context.cursor_guard = Some(crate::pc_cursor_guard::SelfDrawnCursorGuard::new(
+    // Spawn the Layer 2 analyzer consumer (SkipToLatest).
+    let analyzer_pipe = pipeline
+        .connect_consumer(
+            ruler_core::pipeline::cursor::ConsumerPolicy::SkipToLatest,
+            0,
+        )
+        .map_err(|e| format!("failed to connect analyzer consumer: {e}"))?;
+    let (analyzer_tx, analyzer_rx) = std::sync::mpsc::channel::<AnalyzerCommand>();
+    let initial_cal_path = context
+        .active_profile
+        .as_ref()
+        .map(|name| context.profiles.calibration_path(name));
+    let analyzer_config = AnalyzerConfig {
+        display_mode: context.display_mode,
         ui_scaler,
-        cursor_size,
-    ));
-}
+        calibration_path: initial_cal_path,
+        pipeline_info: info.clone(),
+    };
+    let analyzer = AnalyzerConsumer::spawn(
+        analyzer_pipe,
+        Arc::clone(&state),
+        analyzer_config,
+        analyzer_rx,
+        None, // debug recorder is handled separately below
+    )?;
 
-fn load_profile(context: &mut WorkerContext, filename: &str) -> Result<(), String> {
-    let calibration_path = context.profiles.calibration_path(filename);
-    log::info!(
-        "loading calibration profile '{}' from '{}'",
-        filename,
-        calibration_path.display()
-    );
-    context
-        .engine
-        .load_calibration(&calibration_path)
-        .map_err(|error| {
-            format!(
-                "failed to load calibration '{}': {error}",
-                calibration_path.display()
-            )
-        })?;
-    context.active_profile = Some(filename.to_string());
-    context.lap_start_frame = None;
-    context.timer_reset_undo.clear();
-    context.last_elapsed_frames = 0;
-    context.last_cost_is_negative = false;
+    // Spawn the debug recorder consumer if enabled.
+    if context.config.debug_recording_enabled {
+        let record_video = context.config.debug_recording_video;
+        let record_csv = context.config.debug_recording_csv;
+        if record_video || record_csv {
+            let _ = std::fs::create_dir_all(&context.log_session_dir);
+            let recorder_pipe = pipeline
+                .connect_consumer(
+                    ruler_core::pipeline::cursor::ConsumerPolicy::InOrder,
+                    0,
+                )
+                .map_err(|e| format!("failed to connect debug recorder consumer: {e}"))?;
+            let recorder_config = DebugRecorderConfig {
+                output_dir: context.log_session_dir.clone(),
+                record_video,
+                record_csv,
+                width: info.width,
+                height: info.height,
+                format: ruler_core::PixelFormat::Rgba, // pipeline always captures RGBA
+            };
+            match DebugRecorderConsumer::spawn(recorder_pipe, recorder_config) {
+                Ok(consumer) => {
+                    log::info!("debug recorder consumer started");
+                    context.debug_recorder = Some(consumer);
+                    if record_video {
+                        context.config.debug_recording_video = false;
+                        context.config.debug_recording_enabled = context.config.debug_recording_csv;
+                        persist_config(context, "consume one-shot MKV recording");
+                    }
+                }
+                Err(e) => {
+                    log::error!("failed to start debug recorder consumer: {e}");
+                }
+            }
+        }
+    }
+
+    context.pipeline = Some(pipeline);
+    context.pipeline_info = Some(info);
+    context.analyzer_command_tx = Some(analyzer_tx);
+    context.analyzer = Some(analyzer);
+
+    if context.active_profile.is_some() {
+        publish_running_state(&state, context, None);
+    } else {
+        publish_idle(&state, context);
+    }
+
     Ok(())
 }
 
@@ -514,9 +531,8 @@ fn handle_command(
             log::info!("worker command: prepare calibration");
             context.active_profile = None;
             context.config.active_calibration_profile = None;
-            context.lap_start_frame = None;
-            context.timer_reset_undo.clear();
-            context.last_cost_is_negative = false;
+            send_analyzer(context, AnalyzerCommand::ClearCalibration);
+            send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: false });
             persist_config(context, "prepare calibration");
             state.update_ui(|ui, api| {
                 ui.mode = OverlayMode::PreCalibration;
@@ -536,11 +552,8 @@ fn handle_command(
             log::info!("worker command: start calibration");
             match run_calibration(state, context) {
                 Ok(()) => publish_running_state(state, context, None),
-                Err(ref error) if error == CALIBRATION_CANCELLED => {
+                Err(ref error) if error == calibration::CALIBRATION_CANCELLED => {
                     log::info!("calibration cancelled by user, returning to PreCalibration");
-                    // Clear any remaining cancel signal (the post-collection
-                    // re-check may have left it set) and restore the
-                    // pre-calibration state so the user can retry.
                     let _ = state.take_cancel_calibration();
                     state.update_ui(|ui, api| {
                         ui.mode = OverlayMode::PreCalibration;
@@ -564,13 +577,16 @@ fn handle_command(
         }
         UiCommand::UseProfile { filename } => {
             log::info!("worker command: use profile '{}'", filename);
-            match load_profile(context, &filename) {
-                Ok(()) => {
+            let cal_path = context.profiles.calibration_path(&filename);
+            match std::fs::metadata(&cal_path) {
+                Ok(_) => {
+                    context.active_profile = Some(filename.clone());
                     context.config.active_calibration_profile = Some(filename);
+                    send_analyzer(context, AnalyzerCommand::LoadCalibration { path: cal_path });
                     persist_config(context, "select profile");
                     publish_running_state(state, context, None);
                 }
-                Err(error) => publish_error(state, context, error),
+                Err(e) => publish_error(state, context, format!("failed to load profile: {e}")),
             }
         }
         UiCommand::RenameProfile { old, new_base } => {
@@ -600,11 +616,8 @@ fn handle_command(
             if context.active_profile.as_deref() == Some(filename.as_str()) {
                 context.active_profile = None;
                 context.config.active_calibration_profile = None;
-                context.engine.reset_timer();
-                context.last_elapsed_frames = 0;
-                context.lap_start_frame = None;
-                context.timer_reset_undo.clear();
-                context.last_cost_is_negative = false;
+                send_analyzer(context, AnalyzerCommand::ClearCalibration);
+                send_analyzer(context, AnalyzerCommand::ResetTimer);
                 persist_config(context, "delete active profile");
                 publish_idle(state, context);
             } else {
@@ -615,47 +628,25 @@ fn handle_command(
             log::info!("worker command: set display mode '{}'", mode.as_config());
             context.display_mode = mode;
             context.config.frame_display_mode = Some(mode.as_config().to_string());
+            send_analyzer(context, AnalyzerCommand::SetDisplayMode(mode));
             persist_config(context, "set display mode");
             publish_current_state(state, context);
         }
         UiCommand::AdjustTimer { frames } => {
             log::info!("worker command: adjust timer by {frames} frames");
-            context.engine.adjust_timer(frames);
-            context.last_elapsed_frames += frames;
-            publish_current_state(state, context);
+            send_analyzer(context, AnalyzerCommand::AdjustTimer { frames });
         }
         UiCommand::ResetTimer => {
             log::info!("worker command: reset timer");
-            // Only animate when the timer was actually counting — a reset from
-            // zero is a no-op visually.
-            if context.last_elapsed_frames != 0 {
-                context.reset_pulse = context.reset_pulse.wrapping_add(1);
-                context.reset_kind = ResetKind::Manual;
-            }
-            context
-                .timer_reset_undo
-                .remember_reset(context.last_elapsed_frames);
-            context.engine.reset_timer();
-            context.lap_start_frame = None;
-            context.last_elapsed_frames = 0;
-            publish_current_state(state, context);
+            send_analyzer(context, AnalyzerCommand::ResetTimer);
         }
         UiCommand::UndoResetTimer => {
             log::info!("worker command: undo timer reset");
-            if let Some(elapsed_frames) = context.timer_reset_undo.take() {
-                set_timer_elapsed(context, elapsed_frames);
-                context.lap_start_frame = None;
-                publish_current_state(state, context);
-            }
+            send_analyzer(context, AnalyzerCommand::UndoResetTimer);
         }
         UiCommand::ToggleLapTimer => {
             log::info!("worker command: toggle lap timer");
-            context.lap_start_frame = if context.lap_start_frame.is_some() {
-                None
-            } else {
-                Some(context.last_elapsed_frames)
-            };
-            publish_current_state(state, context);
+            send_analyzer(context, AnalyzerCommand::ToggleLapTimer);
         }
         UiCommand::SetOverlayScale(mult) => {
             let pct = (mult * 100.0).round().clamp(50.0, 400.0) as u16;
@@ -681,21 +672,23 @@ fn handle_command(
     true
 }
 
+fn send_analyzer(context: &WorkerContext, cmd: AnalyzerCommand) {
+    if let Some(tx) = &context.analyzer_command_tx {
+        let _ = tx.send(cmd);
+    }
+}
+
 fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Result<(), String> {
-    // Clear any stale cancel flag from a previous run so a fresh calibration
-    // is not aborted by a cancel that arrived too late last time.
     let _ = state.take_cancel_calibration();
 
-    if !context.connected {
-        return Err("capture backend is not connected".to_string());
+    if context.pipeline.is_none() {
+        return Err("capture pipeline is not running".to_string());
     }
 
-    context.engine.reset_timer();
-    context.lap_start_frame = None;
-    context.timer_reset_undo.clear();
-    context.last_elapsed_frames = 0;
-    context.last_total_frames = 0;
-    context.last_cost_is_negative = false;
+    // Tell the analyzer to pause publishing during calibration.
+    send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: true });
+    send_analyzer(context, AnalyzerCommand::ResetTimer);
+
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Calibrating;
         ui.progress_percent = 0.0;
@@ -712,21 +705,48 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         api.total_elapsed_frames = 0;
     });
 
-    let (cycle_samples, screen_width, screen_height, total_bar_width) =
-        collect_calibration_samples(state, context)?;
+    // Connect a fresh InOrder consumer for calibration.
+    let cal_pipe = context
+        .pipeline
+        .as_ref()
+        .ok_or("pipeline missing")?
+        .connect_consumer(
+            ruler_core::pipeline::cursor::ConsumerPolicy::InOrder,
+            0,
+        )
+        .map_err(|e| format!("failed to connect calibration consumer: {e}"))?;
 
-    // Re-check the cancel flag right after collection — the user may have
-    // clicked cancel during the final frames, and we'd rather drop the run
-    // than commit a profile the user explicitly aborted.
+    // Get ROI from pipeline dimensions.
+    let info = context
+        .pipeline_info
+        .clone()
+        .ok_or("pipeline info missing")?;
+    let roi = roi::find_cost_bar_roi_with_ui_scaler(
+        info.width as i32,
+        info.height as i32,
+        context.config.effective_ui_scaler(),
+    );
+
+    let result = calibration::collect_calibration_samples(
+        cal_pipe,
+        state,
+        roi,
+        context.config.effective_ui_scaler(),
+    );
+
+    // Re-check the cancel flag right after collection.
     if state.take_cancel_calibration() {
-        return Err(CALIBRATION_CANCELLED.to_string());
+        send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: false });
+        return Err(calibration::CALIBRATION_CANCELLED.to_string());
     }
+
+    let (cycle_samples, screen_width, screen_height, total_bar_width) = result?;
 
     let calibration_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("system clock error: {error}"))?
+        .map_err(|e| format!("system clock error: {e}"))?
         .as_secs_f64();
-    let calibration_data = infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
+    let calibration_data = calibration::infer_calibration(
         &cycle_samples,
         screen_width,
         screen_height,
@@ -738,312 +758,25 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
     let filename = context
         .profiles
         .save_calibration(&calibration_data, &basename)
-        .map_err(|error| format!("failed to save calibration: {error}"))?;
+        .map_err(|e| format!("failed to save calibration: {e}"))?;
 
-    context.engine.reset_timer();
-    load_profile(context, &filename)?;
+    // Load the new profile into the analyzer and resume publishing.
+    let cal_path = context.profiles.calibration_path(&filename);
+    send_analyzer(context, AnalyzerCommand::LoadCalibration { path: cal_path });
+    send_analyzer(context, AnalyzerCommand::ResetTimer);
+    send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: false });
+
+    context.active_profile = Some(filename.clone());
     context.config.active_calibration_profile = Some(filename);
     context
         .config
         .save_to_path(&context.config_path)
-        .map_err(|error| error.to_string())?;
+        .map_err(|e| e.to_string())?;
     log::info!(
         "saved new calibration profile selection to '{}'",
         context.config_path.display()
     );
     Ok(())
-}
-
-fn collect_calibration_samples(
-    state: &SharedAppState,
-    context: &mut WorkerContext,
-) -> Result<(Vec<Vec<i32>>, u32, u32, i32), String> {
-    let first_frame = context.engine.capture_frame()?;
-    let screen_width = first_frame.width;
-    let screen_height = first_frame.height;
-    let roi = context
-        .engine
-        .roi()
-        .ok_or_else(|| "capture ROI is not ready".to_string())?;
-    let total_bar_width = roi.1 - roi.0;
-    if total_bar_width <= 0 {
-        return Err("capture ROI has invalid width".to_string());
-    }
-
-    let mut cycle_samples = Vec::new();
-    let mut current_cycle_data = Vec::new();
-    let mut previous_cost_state_raw = None;
-    let mut is_collecting_cycle = false;
-    let mut progress = CalibrationProgress::new(total_bar_width);
-    let mut frame = first_frame;
-
-    while cycle_samples.len() < CALIBRATION_CYCLES {
-        // Poll the cancel flag every frame so a right-click "cancel" aborts
-        // the loop promptly instead of waiting for both cycles to complete.
-        if state.take_cancel_calibration() {
-            return Err(CALIBRATION_CANCELLED.to_string());
-        }
-
-        let current_cost_state_raw = scanner::get_raw_filled_pixel_width(
-            &frame.data,
-            frame.width,
-            frame.height,
-            frame.format,
-            roi,
-        );
-
-        if let Some(current) = current_cost_state_raw {
-            if let Some(previous) = previous_cost_state_raw {
-                if (previous as f64) > total_bar_width as f64 * 0.9
-                    && (current as f64) < total_bar_width as f64 * 0.1
-                {
-                    is_collecting_cycle = true;
-                    if !current_cycle_data.is_empty() {
-                        cycle_samples.push(std::mem::take(&mut current_cycle_data));
-                    }
-                }
-            }
-
-            if is_collecting_cycle && cycle_samples.len() < CALIBRATION_CYCLES {
-                current_cycle_data.push(current);
-            }
-
-            let progress_percent =
-                progress.update(current, cycle_samples.len(), is_collecting_cycle);
-            state.update_ui(|ui, _| {
-                ui.mode = OverlayMode::Calibrating;
-                ui.progress_percent = progress_percent;
-                ui.cursor_blocked = false;
-                ui.message.clear();
-            });
-            previous_cost_state_raw = Some(current);
-        } else {
-            previous_cost_state_raw = None;
-        }
-
-        if cycle_samples.len() < CALIBRATION_CYCLES {
-            frame = context.engine.capture_frame()?;
-        }
-    }
-
-    state.update_ui(|ui, _| {
-        ui.mode = OverlayMode::Calibrating;
-        ui.progress_percent = 100.0;
-        ui.cursor_blocked = false;
-    });
-    Ok((cycle_samples, screen_width, screen_height, total_bar_width))
-}
-
-#[derive(Debug)]
-struct CalibrationProgress {
-    total_bar_width: i32,
-    initial_width: Option<i32>,
-    last_percent: f32,
-}
-
-impl CalibrationProgress {
-    fn new(total_bar_width: i32) -> Self {
-        Self {
-            total_bar_width: total_bar_width.max(1),
-            initial_width: None,
-            last_percent: 0.0,
-        }
-    }
-
-    fn update(&mut self, current_width: i32, completed_cycles: usize, collecting: bool) -> f32 {
-        let current = current_width.clamp(0, self.total_bar_width);
-        let initial = *self.initial_width.get_or_insert(current);
-        let wait_units = (self.total_bar_width - initial).max(0) as f32;
-        let total_bar_width = self.total_bar_width as f32;
-        let total_units = wait_units + CALIBRATION_CYCLES as f32 * total_bar_width;
-
-        let completed_units = if collecting {
-            let completed_cycles = completed_cycles.min(CALIBRATION_CYCLES);
-            let current_cycle_units = if completed_cycles < CALIBRATION_CYCLES {
-                current as f32
-            } else {
-                0.0
-            };
-            wait_units + completed_cycles as f32 * total_bar_width + current_cycle_units
-        } else {
-            (current - initial).clamp(0, self.total_bar_width) as f32
-        };
-
-        let percent = if total_units > 0.0 {
-            completed_units / total_units * 100.0
-        } else {
-            0.0
-        }
-        .clamp(0.0, 100.0);
-
-        self.last_percent = self.last_percent.max(percent);
-        self.last_percent
-    }
-}
-
-fn analyze_once(state: &SharedAppState, context: &mut WorkerContext) {
-    context.sample_index += 1;
-
-    // Time the capture for debug recording
-    let capture_start = Instant::now();
-
-    match context.engine.capture_frame() {
-        Ok(frame_data) => {
-            let capture_dur_us = capture_start.elapsed().as_micros();
-
-            // Debug recording: lazy-init on first frame
-            if context.debug_recorder.is_none()
-                && context.config.debug_recording_enabled
-                && context.connected
-            {
-                let record_video = context.config.debug_recording_video;
-                let record_csv = context.config.debug_recording_csv;
-                if record_video || record_csv {
-                    // Ensure output directory exists
-                    let _ = std::fs::create_dir_all(&context.log_session_dir);
-                    match DebugRecorder::start(
-                        &context.log_session_dir,
-                        record_video,
-                        record_csv,
-                        frame_data.width,
-                        frame_data.height,
-                        frame_data.format,
-                    ) {
-                        Ok(recorder) => {
-                            log::info!(
-                                "debug recording started in '{}'",
-                                context.log_session_dir.display()
-                            );
-                            context.debug_recorder = Some(recorder);
-                            if record_video {
-                                context.config.debug_recording_video = false;
-                                context.config.debug_recording_enabled =
-                                    context.config.debug_recording_csv;
-                                persist_config(context, "consume one-shot MKV recording");
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("debug recording failed to start: {e}");
-                        }
-                    }
-                }
-            }
-
-            if let Some(ref mut recorder) = context.debug_recorder {
-                recorder.record_video_frame(&frame_data);
-            }
-
-            let battle_state = scanner::detect_battle_state_with_ui_scaler(
-                &frame_data.data,
-                frame_data.width,
-                frame_data.height,
-                frame_data.format,
-                context.engine.ui_scaler(),
-            );
-            if cursor_blocks_cost_bar(context, battle_state) {
-                let worker_timing = WorkerTimingSnapshot {
-                    sample_index: context.sample_index,
-                };
-                log::trace!(
-                    "worker frame {} skipped: self-drawn cursor overlaps cost ROI (battle_state={})",
-                    context.sample_index,
-                    battle_state.as_str()
-                );
-                publish_cursor_blocked(state, context);
-                state.update_timing(worker_timing);
-                return;
-            }
-
-            match context.engine.analyze_captured_frame(&frame_data) {
-                Ok(result) => {
-                    // Debug recording: write analysis row after the video frame has already been queued.
-                    if let Some(ref mut recorder) = context.debug_recorder {
-                        recorder.record_analysis_row(&result, capture_dur_us);
-                    }
-
-                    let worker_timing = WorkerTimingSnapshot {
-                        sample_index: context.sample_index,
-                    };
-                    log::trace!(
-                        "worker frame {} => battle_state={}, logical_frame={:?}, total={}, raw_width={:?}, elapsed={}, negative={}",
-                        context.sample_index,
-                        result.battle_state.as_str(),
-                        result.logical_frame,
-                        result.total_frames_in_cycle,
-                        result.raw_pixel_width,
-                        result.elapsed_frames,
-                        result.cost_is_negative
-                    );
-                    context.last_total_frames = result.total_frames_in_cycle;
-                    context.last_cost_is_negative = result.cost_is_negative;
-                    if result.battle_state == BattleState::BattleBegin {
-                        if context.last_elapsed_frames != result.elapsed_frames {
-                            context
-                                .timer_reset_undo
-                                .remember_reset(context.last_elapsed_frames);
-                            // Animate the auto-reset only when the previous
-                            // timer was actually running; a reset from zero
-                            // (e.g. entering a stage fresh) stays silent.
-                            if context.last_elapsed_frames != 0 {
-                                context.reset_pulse =
-                                    context.reset_pulse.wrapping_add(1);
-                                context.reset_kind = ResetKind::Auto;
-                            }
-                        }
-                        context.last_elapsed_frames = result.elapsed_frames;
-                        context.lap_start_frame = None;
-                    } else if result.logical_frame.is_some() {
-                        context.last_elapsed_frames = result.elapsed_frames;
-                    }
-                    let display_frame = context.display_mode.display_frame(result.logical_frame);
-                    let display_total = if result.total_frames_in_cycle > 0 {
-                        display_total_with_cost_marker(
-                            context.display_mode,
-                            result.total_frames_in_cycle,
-                            result.cost_is_negative,
-                        )
-                    } else {
-                        "/--".to_string()
-                    };
-                    let lap_frames = context
-                        .lap_start_frame
-                        .map(|start| context.last_elapsed_frames - start);
-                    let active_profile = context.active_profile.clone();
-                    let active_basename = active_profile.as_deref().map(calibration_basename);
-                    let reset_pulse = context.reset_pulse;
-                    let reset_kind = context.reset_kind;
-                    state.update_ui(|ui, api| {
-                        ui.mode = OverlayMode::Running;
-                        ui.message.clear();
-                        ui.display_mode = context.display_mode;
-                        ui.display_frame = display_frame;
-                        ui.display_total = display_total;
-                        ui.time_str = format_time_from_frames(context.last_elapsed_frames);
-                        ui.lap_frames = lap_frames;
-                        ui.can_undo_reset = timer_reset_undo_enabled(context);
-                        ui.cursor_blocked = false;
-                        ui.total_frames_in_cycle = result.total_frames_in_cycle;
-                        ui.reset_pulse = reset_pulse;
-                        ui.reset_kind = reset_kind;
-                        ui.active_profile = active_profile.clone();
-                        ui.profiles = context.profiles.list(active_profile.as_deref());
-                        api.is_running = result.logical_frame.is_some();
-                        api.current_frame = result.logical_frame;
-                        api.total_frames_in_cycle = if result.logical_frame.is_some() {
-                            result.total_frames_in_cycle
-                        } else {
-                            0
-                        };
-                        api.total_elapsed_frames = context.last_elapsed_frames;
-                        api.active_profile = active_basename.clone();
-                    });
-                    state.update_timing(worker_timing);
-                }
-                Err(error) => publish_error(state, context, format!("analyze error: {error}")),
-            }
-        }
-        Err(error) => publish_error(state, context, format!("capture error: {error}")),
-    }
 }
 
 fn publish_current_state(state: &SharedAppState, context: &WorkerContext) {
@@ -1054,84 +787,16 @@ fn publish_current_state(state: &SharedAppState, context: &WorkerContext) {
     }
 }
 
-#[cfg(windows)]
-fn cursor_blocks_cost_bar(context: &mut WorkerContext, battle_state: BattleState) -> bool {
-    let window_info = context.engine.window_info();
-    let roi = context.engine.roi();
-    context
-        .cursor_guard
-        .as_mut()
-        .map(|guard| guard.should_pause_for_frame(window_info, roi, battle_state))
-        .unwrap_or(false)
-}
-
-#[cfg(not(windows))]
-fn cursor_blocks_cost_bar(_: &mut WorkerContext, _: BattleState) -> bool {
-    false
-}
-
 fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame: Option<i32>) {
     let active_profile = context.active_profile.clone();
-    let total_frames = context.last_total_frames.max(0);
-    let lap_frames = context
-        .lap_start_frame
-        .map(|start| context.last_elapsed_frames - start);
-    let reset_pulse = context.reset_pulse;
-    let reset_kind = context.reset_kind;
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Running;
         ui.message.clear();
         ui.progress_percent = 0.0;
         ui.display_mode = context.display_mode;
-        ui.display_frame = context.display_mode.display_frame(frame);
-        ui.display_total = if total_frames > 0 {
-            display_total_with_cost_marker(
-                context.display_mode,
-                total_frames,
-                context.last_cost_is_negative,
-            )
-        } else {
-            "/--".to_string()
-        };
-        ui.time_str = format_time_from_frames(context.last_elapsed_frames);
-        ui.lap_frames = lap_frames;
-        ui.can_undo_reset = timer_reset_undo_enabled(context);
+        ui.active_profile = active_profile.clone();
+        ui.profiles = context.profiles.list(active_profile.as_deref());
         ui.cursor_blocked = false;
-        ui.total_frames_in_cycle = total_frames;
-        ui.reset_pulse = reset_pulse;
-        ui.reset_kind = reset_kind;
-        ui.active_profile = active_profile.clone();
-        ui.profiles = context.profiles.list(active_profile.as_deref());
-        api.is_running = frame.is_some();
-        api.current_frame = frame;
-        api.total_frames_in_cycle = if frame.is_some() { total_frames } else { 0 };
-        api.total_elapsed_frames = context.last_elapsed_frames;
-        api.active_profile = active_profile.as_deref().map(calibration_basename);
-    });
-}
-
-fn publish_cursor_blocked(state: &SharedAppState, context: &WorkerContext) {
-    let active_profile = context.active_profile.clone();
-    let lap_frames = context
-        .lap_start_frame
-        .map(|start| context.last_elapsed_frames - start);
-    state.update_ui(|ui, api| {
-        ui.mode = OverlayMode::Running;
-        ui.message.clear();
-        ui.progress_percent = 0.0;
-        ui.cursor_blocked = true;
-        ui.time_str = format_time_from_frames(context.last_elapsed_frames);
-        ui.lap_frames = lap_frames;
-        ui.can_undo_reset = timer_reset_undo_enabled(context);
-        ui.active_profile = active_profile.clone();
-        ui.profiles = context.profiles.list(active_profile.as_deref());
-        // Do not publish an analysed frame for the occluded capture. Keep the
-        // HUD's last frame/total strings intact, but make the API report the
-        // current frame as unavailable for this sample.
-        api.is_running = false;
-        api.current_frame = None;
-        api.total_frames_in_cycle = 0;
-        api.total_elapsed_frames = context.last_elapsed_frames;
         api.active_profile = active_profile.as_deref().map(calibration_basename);
     });
 }
@@ -1166,7 +831,6 @@ fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String)
         ui.message = error;
         ui.progress_percent = 0.0;
         ui.active_profile = context.active_profile.clone();
-        ui.can_undo_reset = timer_reset_undo_enabled(context);
         ui.cursor_blocked = false;
         ui.profiles = context.profiles.list(context.active_profile.as_deref());
         api.is_running = false;
@@ -1188,29 +852,6 @@ fn persist_config(context: &WorkerContext, reason: &str) {
             error
         ),
     }
-}
-
-fn set_timer_elapsed(context: &mut WorkerContext, elapsed_frames: i32) {
-    context
-        .engine
-        .adjust_timer(elapsed_frames - context.last_elapsed_frames);
-    context.last_elapsed_frames = elapsed_frames;
-}
-
-fn timer_reset_undo_enabled(context: &WorkerContext) -> bool {
-    context.active_profile.is_some() && context.timer_reset_undo.is_available()
-}
-
-fn display_total_with_cost_marker(
-    display_mode: FrameDisplayMode,
-    total_frames: i32,
-    cost_is_negative: bool,
-) -> String {
-    let mut display_total = display_mode.display_total(total_frames);
-    if cost_is_negative {
-        display_total.push('*');
-    }
-    display_total
 }
 
 fn wait_for_exit_commands(
@@ -1239,73 +880,5 @@ fn sleep_until(deadline: Instant, running: &AtomicBool) {
             break;
         }
         thread::sleep((deadline - now).min(Duration::from_millis(1)));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CalibrationProgress, TimerResetUndo};
-
-    fn assert_near(actual: f32, expected: f32) {
-        assert!(
-            (actual - expected).abs() < 0.001,
-            "expected {expected}, got {actual}"
-        );
-    }
-
-    #[test]
-    fn timer_reset_undo_remembers_nonzero_elapsed_once() {
-        let mut undo = TimerResetUndo::default();
-
-        undo.remember_reset(42);
-
-        assert!(undo.is_available());
-        assert_eq!(undo.take(), Some(42));
-        assert!(!undo.is_available());
-        assert_eq!(undo.take(), None);
-    }
-
-    #[test]
-    fn timer_reset_undo_ignores_zero_elapsed() {
-        let mut undo = TimerResetUndo::default();
-
-        undo.remember_reset(0);
-
-        assert!(!undo.is_available());
-        assert_eq!(undo.take(), None);
-    }
-
-    #[test]
-    fn calibration_progress_counts_initial_remaining_bar_before_two_cycles() {
-        let mut progress = CalibrationProgress::new(100);
-
-        assert_near(progress.update(50, 0, false), 0.0);
-        assert_near(progress.update(75, 0, false), 10.0);
-        assert_near(progress.update(0, 0, true), 20.0);
-        assert_near(progress.update(50, 0, true), 40.0);
-        assert_near(progress.update(0, 1, true), 60.0);
-        assert_near(progress.update(50, 1, true), 80.0);
-        assert_near(progress.update(0, 2, true), 100.0);
-    }
-
-    #[test]
-    fn calibration_progress_starts_at_zero_when_already_empty() {
-        let mut progress = CalibrationProgress::new(100);
-
-        assert_near(progress.update(0, 0, false), 0.0);
-        assert_near(progress.update(50, 0, false), 16.666_668);
-        assert_near(progress.update(0, 0, true), 33.333_336);
-        assert_near(progress.update(0, 1, true), 66.666_67);
-        assert_near(progress.update(0, 2, true), 100.0);
-    }
-
-    #[test]
-    fn calibration_progress_does_not_go_backwards_on_width_jitter() {
-        let mut progress = CalibrationProgress::new(100);
-
-        assert_near(progress.update(50, 0, false), 0.0);
-        assert_near(progress.update(80, 0, false), 12.0);
-        assert_near(progress.update(70, 0, false), 12.0);
-        assert_near(progress.update(0, 0, true), 20.0);
     }
 }

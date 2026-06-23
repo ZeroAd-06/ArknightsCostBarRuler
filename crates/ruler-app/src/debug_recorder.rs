@@ -6,16 +6,27 @@
 //!
 //! Both outputs are written to `{session_dir}/capture.mkv` and
 //! `{session_dir}/analysis.csv` respectively.
+//!
+//! In the three-layer architecture, [`DebugRecorderConsumer`] wraps a
+//! pipeline `ConsumerPipe` (InOrder policy) + `DebugRecorder` and runs a
+//! dedicated thread that receives every captured frame from Layer 1 and
+//! records it. This decouples recording from the analysis layer (which uses
+//! SkipToLatest and may drop intermediate frames).
 
 use std::{
     fs,
     io::{BufWriter, Write},
     path::Path,
     process::{Child, Command, Stdio},
+    sync::Arc,
+    thread::{self, JoinHandle},
     time::Instant,
 };
 
-use ruler_core::{capture::CapturedFrame, engine::FrameResult, PixelFormat};
+use ruler_core::{
+    capture::CapturedFrame, engine::FrameResult, pipeline::frame::Frame as PipelineFrame,
+    PixelFormat,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers (shared with ruler-recorder)
@@ -285,6 +296,110 @@ impl DebugRecorder {
                 log::error!("debug recording: csv write error, stopping csv: {e}");
                 self.csv = None;
             }
+        }
+    }
+
+    /// Record a pipeline frame (Layer 1 `Frame`). Equivalent to
+    /// `record_video_frame` but accepts the pipeline's `Arc<Vec<u8>>`-backed
+    /// frame type instead of `CapturedFrame`.
+    pub fn record_pipeline_frame(&mut self, frame: &PipelineFrame) {
+        if let Some(ref mut pipe) = self.ffmpeg {
+            let mut buf = (*frame.data).clone();
+            flip_rows(&mut buf, self.width, self.height, self.bpp);
+            if let Err(e) = pipe.write_frame(&buf) {
+                log::error!("debug recording: ffmpeg write error, stopping video: {e}");
+                self.ffmpeg = None;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DebugRecorderConsumer — Layer 1 InOrder consumer that runs on its own thread
+// ---------------------------------------------------------------------------
+
+use ruler_core::pipeline::{ConsumerPipe, PipelineError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+
+/// Configuration for spawning a [`DebugRecorderConsumer`].
+pub struct DebugRecorderConfig {
+    pub output_dir: PathBuf,
+    pub record_video: bool,
+    pub record_csv: bool,
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+}
+
+/// A Layer 1 consumer that records every captured frame to video (and
+/// optionally CSV). Runs on its own thread; shutting down the pipeline or
+/// dropping this struct stops the thread.
+///
+/// Note: in the three-layer architecture, the analysis CSV records only the
+/// frames that the L2 analyzer actually processed (SkipToLatest may skip
+/// frames under load). The video recording, by contrast, captures every
+/// frame because this consumer uses InOrder policy.
+pub struct DebugRecorderConsumer {
+    running: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DebugRecorderConsumer {
+    /// Spawn the consumer thread. `pipe` must be an InOrder consumer
+    /// connected to the pipeline.
+    pub fn spawn(mut pipe: ConsumerPipe, config: DebugRecorderConfig) -> Result<Self, String> {
+        let recorder = DebugRecorder::start(
+            &config.output_dir,
+            config.record_video,
+            config.record_csv,
+            config.width,
+            config.height,
+            config.format,
+        )?;
+
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = Arc::clone(&running);
+
+        let handle = thread::Builder::new()
+            .name("ruler-debug-recorder".to_string())
+            .spawn(move || {
+                let mut recorder = recorder;
+                log::info!(
+                    "debug recorder consumer started: video={}, csv={}",
+                    config.record_video, config.record_csv
+                );
+                while running_clone.load(Ordering::Relaxed) {
+                    match pipe.recv_frame() {
+                        Ok(frame) => {
+                            recorder.record_pipeline_frame(&frame);
+                            if let Err(err) = pipe.ack(frame.id) {
+                                log::debug!("debug recorder: ack failed: {err}");
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            log::debug!("debug recorder: recv_frame failed: {err}");
+                            break;
+                        }
+                    }
+                }
+                log::info!("debug recorder consumer exiting");
+            })
+            .map_err(|e| format!("failed to spawn debug recorder thread: {e}"))?;
+
+        Ok(Self {
+            running,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for DebugRecorderConsumer {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
         }
     }
 }

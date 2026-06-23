@@ -68,8 +68,9 @@ mod platform {
                     ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
                     GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE,
                     SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY,
-                    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_TIMER,
-                    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+                    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+                    WM_NCCREATE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
+                    WS_VISIBLE,
                 },
             },
         },
@@ -90,6 +91,12 @@ mod platform {
     const PROBE_LOOP_PAUSE_MS: u64 = 250;
     const PROBE_RECONNECT_PAUSE_MS: u64 = 1000;
     const LATENCY_SAMPLE_WINDOW: usize = 12;
+    // Mouse-wheel scrolling for the target list. One wheel notch is
+    // `WHEEL_DELTA` (120) raw units; map each notch to `WHEEL_STEP_LOGICAL_PX`
+    // logical pixels of Flickable travel, mirroring Slint's own backends
+    // (~60 logical px per line) so the list scrolls at a familiar speed.
+    const WHEEL_DELTA_UNIT: f32 = 120.0;
+    const WHEEL_STEP_LOGICAL_PX: f32 = 60.0;
     // Fixed logical design size of `wizard.slint` (physical = logical * scale).
     const WIZARD_LOGICAL_W: f32 = 560.0;
     const WIZARD_LOGICAL_H: f32 = 404.0;
@@ -1220,6 +1227,10 @@ mod platform {
                 handle_mouse_move(hwnd, lparam);
                 LRESULT(0)
             }
+            WM_MOUSEWHEEL => {
+                handle_mouse_wheel(hwnd, wparam, lparam);
+                LRESULT(0)
+            }
             WM_LBUTTONDOWN => {
                 handle_left_down(hwnd, lparam);
                 LRESULT(0)
@@ -1305,6 +1316,35 @@ mod platform {
             .window
             .window()
             .try_dispatch_event(WindowEvent::PointerMoved { position });
+    }
+
+    unsafe fn handle_mouse_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+        let Some(state) = wizard_window_mut(hwnd) else {
+            return;
+        };
+        // WM_MOUSEWHEEL packs a signed notch delta in the high word of wParam,
+        // and — unlike WM_MOUSEMOVE — carries *screen* coordinates in lParam, so
+        // round-trip through ScreenToClient before applying the window scale.
+        let notches = (((wparam.0 >> 16) & 0xffff) as u16 as i16 as f32) / WHEEL_DELTA_UNIT;
+        let mut point = POINT {
+            x: (lparam.0 as u32 & 0xffff) as i16 as i32,
+            y: ((lparam.0 as u32 >> 16) & 0xffff) as i16 as i32,
+        };
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+        let position = slint::LogicalPosition::new(
+            point.x as f32 / state.scale,
+            point.y as f32 / state.scale,
+        );
+        // Positive delta_y moves the Flickable viewport toward the top, matching
+        // a forward (away-from-user) wheel roll — the usual list convention.
+        let _ = state
+            .window
+            .window()
+            .try_dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.0,
+                delta_y: notches * WHEEL_STEP_LOGICAL_PX,
+            });
     }
 
     unsafe fn handle_left_up(hwnd: HWND) {

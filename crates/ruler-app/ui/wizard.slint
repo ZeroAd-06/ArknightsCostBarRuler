@@ -196,63 +196,92 @@ export component Wizard inherits Window {
                     vertical-alignment: center;
                 }
 
-                VerticalLayout {
-                    padding: 3px;
-                    spacing: 1px;
-                    alignment: start;
-                    for row[idx] in root.rows: Rectangle {
-                        height: 38px;
-                        background: row.selected ? Palette.accent-dim
-                            : (rta.has-hover ? Palette.hover-fill : transparent);
-                        animate background { duration: 90ms; }
-                        rta := TouchArea {
-                            clicked => { root.select-target(idx); }
-                        }
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 8px;
-                            // selection dot
-                            Rectangle {
-                                width: 8px;
+                list-flick := Flickable {
+                    // Many emulator instances (MuMu / LDPlayer) plus Windows and
+                    // ADB targets can be discovered at once. The viewport height
+                    // tracks the rows' intrinsic height (fixed 38px rows), so the
+                    // list flicks/wheels instead of clipping the trailing entries.
+                    viewport-width: self.width;
+                    viewport-height: rows-col.preferred-height;
+                    rows-col := VerticalLayout {
+                        padding: 3px;
+                        spacing: 1px;
+                        alignment: start;
+                        for row[idx] in root.rows: Rectangle {
+                            height: 38px;
+                            background: row.selected ? Palette.accent-dim
+                                : (rta.has-hover ? Palette.hover-fill : transparent);
+                            animate background { duration: 90ms; }
+                            rta := TouchArea {
+                                clicked => { root.select-target(idx); }
+                            }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+                                // selection dot
                                 Rectangle {
-                                    width: 6px;
-                                    height: 6px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    border-radius: 3px;
-                                    background: row.selected ? Palette.accent : transparent;
+                                    width: 8px;
+                                    Rectangle {
+                                        width: 6px;
+                                        height: 6px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: 3px;
+                                        background: row.selected ? Palette.accent : transparent;
+                                    }
                                 }
-                            }
-                            // name + detail (two stacked lines)
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                alignment: center;
-                                spacing: 1px;
+                                // name + detail (two stacked lines)
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 1px;
+                                    Text {
+                                        text: row.name;
+                                        color: row.error ? Palette.danger : Palette.text-primary;
+                                        font-size: 13px;
+                                        font-weight: row.selected ? 700 : 500;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: row.detail;
+                                        color: Palette.text-faint;
+                                        font-size: 9px;
+                                        overflow: elide;
+                                    }
+                                }
+                                // latency badge
                                 Text {
-                                    text: row.name;
-                                    color: row.error ? Palette.danger : Palette.text-primary;
-                                    font-size: 13px;
-                                    font-weight: row.selected ? 700 : 500;
-                                    overflow: elide;
+                                    text: row.latency;
+                                    color: row.error ? Palette.danger : root.latency-color(row.latency-class);
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
                                 }
-                                Text {
-                                    text: row.detail;
-                                    color: Palette.text-faint;
-                                    font-size: 9px;
-                                    overflow: elide;
-                                }
-                            }
-                            // latency badge
-                            Text {
-                                text: row.latency;
-                                color: row.error ? Palette.danger : root.latency-color(row.latency-class);
-                                font-size: 11px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                                horizontal-alignment: right;
                             }
                         }
+                    }
+                }
+
+                // Scroll indicator: visible only when the rows overflow the
+                // viewport. Passive — the mouse wheel (WM_MOUSEWHEEL in
+                // config_wizard) and drag-pan do the actual scrolling.
+                if (list-flick.viewport-height > list-flick.height): Rectangle {
+                    x: parent.width - self.width - 2px;
+                    y: 2px;
+                    width: 3px;
+                    height: parent.height - 4px;
+                    background: #ffffff12;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width;
+                        border-radius: 1.5px;
+                        background: Palette.accent;
+                        opacity: 0.55;
+                        height: max(18px, parent.height * list-flick.height / list-flick.viewport-height);
+                        y: (parent.height - self.height)
+                            * (-list-flick.viewport-y / (list-flick.viewport-height - list-flick.height));
                     }
                 }
             }

@@ -5,12 +5,14 @@ pub(crate) mod android_settings;
 pub mod ldplayer;
 pub mod mumu;
 pub mod replay;
+#[cfg(windows)]
 pub mod windows;
 
 pub use adb::AdbController;
 pub use ldplayer::LDPlayerController;
 pub use mumu::MuMuController;
 pub use replay::ReplayCaptureBackend;
+#[cfg(windows)]
 pub use windows::WindowsController;
 
 pub struct CapturedFrame {
@@ -89,11 +91,21 @@ pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, 
                 config.device_id,
             )))
         }
-        CaptureType::Windows => Ok(Box::new(WindowsController::new(
-            config.window_handle,
-            config.window_title,
-            config.window_class,
-        ))),
+        CaptureType::Windows => {
+            #[cfg(windows)]
+            {
+                Ok(Box::new(WindowsController::new(
+                    config.window_handle,
+                    config.window_title,
+                    config.window_class,
+                )))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (config.window_handle, config.window_title, config.window_class);
+                Err("Windows capture is only available on Windows".to_string())
+            }
+        }
         CaptureType::Replay => {
             let hevc_path = config.replay_hevc_path.ok_or_else(|| {
                 "Replay capture requires replay_hevc_path (recorded video file path)".to_string()

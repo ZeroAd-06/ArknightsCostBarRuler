@@ -59,6 +59,7 @@ use std::ffi::c_void;
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -88,6 +89,8 @@ const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x0000_0008;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 
 const ERROR_PIPE_CONNECTED: u32 = 535;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_PIPE_BUSY: u32 = 231;
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -496,28 +499,51 @@ pub struct ConsumerPipe {
     policy: ConsumerPolicy,
 }
 
+/// Maximum time a consumer waits for the server's named pipe instance to
+/// become connectable. `CapturePipeline::start` creates the pipe instance on
+/// a separate accept thread *after* `start` returns, so an in-process consumer
+/// that connects immediately can race ahead of `CreateNamedPipeW`.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Polling interval while waiting for the pipe to appear / free up.
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(2);
+
 impl ConsumerPipe {
     /// Open a connection to the named pipe server. Sends the subscribe
     /// packet with the given policy and start cursor.
+    ///
+    /// Retries on `ERROR_FILE_NOT_FOUND` (the server's accept thread has not
+    /// created the pipe instance yet) and `ERROR_PIPE_BUSY` (all instances are
+    /// momentarily busy between connections) until [`CONNECT_TIMEOUT`]. Any
+    /// other failure returns immediately.
     pub fn connect(pipe_name: &str, policy: ConsumerPolicy, start_frame_id: FrameId) -> io::Result<Self> {
         let wide_name = wide(pipe_name);
-        let handle = unsafe {
-            CreateFileW(
-                wide_name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                std::ptr::null(),
-            )
-        };
-        if handle.is_invalid() || handle == INVALID_HANDLE_VALUE {
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let handle = loop {
+            let handle = unsafe {
+                CreateFileW(
+                    wide_name.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    std::ptr::null(),
+                )
+            };
+            if !handle.is_invalid() && handle != INVALID_HANDLE_VALUE {
+                break handle;
+            }
             let code = unsafe { GetLastError() };
+            if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PIPE_BUSY)
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(CONNECT_RETRY_INTERVAL);
+                continue;
+            }
             return Err(io::Error::other(format!(
                 "CreateFileW for pipe failed (GetLastError={code})"
             )));
-        }
+        };
 
         let mut pipe = unsafe { PipeHandle::from_raw(handle) };
         // Send subscribe packet.

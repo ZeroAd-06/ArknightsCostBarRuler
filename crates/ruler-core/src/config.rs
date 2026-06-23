@@ -129,6 +129,22 @@ impl RulerConfig {
             .clamp(0.0, 1.0)
     }
 
+    /// The UI scaler to apply to cost-bar geometry.
+    ///
+    /// `ui_scaler` mirrors the Arknights **PC client** `uiScaler` setting and
+    /// is meaningless for emulator/ADB capture, whose layout always matches the
+    /// 1920×1080 reference (scaler = 1.0). A stale PC value left in the config
+    /// must therefore be ignored for non-PC capture — otherwise it shifts the
+    /// cost-bar ROI off the actual bar. Returns the configured value only for
+    /// `window` (PC) capture, and `DEFAULT_UI_SCALER` for everything else.
+    pub fn resolved_ui_scaler(&self) -> f64 {
+        if self.capture_type == "window" {
+            self.effective_ui_scaler()
+        } else {
+            crate::analysis::roi::DEFAULT_UI_SCALER
+        }
+    }
+
     pub fn to_capture_config(&self) -> Result<CaptureConfig, RulerConfigError> {
         let capture_type = match self.capture_type.as_str() {
             "adb" | "minicap" => CaptureType::Adb,
@@ -251,6 +267,36 @@ mod tests {
         assert!(!saved.contains("debug_recording_output_dir"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolved_ui_scaler_is_pc_only() {
+        use crate::analysis::roi::DEFAULT_UI_SCALER;
+
+        // PC (window) capture honours the configured uiScaler, including 0.0.
+        let mut pc = minimal_config();
+        pc.capture_type = "window".to_string();
+        pc.ui_scaler = Some(0.0);
+        assert_eq!(pc.resolved_ui_scaler(), 0.0);
+
+        // Emulator/ADB/replay capture ignores a stale PC uiScaler and falls
+        // back to the reference layout (1.0).
+        for capture in ["mumu", "adb", "ldplayer", "replay"] {
+            let mut emu = minimal_config();
+            emu.capture_type = capture.to_string();
+            emu.ui_scaler = Some(0.0);
+            assert_eq!(
+                emu.resolved_ui_scaler(),
+                DEFAULT_UI_SCALER,
+                "capture_type={capture} must ignore the PC-only uiScaler"
+            );
+        }
+
+        // PC capture with no configured value falls back to the default.
+        let mut pc_default = minimal_config();
+        pc_default.capture_type = "window".to_string();
+        pc_default.ui_scaler = None;
+        assert_eq!(pc_default.resolved_ui_scaler(), DEFAULT_UI_SCALER);
     }
 
     fn minimal_config() -> RulerConfig {

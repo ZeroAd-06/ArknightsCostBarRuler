@@ -382,7 +382,10 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
             }
         }
     } else {
-        context.config.effective_ui_scaler()
+        // `ui_scaler` is a PC-only Arknights setting; emulator/ADB/replay
+        // capture always uses the reference layout (scaler = 1.0). Using a
+        // stale config value here would shift the cost-bar ROI off the bar.
+        ruler_core::analysis::roi::DEFAULT_UI_SCALER
     };
 
     // Start the Layer 1 capture pipeline.
@@ -703,14 +706,15 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         api.total_elapsed_frames = 0;
     });
 
-    // Connect a fresh InOrder consumer for calibration.
-    let cal_pipe = context
-        .pipeline
-        .as_ref()
-        .ok_or("pipeline missing")?
+    // Connect a fresh InOrder consumer for calibration, starting at the
+    // current latest frame. Frame 0 was released long ago by the janitor, and
+    // calibration only needs consecutive frames from "now" onward.
+    let pipeline = context.pipeline.as_ref().ok_or("pipeline missing")?;
+    let start_frame = pipeline.latest_frame_id();
+    let cal_pipe = pipeline
         .connect_consumer(
             ruler_core::pipeline::cursor::ConsumerPolicy::InOrder,
-            0,
+            start_frame,
         )
         .map_err(|e| format!("failed to connect calibration consumer: {e}"))?;
 
@@ -722,14 +726,14 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
     let roi = roi::find_cost_bar_roi_with_ui_scaler(
         info.width as i32,
         info.height as i32,
-        context.config.effective_ui_scaler(),
+        context.config.resolved_ui_scaler(),
     );
 
     let result = calibration::collect_calibration_samples(
         cal_pipe,
         state,
         roi,
-        context.config.effective_ui_scaler(),
+        context.config.resolved_ui_scaler(),
     );
 
     // Re-check the cancel flag right after collection.
@@ -748,7 +752,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         &cycle_samples,
         screen_width,
         screen_height,
-        context.config.effective_ui_scaler(),
+        context.config.resolved_ui_scaler(),
         total_bar_width,
         calibration_time,
     )?;

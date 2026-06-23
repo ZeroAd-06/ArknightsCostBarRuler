@@ -49,11 +49,28 @@ pub fn collect_calibration_samples(
     let screen_width = first_frame.width;
     let screen_height = first_frame.height;
 
+    log::info!(
+        "calibration: start collecting — roi=(x1={}, x2={}, y_mid={}) total_bar_width={} \
+         frame={}x{} format={:?} ui_scaler={:.3}",
+        roi.0,
+        roi.1,
+        roi.2,
+        total_bar_width,
+        screen_width,
+        screen_height,
+        first_frame.format,
+        ui_scaler,
+    );
+
     let mut cycle_samples: Vec<Vec<i32>> = Vec::new();
     let mut current_cycle_data: Vec<i32> = Vec::new();
     let mut previous_cost_state_raw: Option<i32> = None;
     let mut is_collecting_cycle = false;
     let mut progress = CalibrationProgress::new(total_bar_width);
+    let mut frames_seen: u64 = 0;
+    let mut some_count: u64 = 0;
+    let mut none_streak: u64 = 0;
+    let mut last_progress: f32 = 0.0;
 
     let mut frame = first_frame;
 
@@ -72,14 +89,31 @@ pub fn collect_calibration_samples(
             roi,
         );
 
+        frames_seen += 1;
+
         if let Some(current) = current_cost_state_raw {
+            some_count += 1;
+            none_streak = 0;
+
             if let Some(previous) = previous_cost_state_raw {
                 if (previous as f64) > total_bar_width as f64 * 0.9
                     && (current as f64) < total_bar_width as f64 * 0.1
                 {
                     is_collecting_cycle = true;
                     if !current_cycle_data.is_empty() {
+                        let n = current_cycle_data.len();
                         cycle_samples.push(std::mem::take(&mut current_cycle_data));
+                        log::info!(
+                            "calibration: captured cycle {}/{} ({} samples)",
+                            cycle_samples.len(),
+                            CALIBRATION_CYCLES,
+                            n,
+                        );
+                    } else {
+                        log::info!(
+                            "calibration: detected full->empty wrap (prev={previous}, cur={current}); \
+                             began collecting cycle data"
+                        );
                     }
                 }
             }
@@ -90,6 +124,7 @@ pub fn collect_calibration_samples(
 
             let progress_percent =
                 progress.update(current, cycle_samples.len(), is_collecting_cycle);
+            last_progress = progress_percent;
             state.update_ui(|ui, _| {
                 ui.mode = crate::ui_state::OverlayMode::Calibrating;
                 ui.progress_percent = progress_percent;
@@ -98,7 +133,36 @@ pub fn collect_calibration_samples(
             });
             previous_cost_state_raw = Some(current);
         } else {
+            none_streak += 1;
             previous_cost_state_raw = None;
+        }
+
+        // Diagnostic logging (throttled). The collection loop is otherwise
+        // silent, so these lines are the only window into *why* progress may be
+        // stuck: a bar that reads `None`/empty every frame points at a wrong
+        // ROI, a resolution/format mismatch, or simply not being in battle.
+        if frames_seen <= 5 || frames_seen % 30 == 0 {
+            match current_cost_state_raw {
+                Some(c) => log::debug!(
+                    "calibration: frame#{frames_seen} width={c}/{total_bar_width} \
+                     collecting={is_collecting_cycle} cycles={}/{} progress={last_progress:.1}% \
+                     (some={some_count})",
+                    cycle_samples.len(),
+                    CALIBRATION_CYCLES,
+                ),
+                None => log::debug!(
+                    "calibration: frame#{frames_seen} width=None (bar not detected) \
+                     none_streak={none_streak} (some={some_count})"
+                ),
+            }
+        }
+        if none_streak == 60 || (none_streak > 60 && none_streak % 120 == 0) {
+            log::warn!(
+                "calibration: cost bar not detected for {none_streak} consecutive frames — \
+                 check that you are in battle and that ROI/resolution match (roi x1={}, x2={})",
+                roi.0,
+                roi.1,
+            );
         }
 
         // Ack the frame we just processed.

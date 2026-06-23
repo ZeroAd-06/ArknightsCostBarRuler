@@ -295,4 +295,18 @@ impl FrameStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// The smallest frame id currently retained (in-memory or spilled), or
+    /// `None` if the store is empty. Frames form a contiguous range (release
+    /// removes a prefix), so this is the oldest frame a consumer can still be
+    /// served.
+    pub fn oldest_id(&self) -> Option<FrameId> {
+        self.inner
+            .lock()
+            .expect("frame store poisoned")
+            .slots
+            .keys()
+            .next()
+            .copied()
+    }
 }

@@ -332,6 +332,13 @@ impl CapturePipeline {
         &self.info.pipe_name
     }
 
+    /// The id of the most recently produced frame. Useful for connecting an
+    /// `InOrder` consumer that should start from "now" rather than from the
+    /// beginning of the (possibly long-since-released) stream.
+    pub fn latest_frame_id(&self) -> FrameId {
+        self.inner.latest_frame_id.load(Ordering::Acquire)
+    }
+
     /// Connect an in-process consumer with the given policy.
     ///
     /// For `SkipToLatest` consumers, `start_frame_id` is typically 0 (start
@@ -511,6 +518,24 @@ fn run_in_order_sender(
 
         let frame = match inner.store.get(next_id) {
             Ok(frame) => frame,
+            Err(StoreError::NotFound(_)) => {
+                // `next_id` was released before we could deliver it: the
+                // consumer started behind the store's retention window (e.g. a
+                // calibration consumer joining a long-running pipeline), or
+                // every consumer acked past it during a release cycle. Frames
+                // form a contiguous range, so a missing `next_id` is older than
+                // the oldest retained frame — skip forward to that frame rather
+                // than tearing down the connection with an error.
+                if let Some(oldest) = inner.store.oldest_id() {
+                    log::debug!(
+                        "capture pipeline: in-order frame {next_id} already released; \
+                         skipping forward to {oldest}"
+                    );
+                    cursor.record_ack(oldest.saturating_sub(1));
+                    cursor.mark_delivered(oldest);
+                }
+                continue;
+            }
             Err(err) => {
                 log::error!("capture pipeline: frame {next_id} unavailable: {err}");
                 let _ = pipe::write_error(pipe, &format!("frame {next_id} unavailable"));

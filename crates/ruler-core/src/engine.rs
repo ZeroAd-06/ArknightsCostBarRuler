@@ -16,8 +16,15 @@ pub struct FrameResult {
     pub battle_state: BattleState,
 }
 
-pub struct RulerEngine {
-    backend: Option<Box<dyn CaptureBackend>>,
+/// Layer 2 analyzer — holds calibration, ROI, and timing state. Does NOT
+/// own a capture backend; that responsibility belongs to Layer 1
+/// ([`crate::pipeline::CapturePipeline`]).
+///
+/// To preserve backward compatibility with callers that still want a single
+/// object that owns both capture and analysis (e.g. `ruler-pyo3`,
+/// `ruler-recorder`), the thin [`RulerEngine`] wrapper at the bottom of this
+/// file delegates to `Analyzer` + a `CaptureBackend`.
+pub struct Analyzer {
     calibration: Option<LoadedCalibration>,
     roi: Option<Roi>,
     ui_scaler: f64,
@@ -95,16 +102,15 @@ const NEGATIVE_COST_INTERVAL_MULTIPLIER: i32 = 2;
 /// loading/settlement stretches run into the dozens-to-hundreds.
 const PRE_BATTLE_BANNER_MIN_OUT_FRAMES: u32 = 30;
 
-impl Default for RulerEngine {
+impl Default for Analyzer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RulerEngine {
+impl Analyzer {
     pub fn new() -> Self {
         Self {
-            backend: None,
             calibration: None,
             roi: None,
             ui_scaler: roi::DEFAULT_UI_SCALER,
@@ -122,27 +128,6 @@ impl RulerEngine {
         }
     }
 
-    pub fn connect(&mut self, config: CaptureConfig) -> Result<(u32, u32), String> {
-        let mut backend = create_backend(config)?;
-        backend.connect()?;
-
-        let dims = backend.dimensions();
-        self.roi = Some(roi::find_cost_bar_roi_with_ui_scaler(
-            dims.0 as i32,
-            dims.1 as i32,
-            self.ui_scaler,
-        ));
-        self.backend = Some(backend);
-        log::info!(
-            "ruler-core connected: dimensions={}x{}, roi={:?}",
-            dims.0,
-            dims.1,
-            self.roi
-        );
-
-        Ok(dims)
-    }
-
     pub fn load_calibration<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
         log::info!("loading calibration from '{}'", path.as_ref().display());
         let loaded = LoadedCalibration::from_file(path.as_ref())?;
@@ -154,23 +139,6 @@ impl RulerEngine {
         let loaded = LoadedCalibration::from_json(json)?;
         self.set_loaded_calibration(loaded);
         Ok(())
-    }
-
-    pub fn capture_and_analyze(&mut self) -> Result<FrameResult, String> {
-        let frame_data = self.capture_frame()?;
-        self.analyze_captured_frame(&frame_data)
-    }
-
-    pub fn capture_frame(&mut self) -> Result<CapturedFrame, String> {
-        let mut backend = self
-            .backend
-            .take()
-            .ok_or_else(|| "Not connected".to_string())?;
-
-        let frame_data: CapturedFrame = backend.capture_frame()?;
-        self.backend = Some(backend);
-
-        Ok(frame_data)
     }
 
     pub fn analyze_captured_frame(
@@ -219,13 +187,9 @@ impl RulerEngine {
         self.roi
     }
 
-    pub fn window_info(&self) -> Option<WindowInfo> {
-        self.backend.as_ref().and_then(|backend| backend.window_info())
-    }
-
     pub fn status(&self) -> EngineStatus {
         EngineStatus {
-            connected: self.backend.is_some(),
+            connected: false,
             has_calibration: self.calibration.is_some(),
             roi_ready: self.roi.is_some(),
         }
@@ -254,13 +218,6 @@ impl RulerEngine {
                 self.previous_phase = None;
                 self.current_profile_index = index;
             }
-        }
-    }
-
-    pub fn disconnect(&mut self) {
-        log::info!("disconnecting ruler-core backend");
-        if let Some(mut backend) = self.backend.take() {
-            backend.disconnect();
         }
     }
 
@@ -752,6 +709,171 @@ fn rounded_frame_count(frames: f64) -> i32 {
     frames.round() as i32
 }
 
+// Analyzer has no Drop resources — it owns only plain data and Arcs.
+
+// ---------------------------------------------------------------------------
+// RulerEngine — backward-compat wrapper that owns a CaptureBackend + Analyzer.
+//
+// Existing callers (ruler-pyo3, ruler-recorder, ruler-app/worker before the
+// pipeline migration) continue to work unchanged. New pipeline-based code
+// should use Analyzer directly.
+// ---------------------------------------------------------------------------
+
+/// Backward-compatible wrapper that owns a capture backend and delegates
+/// analysis to an inner [`Analyzer`].
+///
+/// **Deprecation path**: callers should migrate to the three-layer
+/// architecture ([`crate::pipeline::CapturePipeline`] + [`Analyzer`]).
+/// This wrapper will be removed once all in-tree callers are migrated.
+pub struct RulerEngine {
+    backend: Option<Box<dyn CaptureBackend>>,
+    analyzer: Analyzer,
+}
+
+impl Default for RulerEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RulerEngine {
+    pub fn new() -> Self {
+        Self {
+            backend: None,
+            analyzer: Analyzer::new(),
+        }
+    }
+
+    /// Borrow the inner [`Analyzer`] for direct access to analysis-only
+    /// methods (used by callers migrating to the pipeline architecture).
+    pub fn analyzer(&self) -> &Analyzer {
+        &self.analyzer
+    }
+
+    /// Mutably borrow the inner [`Analyzer`].
+    pub fn analyzer_mut(&mut self) -> &mut Analyzer {
+        &mut self.analyzer
+    }
+
+    pub fn connect(&mut self, config: CaptureConfig) -> Result<(u32, u32), String> {
+        let mut backend = create_backend(config)?;
+        backend.connect()?;
+        let dims = backend.dimensions();
+        self.analyzer.set_roi(dims.0 as i32, dims.1 as i32);
+        self.backend = Some(backend);
+        log::info!(
+            "ruler-core connected: dimensions={}x{}, roi={:?}",
+            dims.0,
+            dims.1,
+            self.analyzer.roi
+        );
+        Ok(dims)
+    }
+
+    pub fn capture_frame(&mut self) -> Result<CapturedFrame, String> {
+        let mut backend = self
+            .backend
+            .take()
+            .ok_or_else(|| "Not connected".to_string())?;
+        let frame_data: CapturedFrame = backend.capture_frame()?;
+        self.backend = Some(backend);
+        Ok(frame_data)
+    }
+
+    pub fn capture_and_analyze(&mut self) -> Result<FrameResult, String> {
+        let frame_data = self.capture_frame()?;
+        self.analyzer.analyze_captured_frame(&frame_data)
+    }
+
+    pub fn analyze_captured_frame(
+        &mut self,
+        frame_data: &CapturedFrame,
+    ) -> Result<FrameResult, String> {
+        self.analyzer.analyze_captured_frame(frame_data)
+    }
+
+    pub fn analyze_raw_buffer(
+        &mut self,
+        buffer: &[u8],
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+    ) -> Result<FrameResult, String> {
+        self.analyzer.analyze_raw_buffer(buffer, width, height, format)
+    }
+
+    pub fn analyze_frame_with_battle_state(
+        &mut self,
+        buffer: &[u8],
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        battle_state: BattleState,
+    ) -> Result<FrameResult, String> {
+        self.analyzer
+            .analyze_frame_with_battle_state(buffer, width, height, format, battle_state)
+    }
+
+    pub fn load_calibration<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
+        self.analyzer.load_calibration(path)
+    }
+
+    pub fn load_calibration_json(&mut self, json: &str) -> Result<(), String> {
+        self.analyzer.load_calibration_json(json)
+    }
+
+    pub fn set_roi(&mut self, screen_width: i32, screen_height: i32) {
+        self.analyzer.set_roi(screen_width, screen_height);
+    }
+
+    pub fn set_roi_value(&mut self, roi: Roi) {
+        self.analyzer.set_roi_value(roi);
+    }
+
+    pub fn set_ui_scaler(&mut self, ui_scaler: f64) {
+        self.analyzer.set_ui_scaler(ui_scaler);
+    }
+
+    pub fn ui_scaler(&self) -> f64 {
+        self.analyzer.ui_scaler()
+    }
+
+    pub fn roi(&self) -> Option<Roi> {
+        self.analyzer.roi()
+    }
+
+    pub fn window_info(&self) -> Option<WindowInfo> {
+        self.backend.as_ref().and_then(|backend| backend.window_info())
+    }
+
+    pub fn status(&self) -> EngineStatus {
+        EngineStatus {
+            connected: self.backend.is_some(),
+            has_calibration: self.analyzer.calibration.is_some(),
+            roi_ready: self.analyzer.roi.is_some(),
+        }
+    }
+
+    pub fn reset_timer(&mut self) {
+        self.analyzer.reset_timer();
+    }
+
+    pub fn adjust_timer(&mut self, frames: i32) {
+        self.analyzer.adjust_timer(frames);
+    }
+
+    pub fn set_profile_index(&mut self, index: usize) {
+        self.analyzer.set_profile_index(index);
+    }
+
+    pub fn disconnect(&mut self) {
+        log::info!("disconnecting ruler-core backend");
+        if let Some(mut backend) = self.backend.take() {
+            backend.disconnect();
+        }
+    }
+}
+
 impl Drop for RulerEngine {
     fn drop(&mut self) {
         self.disconnect();
@@ -768,7 +890,7 @@ mod tests {
 
     #[test]
     fn analyze_raw_buffer_tracks_frames() {
-        let mut engine = RulerEngine::new();
+        let mut engine = Analyzer::new();
         engine
             .load_calibration_json(
                 r#"{
@@ -875,7 +997,7 @@ mod tests {
 
     #[test]
     fn negative_cost_interpolates_widths_missing_from_positive_profile() {
-        let mut engine = RulerEngine::new();
+        let mut engine = Analyzer::new();
         engine
             .load_calibration_json(
                 r#"{
@@ -1295,8 +1417,8 @@ mod tests {
         assert_eq!(boundary_cycle_index(&calibration_38_37, 0, 315), 8);
     }
 
-    fn engine_with_profiles(total_frames: &[i32]) -> RulerEngine {
-        let mut engine = RulerEngine::new();
+    fn engine_with_profiles(total_frames: &[i32]) -> Analyzer {
+        let mut engine = Analyzer::new();
         engine
             .load_calibration_json(&calibration_json(total_frames))
             .unwrap();
@@ -1323,8 +1445,8 @@ mod tests {
         total_frames: &[i32],
         total_bar_width: i32,
         boundary_switch_frame: i32,
-    ) -> RulerEngine {
-        let mut engine = RulerEngine::new();
+    ) -> Analyzer {
+        let mut engine = Analyzer::new();
         engine
             .load_calibration_json(&open_interior_calibration_json(
                 total_frames,
@@ -1362,7 +1484,7 @@ mod tests {
         )
     }
 
-    fn advance_to_open_boundary_cycle(engine: &mut RulerEngine) -> FrameResult {
+    fn advance_to_open_boundary_cycle(engine: &mut Analyzer) -> FrameResult {
         let mut result = analyze_width(engine, 0, false);
         for _ in 0..10 {
             analyze_width(engine, 29, false);
@@ -1372,7 +1494,7 @@ mod tests {
     }
 
     fn analyze_width(
-        engine: &mut RulerEngine,
+        engine: &mut Analyzer,
         raw_width: i32,
         cost_is_negative: bool,
     ) -> FrameResult {
@@ -1385,7 +1507,7 @@ mod tests {
     }
 
     fn analyze_width_with_state(
-        engine: &mut RulerEngine,
+        engine: &mut Analyzer,
         raw_width: i32,
         cost_is_negative: bool,
         battle_state: BattleState,

@@ -223,6 +223,7 @@ mod platform {
     use sysinfo::System;
     use windows::Win32::{
         Foundation::{BOOL, HWND, LPARAM},
+        Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, CP_ACP},
         UI::WindowsAndMessaging::{
             EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
             GetWindowThreadProcessId, IsWindowVisible,
@@ -997,7 +998,7 @@ mod platform {
     fn ldplayer_instances_for_install(install_path: &Path) -> Vec<LDPlayerInstance> {
         let dnconsole = install_path.join("dnconsole.exe");
         let Ok(output) =
-            run_command_text(&dnconsole.to_string_lossy(), &["list2"], COMMAND_TIMEOUT)
+            run_dnconsole_text(&dnconsole.to_string_lossy(), &["list2"], COMMAND_TIMEOUT)
         else {
             return Vec::new();
         };
@@ -1239,7 +1240,7 @@ mod platform {
     fn ldplayer_instance_for_pid(install_path: &Path, pid: u32) -> Option<u32> {
         let dnconsole = install_path.join("dnconsole.exe");
         let output =
-            run_command_text(&dnconsole.to_string_lossy(), &["list2"], COMMAND_TIMEOUT).ok()?;
+            run_dnconsole_text(&dnconsole.to_string_lossy(), &["list2"], COMMAND_TIMEOUT).ok()?;
         parse_ldplayer_instance_for_pid(&output, pid)
     }
 
@@ -1533,23 +1534,38 @@ mod platform {
         log::trace!("target discovery command: {} {}", program, args.join(" "));
         let mut command = Command::new(program);
         configure_hidden_command(&mut command);
-        run_command_text_impl(&mut command, program, args, timeout)
+        let bytes = run_command_capture(&mut command, program, args, timeout)?;
+        Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
 
     /// Same as `run_command_text` but uses the resolved adb executable
     /// (PATH or emulator-bundled) instead of a literal `"adb"` lookup.
+    /// adb/MuMu output is UTF-8, so decode as such.
     fn run_adb_text(args: &[&str], timeout: Duration) -> Result<String, String> {
         log::trace!("target discovery adb command: adb {}", args.join(" "));
         let mut command = adb_command()?;
-        run_command_text_impl(&mut command, "adb", args, timeout)
+        let bytes = run_command_capture(&mut command, "adb", args, timeout)?;
+        Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
 
-    fn run_command_text_impl(
+    /// Run `dnconsole.exe` and decode its output as the system ANSI code page
+    /// (GBK / CP 936 on zh_CN). `dnconsole list2` writes GBK bytes, so a naive
+    /// UTF-8 decode turns Chinese instance names into replacement characters.
+    /// MuMu's `MuMuManager.exe` output is UTF-8 and must stay on `run_command_text`.
+    fn run_dnconsole_text(program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+        log::trace!("target discovery dnconsole command: {} {}", program, args.join(" "));
+        let mut command = Command::new(program);
+        configure_hidden_command(&mut command);
+        let bytes = run_command_capture(&mut command, program, args, timeout)?;
+        Ok(decode_ansi(&bytes).trim().to_string())
+    }
+
+    fn run_command_capture(
         command: &mut Command,
         program: &str,
         args: &[&str],
         timeout: Duration,
-    ) -> Result<String, String> {
+    ) -> Result<Vec<u8>, String> {
         let mut child = command
             .args(args)
             .stdin(Stdio::null())
@@ -1579,7 +1595,43 @@ mod platform {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(output.stdout)
+    }
+
+    /// Decode bytes from the system ANSI code page (CP_ACP, e.g. GBK/936 on
+    /// zh_CN hosts) into a Rust `String` via `MultiByteToWideChar` → UTF-16 →
+    /// UTF-8. Empty input yields an empty string.
+    fn decode_ansi(bytes: &[u8]) -> String {
+        if bytes.is_empty() {
+            return String::new();
+        }
+        // First call with a null output buffer returns the required wide-char
+        // count (cbMultiByte is taken from the input slice length, no NUL).
+        let wide_len = unsafe {
+            MultiByteToWideChar(
+                CP_ACP,
+                MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+                bytes,
+                None,
+            )
+        };
+        if wide_len <= 0 {
+            // Fall back to a lossy UTF-8 decode so callers still get *something*.
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; wide_len as usize];
+        let written = unsafe {
+            MultiByteToWideChar(
+                CP_ACP,
+                MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+                bytes,
+                Some(&mut wide),
+            )
+        };
+        if written <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        String::from_utf16_lossy(&wide[..written as usize])
     }
 
     fn configure_hidden_command(command: &mut Command) {
@@ -1661,6 +1713,19 @@ mod platform {
             assert_eq!(instances[0].player_pid, 7456);
             assert_eq!(instances[0].vbox_pid, 3500);
             assert_eq!(instances[1].index, 1);
+        }
+
+        #[test]
+        fn decodes_gbk_dnconsole_bytes_as_chinese() {
+            // "雷电模拟器" encoded in GBK (code page 936), as `dnconsole list2`
+            // would emit on a zh_CN host. A naive UTF-8 decode yields mojibake.
+            let gbk = b"\xc0\xd7\xb5\xe7\xc4\xa3\xc4\xe2\xc6\xf7";
+            assert_eq!(decode_ansi(gbk), "雷电模拟器");
+        }
+
+        #[test]
+        fn decodes_ansi_empty_input() {
+            assert_eq!(decode_ansi(b""), "");
         }
 
         #[test]

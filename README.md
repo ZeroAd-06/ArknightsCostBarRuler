@@ -132,12 +132,12 @@ cargo run --release -p ruler-app
 
 ## 本地 API
 
-运行中的尺子会在 `127.0.0.1:2606` 上对外提供数据:
+运行中的尺子会在 `127.0.0.1:2606` 上对外提供本地 JSON API:
 
-- **WebSocket** (`ws://127.0.0.1:2606/`): 状态变化时主动推送 JSON。
+- **WebSocket** (`ws://127.0.0.1:2606/`): 状态变化时主动推送兼容旧客户端的顶层快照，也可以接收 `getSnapshot`、`getFrame`、校准、配置、计时器、显示模式、悬浮窗和退出等控制命令。
 - **HTTP 快照** (`http://127.0.0.1:2606/`): 一次性 `GET` 拿到当前状态的 JSON，适合不想常驻连接的场景。
 
-两者返回的字段一致 (`isRunning` / `currentFrame` / `totalFramesInCycle` / `totalElapsedFrames` / `activeProfile`)。其中 `totalFramesInCycle` 在新校准的边界周期可能是基础周期 `N+1`。完整说明见 **[API.md](docs/API.md)**。
+> 完整字段、命令和 fallback 规则见 **[API.md](docs/API.md)**。
 
 > 之前 Python 版自带的打轴 / 对轴器之后会挪到单独的仓库去，但它就是基于这个 API 工作的;你也可以照着 API 文档写自己的联动工具。
 

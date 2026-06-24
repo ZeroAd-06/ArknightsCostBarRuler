@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fmt,
     path::PathBuf,
     sync::{
@@ -16,7 +17,7 @@ use crate::{
     commands::UiCommand,
     profiles::ProfileStore,
     resources::ResourceLocator,
-    ui_state::{ApiStateSnapshot, UiSnapshot},
+    ui_state::{ApiFrameLookup, ApiFrameRecord, ApiHistoryBounds, ApiStateSnapshot, UiSnapshot},
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -41,6 +42,7 @@ pub struct AppStateSnapshot {
 #[derive(Default)]
 pub struct SharedAppState {
     inner: Mutex<AppStateSnapshot>,
+    api_history: Mutex<VecDeque<ApiFrameRecord>>,
     overlay_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     // One-shot flag set by the UI to abort an in-flight calibration loop.
     // The worker polls it inside `collect_calibration_samples` and bails out.
@@ -62,6 +64,60 @@ impl SharedAppState {
             .lock()
             .expect("shared app state poisoned")
             .clone()
+    }
+
+    #[must_use]
+    pub fn api_history_bounds(&self) -> ApiHistoryBounds {
+        let history = self.api_history.lock().expect("shared app state poisoned");
+        ApiHistoryBounds {
+            oldest_frame_id: history.front().map(|record| record.frame_id),
+            latest_frame_id: history.back().map(|record| record.frame_id),
+        }
+    }
+
+    pub fn record_api_frame(&self, record: ApiFrameRecord) {
+        let mut history = self.api_history.lock().expect("shared app state poisoned");
+        history.push_back(record);
+    }
+
+    pub fn clear_api_frame_history(&self) {
+        let mut history = self.api_history.lock().expect("shared app state poisoned");
+        history.clear();
+    }
+
+    #[must_use]
+    pub fn api_frame_at_or_before(&self, requested_frame_id: u64) -> ApiFrameLookup {
+        let history = self.api_history.lock().expect("shared app state poisoned");
+        let Some(record) = history
+            .iter()
+            .rev()
+            .find(|record| record.frame_id <= requested_frame_id)
+            .cloned()
+        else {
+            return ApiFrameLookup::NotRetained { requested_frame_id };
+        };
+
+        let fell_back = record.frame_id != requested_frame_id;
+        let fallback_reason = if fell_back {
+            let latest_frame_id = history.back().map(|latest| latest.frame_id);
+            Some(
+                if latest_frame_id.is_some_and(|latest| requested_frame_id > latest) {
+                    "requested_after_latest"
+                } else {
+                    "frame_skipped"
+                }
+                .to_string(),
+            )
+        } else {
+            None
+        };
+
+        ApiFrameLookup::Found {
+            requested_frame_id,
+            record,
+            fell_back,
+            fallback_reason,
+        }
     }
 
     pub fn update_startup_status(&self, startup: &StartupStatus) {
@@ -271,9 +327,7 @@ use std::sync::mpsc::Sender;
 
 use ruler_core::{
     analysis::roi,
-    pipeline::{
-        ConsumerPipe, PipelineConfig, PipelineError, PipelineInfo,
-    },
+    pipeline::{PipelineConfig, PipelineInfo},
     CapturePipeline,
 };
 
@@ -394,8 +448,9 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         .to_capture_config()
         .map_err(|e| e.to_string())?;
     let spill_dir = context.log_session_dir.join("frame_spill");
-    let pipeline_config = PipelineConfig::new(capture_config, spill_dir, context.session_id.clone());
-    let (mut pipeline, info) = CapturePipeline::start(pipeline_config).map_err(|e| e.to_string())?;
+    let pipeline_config =
+        PipelineConfig::new(capture_config, spill_dir, context.session_id.clone());
+    let (pipeline, info) = CapturePipeline::start(pipeline_config).map_err(|e| e.to_string())?;
     log::info!(
         "capture pipeline started: {}x{}, pipe={}",
         info.width,
@@ -458,10 +513,7 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         if record_video || record_csv {
             let _ = std::fs::create_dir_all(&context.log_session_dir);
             let recorder_pipe = pipeline
-                .connect_consumer(
-                    ruler_core::pipeline::cursor::ConsumerPolicy::InOrder,
-                    0,
-                )
+                .connect_consumer(ruler_core::pipeline::cursor::ConsumerPolicy::InOrder, 0)
                 .map_err(|e| format!("failed to connect debug recorder consumer: {e}"))?;
             let recorder_config = DebugRecorderConfig {
                 output_dir: context.log_session_dir.clone(),
@@ -494,7 +546,7 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
     context.analyzer = Some(analyzer);
 
     if context.active_profile.is_some() {
-        publish_running_state(&state, context, None);
+        publish_running_state(&state, context);
     } else {
         publish_idle(&state, context);
     }
@@ -530,10 +582,14 @@ fn handle_command(
     match command {
         UiCommand::PrepareCalibration => {
             log::info!("worker command: prepare calibration");
+            state.clear_api_frame_history();
             context.active_profile = None;
             context.config.active_calibration_profile = None;
             send_analyzer(context, AnalyzerCommand::ClearCalibration);
-            send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: false });
+            send_analyzer(
+                context,
+                AnalyzerCommand::SetCalibrating { calibrating: false },
+            );
             persist_config(context, "prepare calibration");
             state.update_ui(|ui, api| {
                 ui.mode = OverlayMode::PreCalibration;
@@ -547,12 +603,13 @@ fn handle_command(
                 api.is_running = false;
                 api.current_frame = None;
                 api.active_profile = None;
+                api.clear_frame_metadata();
             });
         }
         UiCommand::StartCalibration => {
             log::info!("worker command: start calibration");
             match run_calibration(state, context) {
-                Ok(()) => publish_running_state(state, context, None),
+                Ok(()) => publish_running_state(state, context),
                 Err(ref error) if error == calibration::CALIBRATION_CANCELLED => {
                     log::info!("calibration cancelled by user, returning to PreCalibration");
                     let _ = state.take_cancel_calibration();
@@ -571,6 +628,7 @@ fn handle_command(
                         api.current_frame = None;
                         api.total_frames_in_cycle = 0;
                         api.total_elapsed_frames = 0;
+                        api.clear_frame_metadata();
                     });
                 }
                 Err(error) => publish_error(state, context, format!("calibration failed: {error}")),
@@ -581,11 +639,12 @@ fn handle_command(
             let cal_path = context.profiles.calibration_path(&filename);
             match std::fs::metadata(&cal_path) {
                 Ok(_) => {
+                    state.clear_api_frame_history();
                     context.active_profile = Some(filename.clone());
                     context.config.active_calibration_profile = Some(filename);
                     send_analyzer(context, AnalyzerCommand::LoadCalibration { path: cal_path });
                     persist_config(context, "select profile");
-                    publish_running_state(state, context, None);
+                    publish_running_state(state, context);
                 }
                 Err(e) => publish_error(state, context, format!("failed to load profile: {e}")),
             }
@@ -615,6 +674,7 @@ fn handle_command(
                 }
             }
             if context.active_profile.as_deref() == Some(filename.as_str()) {
+                state.clear_api_frame_history();
                 context.active_profile = None;
                 context.config.active_calibration_profile = None;
                 send_analyzer(context, AnalyzerCommand::ClearCalibration);
@@ -639,6 +699,7 @@ fn handle_command(
         }
         UiCommand::ResetTimer => {
             log::info!("worker command: reset timer");
+            state.clear_api_frame_history();
             send_analyzer(context, AnalyzerCommand::ResetTimer);
         }
         UiCommand::UndoResetTimer => {
@@ -681,13 +742,17 @@ fn send_analyzer(context: &WorkerContext, cmd: AnalyzerCommand) {
 
 fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Result<(), String> {
     let _ = state.take_cancel_calibration();
+    state.clear_api_frame_history();
 
     if context.pipeline.is_none() {
         return Err("capture pipeline is not running".to_string());
     }
 
     // Tell the analyzer to pause publishing during calibration.
-    send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: true });
+    send_analyzer(
+        context,
+        AnalyzerCommand::SetCalibrating { calibrating: true },
+    );
     send_analyzer(context, AnalyzerCommand::ResetTimer);
 
     state.update_ui(|ui, api| {
@@ -704,6 +769,7 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
         api.current_frame = None;
         api.total_frames_in_cycle = 0;
         api.total_elapsed_frames = 0;
+        api.clear_frame_metadata();
     });
 
     // Connect a fresh InOrder consumer for calibration, starting at the
@@ -738,7 +804,10 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
 
     // Re-check the cancel flag right after collection.
     if state.take_cancel_calibration() {
-        send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: false });
+        send_analyzer(
+            context,
+            AnalyzerCommand::SetCalibrating { calibrating: false },
+        );
         return Err(calibration::CALIBRATION_CANCELLED.to_string());
     }
 
@@ -766,7 +835,10 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
     let cal_path = context.profiles.calibration_path(&filename);
     send_analyzer(context, AnalyzerCommand::LoadCalibration { path: cal_path });
     send_analyzer(context, AnalyzerCommand::ResetTimer);
-    send_analyzer(context, AnalyzerCommand::SetCalibrating { calibrating: false });
+    send_analyzer(
+        context,
+        AnalyzerCommand::SetCalibrating { calibrating: false },
+    );
 
     context.active_profile = Some(filename.clone());
     context.config.active_calibration_profile = Some(filename);
@@ -783,13 +855,13 @@ fn run_calibration(state: &SharedAppState, context: &mut WorkerContext) -> Resul
 
 fn publish_current_state(state: &SharedAppState, context: &WorkerContext) {
     if context.active_profile.is_some() {
-        publish_running_state(state, context, None);
+        publish_running_state(state, context);
     } else {
         publish_idle(state, context);
     }
 }
 
-fn publish_running_state(state: &SharedAppState, context: &WorkerContext, frame: Option<i32>) {
+fn publish_running_state(state: &SharedAppState, context: &WorkerContext) {
     let active_profile = context.active_profile.clone();
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Running;
@@ -823,6 +895,7 @@ fn publish_idle(state: &SharedAppState, context: &WorkerContext) {
         api.total_frames_in_cycle = 0;
         api.total_elapsed_frames = 0;
         api.active_profile = None;
+        api.clear_frame_metadata();
     });
 }
 
@@ -837,6 +910,7 @@ fn publish_error(state: &SharedAppState, context: &WorkerContext, error: String)
         ui.profiles = context.profiles.list(context.active_profile.as_deref());
         api.is_running = false;
         api.current_frame = None;
+        api.clear_frame_metadata();
     });
 }
 

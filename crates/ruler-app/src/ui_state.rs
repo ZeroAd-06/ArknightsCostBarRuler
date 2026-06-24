@@ -37,6 +37,16 @@ impl FrameDisplayMode {
     }
 
     #[must_use]
+    pub fn from_api(value: &str) -> Option<Self> {
+        match value {
+            "0_to_n-1" => Some(Self::ZeroToNMinusOne),
+            "0_to_n" => Some(Self::ZeroToN),
+            "1_to_n" => Some(Self::OneToN),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn display_total(self, total_frames: i32) -> String {
         match self {
             Self::ZeroToNMinusOne => format!("/{}", (total_frames - 1).max(0)),
@@ -86,6 +96,95 @@ pub struct ApiStateSnapshot {
     pub total_frames_in_cycle: i32,
     pub total_elapsed_frames: i32,
     pub active_profile: Option<String>,
+    pub frame_id: Option<u64>,
+    pub sample_index: u64,
+    pub dropped_since_previous: u64,
+    pub raw_pixel_width: Option<i32>,
+    pub cost_is_negative: bool,
+    pub battle_state: Option<String>,
+    pub capture_width: Option<u32>,
+    pub capture_height: Option<u32>,
+    pub capture_format: Option<String>,
+    pub capture_timestamp_ns: Option<u64>,
+    pub capture_duration_us: Option<u64>,
+}
+
+impl ApiStateSnapshot {
+    pub fn clear_frame_metadata(&mut self) {
+        self.frame_id = None;
+        self.sample_index = 0;
+        self.dropped_since_previous = 0;
+        self.raw_pixel_width = None;
+        self.cost_is_negative = false;
+        self.battle_state = None;
+        self.capture_width = None;
+        self.capture_height = None;
+        self.capture_format = None;
+        self.capture_timestamp_ns = None;
+        self.capture_duration_us = None;
+    }
+
+    pub fn update_from_frame_record(&mut self, record: &ApiFrameRecord) {
+        self.is_running = record.is_running;
+        self.current_frame = record.current_frame;
+        self.total_frames_in_cycle = if record.is_running {
+            record.total_frames_in_cycle
+        } else {
+            0
+        };
+        self.total_elapsed_frames = record.total_elapsed_frames;
+        self.active_profile = record.active_profile.clone();
+        self.frame_id = Some(record.frame_id);
+        self.sample_index = record.sample_index;
+        self.dropped_since_previous = record.dropped_since_previous;
+        self.raw_pixel_width = record.raw_pixel_width;
+        self.cost_is_negative = record.cost_is_negative;
+        self.battle_state = Some(record.battle_state.clone());
+        self.capture_width = Some(record.capture_width);
+        self.capture_height = Some(record.capture_height);
+        self.capture_format = Some(record.capture_format.clone());
+        self.capture_timestamp_ns = Some(record.capture_timestamp_ns);
+        self.capture_duration_us = Some(record.capture_duration_us);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ApiHistoryBounds {
+    pub oldest_frame_id: Option<u64>,
+    pub latest_frame_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApiFrameRecord {
+    pub frame_id: u64,
+    pub sample_index: u64,
+    pub dropped_since_previous: u64,
+    pub is_running: bool,
+    pub current_frame: Option<i32>,
+    pub total_frames_in_cycle: i32,
+    pub total_elapsed_frames: i32,
+    pub active_profile: Option<String>,
+    pub raw_pixel_width: Option<i32>,
+    pub cost_is_negative: bool,
+    pub battle_state: String,
+    pub capture_width: u32,
+    pub capture_height: u32,
+    pub capture_format: String,
+    pub capture_timestamp_ns: u64,
+    pub capture_duration_us: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApiFrameLookup {
+    Found {
+        requested_frame_id: u64,
+        record: ApiFrameRecord,
+        fell_back: bool,
+        fallback_reason: Option<String>,
+    },
+    NotRetained {
+        requested_frame_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

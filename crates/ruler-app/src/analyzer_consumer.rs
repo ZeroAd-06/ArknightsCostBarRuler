@@ -23,7 +23,10 @@ use ruler_core::{
 
 use crate::{
     debug_recorder::DebugRecorder,
-    ui_state::{format_time_from_frames, ApiStateSnapshot, FrameDisplayMode, OverlayMode, ResetKind, UiSnapshot},
+    ui_state::{
+        format_time_from_frames, ApiFrameRecord, ApiStateSnapshot, FrameDisplayMode, OverlayMode,
+        ResetKind,
+    },
     worker::{SharedAppState, WorkerTimingSnapshot},
 };
 
@@ -92,7 +95,10 @@ impl AnalyzerConsumer {
 
         let mut analyzer = Analyzer::new();
         analyzer.set_ui_scaler(config.ui_scaler);
-        analyzer.set_roi(config.pipeline_info.width as i32, config.pipeline_info.height as i32);
+        analyzer.set_roi(
+            config.pipeline_info.width as i32,
+            config.pipeline_info.height as i32,
+        );
         if let Some(path) = &config.calibration_path {
             if let Err(err) = analyzer.load_calibration(path) {
                 log::warn!("analyzer consumer: failed to load initial calibration: {err}");
@@ -108,6 +114,7 @@ impl AnalyzerConsumer {
             last_elapsed_frames: 0,
             last_total_frames: 0,
             last_cost_is_negative: false,
+            last_recorded_frame_id: None,
             lap_start_frame: None,
             reset_pulse: 0,
             reset_kind: ResetKind::Manual,
@@ -115,7 +122,6 @@ impl AnalyzerConsumer {
             debug_recorder,
             pipeline_info: config.pipeline_info,
             calibrating: false,
-            active_profile: None,
         };
 
         let handle = thread::Builder::new()
@@ -132,6 +138,7 @@ impl AnalyzerConsumer {
                                 }
                                 ctx.last_elapsed_frames = 0;
                                 ctx.last_cost_is_negative = false;
+                                ctx.last_recorded_frame_id = None;
                                 ctx.timer_reset_undo.clear();
                                 ctx.lap_start_frame = None;
                             }
@@ -144,6 +151,7 @@ impl AnalyzerConsumer {
                                 ctx.analyzer.reset_timer();
                                 ctx.last_elapsed_frames = 0;
                                 ctx.last_cost_is_negative = false;
+                                ctx.last_recorded_frame_id = None;
                                 ctx.timer_reset_undo.clear();
                                 ctx.lap_start_frame = None;
                             }
@@ -156,6 +164,7 @@ impl AnalyzerConsumer {
                                 ctx.analyzer.reset_timer();
                                 ctx.lap_start_frame = None;
                                 ctx.last_elapsed_frames = 0;
+                                ctx.last_recorded_frame_id = None;
                             }
                             AnalyzerCommand::UndoResetTimer => {
                                 if let Some(elapsed) = ctx.timer_reset_undo.take() {
@@ -186,6 +195,9 @@ impl AnalyzerConsumer {
                             }
                             AnalyzerCommand::SetCalibrating { calibrating } => {
                                 ctx.calibrating = calibrating;
+                                if calibrating {
+                                    ctx.last_recorded_frame_id = None;
+                                }
                             }
                             AnalyzerCommand::Shutdown => {
                                 running_clone.store(false, Ordering::Relaxed);
@@ -246,6 +258,7 @@ struct AnalyzerContext {
     last_elapsed_frames: i32,
     last_total_frames: i32,
     last_cost_is_negative: bool,
+    last_recorded_frame_id: Option<u64>,
     lap_start_frame: Option<i32>,
     reset_pulse: u32,
     reset_kind: ResetKind,
@@ -253,7 +266,6 @@ struct AnalyzerContext {
     debug_recorder: Option<DebugRecorder>,
     pipeline_info: PipelineInfo,
     calibrating: bool,
-    active_profile: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -300,8 +312,13 @@ fn analyze_and_publish(state: &SharedAppState, ctx: &mut AnalyzerContext, frame:
     // Cursor guard check (Windows-only, uses pipeline_info.window_info).
     #[cfg(windows)]
     {
-        if cursor_blocks_cost_bar(&ctx.pipeline_info, &mut ctx.cursor_guard, ctx.analyzer.roi(), battle_state) {
-            publish_cursor_blocked(state, ctx);
+        if cursor_blocks_cost_bar(
+            &ctx.pipeline_info,
+            &mut ctx.cursor_guard,
+            ctx.analyzer.roi(),
+            battle_state,
+        ) {
+            publish_cursor_blocked(state, ctx, frame, battle_state);
             state.update_timing(WorkerTimingSnapshot {
                 sample_index: ctx.sample_index,
             });
@@ -333,6 +350,13 @@ fn analyze_and_publish(state: &SharedAppState, ctx: &mut AnalyzerContext, frame:
                 result.elapsed_frames
             );
 
+            let auto_reset = result.battle_state == BattleState::BattleBegin
+                && ctx.last_elapsed_frames != result.elapsed_frames;
+            if auto_reset {
+                state.clear_api_frame_history();
+                ctx.last_recorded_frame_id = None;
+            }
+
             ctx.last_total_frames = result.total_frames_in_cycle;
             ctx.last_cost_is_negative = result.cost_is_negative;
             if result.battle_state == BattleState::BattleBegin {
@@ -349,13 +373,16 @@ fn analyze_and_publish(state: &SharedAppState, ctx: &mut AnalyzerContext, frame:
                 ctx.last_elapsed_frames = result.elapsed_frames;
             }
 
-            publish_running(state, ctx, &result);
+            let record = api_frame_record(state, ctx, frame, &result);
+            publish_running(state, ctx, &record);
+            state.record_api_frame(record);
+            ctx.last_recorded_frame_id = Some(frame.id);
             state.update_timing(WorkerTimingSnapshot {
                 sample_index: ctx.sample_index,
             });
         }
         Err(err) => {
-            publish_error(state, ctx, format!("analyze error: {err}"));
+            publish_error(state, format!("analyze error: {err}"));
         }
     }
 }
@@ -376,17 +403,13 @@ fn cursor_blocks_cost_bar(
     guard.should_pause_for_frame(pipeline_info.window_info, roi, battle_state)
 }
 
-fn publish_running(
-    state: &SharedAppState,
-    ctx: &AnalyzerContext,
-    result: &ruler_core::engine::FrameResult,
-) {
-    let display_frame = ctx.display_mode.display_frame(result.logical_frame);
-    let display_total = if result.total_frames_in_cycle > 0 {
+fn publish_running(state: &SharedAppState, ctx: &AnalyzerContext, record: &ApiFrameRecord) {
+    let display_frame = ctx.display_mode.display_frame(record.current_frame);
+    let display_total = if record.total_frames_in_cycle > 0 {
         display_total_with_cost_marker(
             ctx.display_mode,
-            result.total_frames_in_cycle,
-            result.cost_is_negative,
+            record.total_frames_in_cycle,
+            record.cost_is_negative,
         )
     } else {
         "/--".to_string()
@@ -407,24 +430,23 @@ fn publish_running(
         ui.lap_frames = lap_frames;
         ui.can_undo_reset = can_undo_reset;
         ui.cursor_blocked = false;
-        ui.total_frames_in_cycle = result.total_frames_in_cycle;
+        ui.total_frames_in_cycle = record.total_frames_in_cycle;
         ui.reset_pulse = reset_pulse;
         ui.reset_kind = reset_kind;
-        api.is_running = result.logical_frame.is_some();
-        api.current_frame = result.logical_frame;
-        api.total_frames_in_cycle = if result.logical_frame.is_some() {
-            result.total_frames_in_cycle
-        } else {
-            0
-        };
-        api.total_elapsed_frames = ctx.last_elapsed_frames;
+        api.update_from_frame_record(record);
     });
 }
 
-fn publish_cursor_blocked(state: &SharedAppState, ctx: &AnalyzerContext) {
+fn publish_cursor_blocked(
+    state: &SharedAppState,
+    ctx: &AnalyzerContext,
+    frame: &PipelineFrame,
+    battle_state: BattleState,
+) {
     let lap_frames = ctx
         .lap_start_frame
         .map(|start| ctx.last_elapsed_frames - start);
+    let dropped_since_previous = dropped_since_previous(ctx.last_recorded_frame_id, frame.id);
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Running;
         ui.message.clear();
@@ -436,10 +458,60 @@ fn publish_cursor_blocked(state: &SharedAppState, ctx: &AnalyzerContext) {
         api.current_frame = None;
         api.total_frames_in_cycle = 0;
         api.total_elapsed_frames = ctx.last_elapsed_frames;
+        api.frame_id = Some(frame.id);
+        api.sample_index = ctx.sample_index;
+        api.dropped_since_previous = dropped_since_previous;
+        api.raw_pixel_width = None;
+        api.cost_is_negative = false;
+        api.battle_state = Some(battle_state.as_str().to_string());
+        api.capture_width = Some(frame.width);
+        api.capture_height = Some(frame.height);
+        api.capture_format = Some(pixel_format_name(frame.format).to_string());
+        api.capture_timestamp_ns = Some(frame.capture_timestamp_ns);
+        api.capture_duration_us = Some(frame.capture_duration_us);
     });
 }
 
-fn publish_error(state: &SharedAppState, ctx: &AnalyzerContext, error: String) {
+fn api_frame_record(
+    state: &SharedAppState,
+    ctx: &AnalyzerContext,
+    frame: &PipelineFrame,
+    result: &ruler_core::engine::FrameResult,
+) -> ApiFrameRecord {
+    ApiFrameRecord {
+        frame_id: frame.id,
+        sample_index: ctx.sample_index,
+        dropped_since_previous: dropped_since_previous(ctx.last_recorded_frame_id, frame.id),
+        is_running: result.logical_frame.is_some(),
+        current_frame: result.logical_frame,
+        total_frames_in_cycle: result.total_frames_in_cycle,
+        total_elapsed_frames: ctx.last_elapsed_frames,
+        active_profile: state.snapshot().api.active_profile,
+        raw_pixel_width: result.raw_pixel_width,
+        cost_is_negative: result.cost_is_negative,
+        battle_state: result.battle_state.as_str().to_string(),
+        capture_width: frame.width,
+        capture_height: frame.height,
+        capture_format: pixel_format_name(frame.format).to_string(),
+        capture_timestamp_ns: frame.capture_timestamp_ns,
+        capture_duration_us: frame.capture_duration_us,
+    }
+}
+
+fn dropped_since_previous(previous_frame_id: Option<u64>, frame_id: u64) -> u64 {
+    previous_frame_id.map_or(0, |previous| {
+        frame_id.saturating_sub(previous.saturating_add(1))
+    })
+}
+
+fn pixel_format_name(format: PixelFormat) -> &'static str {
+    match format {
+        PixelFormat::Rgba => "rgba",
+        PixelFormat::Bgr => "bgr",
+    }
+}
+
+fn publish_error(state: &SharedAppState, error: String) {
     log::error!("{error}");
     state.update_ui(|ui, api| {
         ui.mode = OverlayMode::Error;

@@ -70,7 +70,7 @@ impl RulerApp {
             Arc::clone(&icons),
             placement,
         );
-        let api = ApiRuntime::new(Arc::clone(&state));
+        let api = ApiRuntime::new(Arc::clone(&state), command_tx.clone());
         let worker = WorkerRuntime::spawn_from_startup(
             Arc::clone(&state),
             startup_status,

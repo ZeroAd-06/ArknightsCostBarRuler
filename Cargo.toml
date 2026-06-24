@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/ruler-core",
-    "crates/ruler-pyo3",
     "crates/ruler-app",
     "crates/ruler-recorder",
 ]

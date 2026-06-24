@@ -50,7 +50,7 @@ pub struct CaptureConfig {
     pub window_handle: Option<isize>,
     pub window_title: Option<String>,
     pub window_class: Option<String>,
-    pub replay_hevc_path: Option<String>,
+    pub replay_video_path: Option<String>,
     pub replay_fps: Option<f64>,
 }
 
@@ -109,12 +109,12 @@ pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, 
             }
         }
         CaptureType::Replay => {
-            let hevc_path = config.replay_hevc_path.ok_or_else(|| {
-                "Replay capture requires replay_hevc_path (recorded video file path)".to_string()
+            let video_path = config.replay_video_path.ok_or_else(|| {
+                "Replay capture requires replay_video_path (recorded video file path)".to_string()
             })?;
             let fps = config.replay_fps.unwrap_or(60.0);
             Ok(Box::new(ReplayCaptureBackend::new(
-                &hevc_path,
+                &video_path,
                 fps,
                 0,
                 0,

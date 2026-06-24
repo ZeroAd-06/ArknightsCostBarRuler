@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ruler_core::analysis::calibration::CalibrationData;
+use ruler_core::analysis::calibration::{CalibrationData, LoadedCalibration};
 use serde_json::Value;
 
 use crate::{resources::ResourceLocator, ui_state::ProfileMenuItem};
@@ -37,6 +37,11 @@ impl ProfileStore {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            // Skip files that fail to load (unversioned / unsupported format) so
+            // they never appear in the UI profile list.
+            if LoadedCalibration::from_file(&path).is_err() {
                 continue;
             }
             let Some(filename) = path

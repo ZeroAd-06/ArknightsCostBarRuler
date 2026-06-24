@@ -13,8 +13,7 @@ ArknightsCostBarRuler/
 ├── crates/
 │   ├── ruler-app/        # HUD overlay, tray, config wizard, worker, API server
 │   ├── ruler-core/       # shared capture, analysis, pipeline, config, fixtures
-│   ├── ruler-recorder/   # ffmpeg-backed recorder + ruler-verifier CLI
-│   └── ruler-pyo3/       # Python bridge to ruler-core
+│   └── ruler-recorder/   # ffmpeg-backed recorder + ruler-verifier CLI
 ├── docs/                 # architecture, API, boundary-cycle writeups
 ├── calibration/          # persisted calibration profiles
 ├── recordings/           # captured videos and offline replay inputs
@@ -57,7 +56,7 @@ ArknightsCostBarRuler/
 - 不要只靠“调大容差”修费用条识别；如果仓库里已有录制/CSV/分析文档，先让模型解释这些证据。
 - 不要把调试入口藏成 `--debug` 专属功能；`--debug` 的职责是强制开向导并默认展开调试区，不是唯一入口。
 - 不要让 HUD、托盘或 API 直接碰 capture backend / analyzer；它们应该继续只消费 `SharedAppState`。
-- 不要在 app、core、pyo3 各自复制一套 capture 选择逻辑；统一从 `RulerConfig` / `CaptureConfig` 走。
+- 不要在 app、core 各自复制一套 capture 选择逻辑；统一从 `RulerConfig` / `CaptureConfig` 走。
 - 不要改协议、校准语义或边界周期语义却不更新对应文档、验证器或测试面。
 
 ## UNIQUE STYLES

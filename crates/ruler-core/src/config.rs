@@ -66,16 +66,14 @@ pub struct RulerConfig {
     /// Output root directory for logs and debug artifacts.
     /// Relative paths are resolved under the app's configured data root;
     /// defaults to "log" when not set.
-    #[serde(default, alias = "debug_recording_output_dir")]
+    #[serde(default)]
     pub log_output_dir: Option<String>,
 
     // -- Replay (virtual capture from a recorded video file) ---------------
     /// Path to a pre-recorded video file for replay (type: "replay").
-    ///
-    /// The field name remains `replay_hevc_path` for backward compatibility,
-    /// but ffmpeg-supported container video files are accepted as well.
+    /// Any ffmpeg-supported container video file is accepted.
     #[serde(default)]
-    pub replay_hevc_path: Option<String>,
+    pub replay_video_path: Option<String>,
 
     /// Fallback playback frame rate for replay when the input file does not
     /// expose usable per-frame timestamps (default 60).
@@ -163,7 +161,7 @@ impl RulerConfig {
             window_handle: self.window_handle,
             window_title: self.window_title.clone(),
             window_class: self.window_class.clone(),
-            replay_hevc_path: self.replay_hevc_path.clone(),
+            replay_video_path: self.replay_video_path.clone(),
             replay_fps: self.replay_fps,
         })
     }
@@ -227,28 +225,6 @@ mod tests {
         assert!(path.is_file());
         let loaded = RulerConfig::load_from_path(&path).unwrap();
         assert_eq!(loaded.capture_type, "replay");
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn legacy_debug_recording_output_dir_alias_still_loads() {
-        let root = unique_temp_dir("ruler_config_alias");
-        let path = root.join("config.json");
-        fs::create_dir_all(&root).unwrap();
-        fs::write(
-            &path,
-            r#"{
-  "type": "replay",
-  "debug_recording_output_dir": "recordings",
-  "trace_logging_enabled": true
-}"#,
-        )
-        .unwrap();
-
-        let loaded = RulerConfig::load_from_path(&path).unwrap();
-        assert_eq!(loaded.log_output_dir.as_deref(), Some("recordings"));
-        assert!(loaded.trace_logging_enabled);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -322,7 +298,7 @@ mod tests {
             debug_recording_csv: false,
             trace_logging_enabled: false,
             log_output_dir: None,
-            replay_hevc_path: None,
+            replay_video_path: None,
             replay_fps: None,
         }
     }

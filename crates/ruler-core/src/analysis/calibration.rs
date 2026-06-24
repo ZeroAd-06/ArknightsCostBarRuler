@@ -1,5 +1,4 @@
-/// Calibration data loading from JSON files.
-/// Compatible with both old single-profile and new multi-profile formats.
+/// Calibration data loading from JSON files (versioned multi-profile format).
 use crate::analysis::mapping::CalibrationTable;
 use crate::analysis::roi::{find_cost_bar_roi_with_ui_scaler, DEFAULT_UI_SCALER};
 use crate::analysis::synthesis::{synthesize_profiles, MIN_DETECTABLE_WIDTH};
@@ -13,10 +12,15 @@ const MIN_RELIABLE_WIDTHS_FOR_INFERENCE: usize = 4;
 const INFERENCE_DENOMINATORS: &[i32] = &[1, 2, 11];
 pub const TIMING_MODEL_OPEN_INTERIOR_V1: &str = "open_interior_v1";
 pub const DEFAULT_BOUNDARY_SWITCH_FRAME: i32 = 315;
+/// Current on-disk calibration schema version. Files without a matching
+/// `format_version` are rejected (and silently dropped from the UI list).
+pub const CALIBRATION_FORMAT_VERSION: u32 = 2;
 
-/// New multi-profile format
+/// Versioned multi-profile calibration format.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CalibrationData {
+    #[serde(default)]
+    pub format_version: u32,
     #[serde(default)]
     pub detection_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,21 +46,6 @@ pub struct ProfileData {
     pub pixel_map: HashMap<String, i32>,
 }
 
-/// Old single-profile format (for backward compatibility)
-#[derive(Deserialize)]
-struct OldCalibrationFormat {
-    pixel_map: HashMap<String, i32>,
-    total_frames: i32,
-    #[serde(default)]
-    screen_width: Option<u32>,
-    #[serde(default)]
-    screen_height: Option<u32>,
-    #[serde(default)]
-    ui_scaler: Option<f64>,
-    #[serde(default)]
-    calibration_time: Option<f64>,
-}
-
 pub struct LoadedCalibration {
     pub data: CalibrationData,
     /// Pre-compiled calibration tables for fast binary search
@@ -66,7 +55,6 @@ pub struct LoadedCalibration {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalibrationTimingModel {
-    LegacyDirect,
     OpenInteriorV1 {
         total_bar_width: i32,
         boundary_switch_frame: i32,
@@ -75,78 +63,26 @@ pub enum CalibrationTimingModel {
 
 impl LoadedCalibration {
     /// Load calibration data from a JSON file.
-    /// Supports both old single-profile and new multi-profile formats.
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read calibration file: {e}"))?;
-
-        let data: CalibrationData =
-            if let Ok(new_format) = serde_json::from_str::<CalibrationData>(&content) {
-                if !new_format.profiles.is_empty() {
-                    new_format
-                } else {
-                    return Err("Calibration file has empty profiles array".to_string());
-                }
-            } else if let Ok(old_format) = serde_json::from_str::<OldCalibrationFormat>(&content) {
-                CalibrationData {
-                    detection_mode: Some("single".to_string()),
-                    timing_model: None,
-                    total_bar_width: None,
-                    boundary_switch_frame: None,
-                    profiles: vec![ProfileData {
-                        total_frames: old_format.total_frames,
-                        pixel_map: old_format.pixel_map,
-                    }],
-                    screen_width: old_format.screen_width,
-                    screen_height: old_format.screen_height,
-                    ui_scaler: old_format.ui_scaler,
-                    calibration_time: old_format.calibration_time,
-                }
-            } else {
-                return Err("Calibration file format unrecognized".to_string());
-            };
-
-        let timing_model = compile_timing_model(&data)?;
-        let tables: Vec<CalibrationTable> = data
-            .profiles
-            .iter()
-            .map(|p| CalibrationTable::from_pixel_map(&p.pixel_map, p.total_frames))
-            .collect();
-
-        Ok(LoadedCalibration {
-            data,
-            tables,
-            timing_model,
-        })
+        Self::from_json(&content)
     }
 
-    /// Load from a JSON string.
+    /// Load and compile calibration from a JSON string.
     pub fn from_json(json_str: &str) -> Result<Self, String> {
-        let data: CalibrationData =
-            if let Ok(new_format) = serde_json::from_str::<CalibrationData>(json_str) {
-                if !new_format.profiles.is_empty() {
-                    new_format
-                } else {
-                    return Err("Calibration JSON has empty profiles array".to_string());
-                }
-            } else if let Ok(old_format) = serde_json::from_str::<OldCalibrationFormat>(json_str) {
-                CalibrationData {
-                    detection_mode: Some("single".to_string()),
-                    timing_model: None,
-                    total_bar_width: None,
-                    boundary_switch_frame: None,
-                    profiles: vec![ProfileData {
-                        total_frames: old_format.total_frames,
-                        pixel_map: old_format.pixel_map,
-                    }],
-                    screen_width: old_format.screen_width,
-                    screen_height: old_format.screen_height,
-                    ui_scaler: old_format.ui_scaler,
-                    calibration_time: old_format.calibration_time,
-                }
-            } else {
-                return Err("Calibration JSON format unrecognized".to_string());
-            };
+        let data: CalibrationData = serde_json::from_str(json_str)
+            .map_err(|e| format!("Calibration JSON parse error: {e}"))?;
+
+        if data.format_version != CALIBRATION_FORMAT_VERSION {
+            return Err(format!(
+                "Unsupported calibration format_version {} (expected {CALIBRATION_FORMAT_VERSION})",
+                data.format_version
+            ));
+        }
+        if data.profiles.is_empty() {
+            return Err("Calibration has empty profiles array".to_string());
+        }
 
         let timing_model = compile_timing_model(&data)?;
         let tables: Vec<CalibrationTable> = data
@@ -165,7 +101,6 @@ impl LoadedCalibration {
 
 fn compile_timing_model(data: &CalibrationData) -> Result<CalibrationTimingModel, String> {
     match data.timing_model.as_deref() {
-        None => Ok(CalibrationTimingModel::LegacyDirect),
         Some(TIMING_MODEL_OPEN_INTERIOR_V1) => {
             let total_bar_width = data.total_bar_width.ok_or_else(|| {
                 "open_interior_v1 calibration requires total_bar_width".to_string()
@@ -181,6 +116,7 @@ fn compile_timing_model(data: &CalibrationData) -> Result<CalibrationTimingModel
                     .max(0),
             })
         }
+        None => Err("calibration requires a timing_model".to_string()),
         Some(other) => Err(format!("Unsupported calibration timing_model: {other}")),
     }
 }
@@ -252,6 +188,7 @@ pub fn infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
     profiles.rotate_left(profile_offset % profile_count);
 
     Ok(CalibrationData {
+        format_version: CALIBRATION_FORMAT_VERSION,
         detection_mode: Some(if profiles.len() > 1 {
             "alternating".to_string()
         } else {
@@ -446,9 +383,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_format() {
+    fn test_versioned_format_loads() {
         let json = r#"{
+            "format_version": 2,
             "detection_mode": "single",
+            "timing_model": "open_interior_v1",
+            "total_bar_width": 20,
             "profiles": [{
                 "total_frames": 30,
                 "pixel_map": {"0": 0, "5": 1, "10": 2, "15": 3}
@@ -460,24 +400,45 @@ mod tests {
         assert_eq!(loaded.tables.len(), 1);
         assert_eq!(loaded.tables[0].lookup(10), Some(2));
         assert_eq!(loaded.data.screen_width, Some(1920));
-        assert_eq!(loaded.timing_model, CalibrationTimingModel::LegacyDirect);
+        assert!(matches!(
+            loaded.timing_model,
+            CalibrationTimingModel::OpenInteriorV1 { .. }
+        ));
     }
 
     #[test]
-    fn test_old_format() {
+    fn old_flat_format_is_rejected() {
+        // Pre-v2 single-profile flat format no longer loads.
         let json = r#"{
             "total_frames": 30,
             "pixel_map": {"0": 0, "5": 1, "10": 2}
         }"#;
-        let loaded = LoadedCalibration::from_json(json).unwrap();
-        assert_eq!(loaded.tables.len(), 1);
-        assert_eq!(loaded.data.detection_mode, Some("single".to_string()));
-        assert_eq!(loaded.timing_model, CalibrationTimingModel::LegacyDirect);
+        assert!(LoadedCalibration::from_json(json).is_err());
+    }
+
+    #[test]
+    fn missing_format_version_is_rejected() {
+        let json = r#"{
+            "timing_model": "open_interior_v1",
+            "total_bar_width": 180,
+            "profiles": [{"total_frames": 30, "pixel_map": {"0": 0, "6": 1}}]
+        }"#;
+        assert!(LoadedCalibration::from_json(json).is_err());
+    }
+
+    #[test]
+    fn missing_timing_model_is_rejected() {
+        let json = r#"{
+            "format_version": 2,
+            "profiles": [{"total_frames": 30, "pixel_map": {"0": 0, "6": 1}}]
+        }"#;
+        assert!(LoadedCalibration::from_json(json).is_err());
     }
 
     #[test]
     fn test_open_interior_format() {
         let json = r#"{
+            "format_version": 2,
             "timing_model": "open_interior_v1",
             "total_bar_width": 180,
             "boundary_switch_frame": 312,
@@ -500,6 +461,7 @@ mod tests {
     #[test]
     fn open_interior_requires_total_bar_width() {
         let json = r#"{
+            "format_version": 2,
             "timing_model": "open_interior_v1",
             "profiles": [{
                 "total_frames": 30,
@@ -512,7 +474,10 @@ mod tests {
     #[test]
     fn test_multi_profile() {
         let json = r#"{
+            "format_version": 2,
             "detection_mode": "alternating",
+            "timing_model": "open_interior_v1",
+            "total_bar_width": 20,
             "profiles": [
                 {"total_frames": 30, "pixel_map": {"0": 0, "10": 1}},
                 {"total_frames": 37, "pixel_map": {"0": 0, "15": 1}}

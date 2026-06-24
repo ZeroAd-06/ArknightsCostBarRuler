@@ -13,7 +13,7 @@
 | 离线视频回放 | `replay.rs` | 调试和验证的重要复现面 |
 
 ## CONVENTIONS
-- 新增或调整后端选项时，先保持 `CaptureConfig` 为唯一共享配置入口，再扩散到 app / recorder / pyo3。
+- 新增或调整后端选项时，先保持 `CaptureConfig` 为唯一共享配置入口，再扩散到 app / recorder。
 - replay 后端必须尽量复用真实分析链路；它是排查 timing / scaler / startup 问题的常规工具，不是一次性 hack。
 - `#[cfg(windows)]` 只能包平台实现，不要把非 Windows 编译路径做坏；无法运行时返回明确错误。
 - target discovery、worker、recorder 都会复用这些后端；错误信息和连接语义要能被上层直接消费。

@@ -4,7 +4,7 @@ use crate::analysis::calibration::{CalibrationTimingModel, LoadedCalibration};
 use crate::analysis::mapping::CalibrationTable;
 use crate::analysis::roi::{self, Roi};
 use crate::analysis::scanner::{self, BattleState, PixelFormat};
-use crate::capture::{create_backend, CaptureBackend, CaptureConfig, CapturedFrame, WindowInfo};
+use crate::capture::CapturedFrame;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrameResult {
@@ -19,11 +19,6 @@ pub struct FrameResult {
 /// Layer 2 analyzer — holds calibration, ROI, and timing state. Does NOT
 /// own a capture backend; that responsibility belongs to Layer 1
 /// ([`crate::pipeline::CapturePipeline`]).
-///
-/// To preserve backward compatibility with callers that still want a single
-/// object that owns both capture and analysis (e.g. `ruler-pyo3`,
-/// `ruler-recorder`), the thin [`RulerEngine`] wrapper at the bottom of this
-/// file delegates to `Analyzer` + a `CaptureBackend`.
 pub struct Analyzer {
     calibration: Option<LoadedCalibration>,
     roi: Option<Roi>,
@@ -73,7 +68,6 @@ struct FrameLookup {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CycleEndpointMode {
-    LegacyDirect,
     LeftClosedRightOpen,
     LeftClosedRightClosed,
     LeftOpenRightClosed,
@@ -85,13 +79,6 @@ struct CycleTiming {
     total_frames: i32,
     total_bar_width: i32,
     endpoint_mode: CycleEndpointMode,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct EngineStatus {
-    pub connected: bool,
-    pub has_calibration: bool,
-    pub roi_ready: bool,
 }
 
 const NEGATIVE_COST_INTERVAL_MULTIPLIER: i32 = 2;
@@ -196,14 +183,6 @@ impl Analyzer {
 
     pub fn roi(&self) -> Option<Roi> {
         self.roi
-    }
-
-    pub fn status(&self) -> EngineStatus {
-        EngineStatus {
-            connected: false,
-            has_calibration: self.calibration.is_some(),
-            roi_ready: self.roi.is_some(),
-        }
     }
 
     pub fn reset_timer(&mut self) {
@@ -458,37 +437,28 @@ fn current_cycle_timing(
     let profile_index = (base_profile + cycle_counter) % num_profiles;
     let base_total_frames = calibration.tables[profile_index].total_frames;
 
-    match calibration.timing_model {
-        CalibrationTimingModel::LegacyDirect => CycleTiming {
-            profile_index,
-            total_frames: base_total_frames,
-            total_bar_width: 0,
-            endpoint_mode: CycleEndpointMode::LegacyDirect,
+    let CalibrationTimingModel::OpenInteriorV1 {
+        total_bar_width,
+        boundary_switch_frame,
+    } = calibration.timing_model;
+    let boundary_cycle_index =
+        boundary_cycle_index(calibration, base_profile, boundary_switch_frame);
+    let endpoint_mode = if cycle_counter < boundary_cycle_index {
+        CycleEndpointMode::LeftClosedRightOpen
+    } else if cycle_counter == boundary_cycle_index {
+        CycleEndpointMode::LeftClosedRightClosed
+    } else {
+        CycleEndpointMode::LeftOpenRightClosed
+    };
+    CycleTiming {
+        profile_index,
+        total_bar_width,
+        total_frames: if endpoint_mode == CycleEndpointMode::LeftClosedRightClosed {
+            base_total_frames.saturating_add(1)
+        } else {
+            base_total_frames
         },
-        CalibrationTimingModel::OpenInteriorV1 {
-            total_bar_width,
-            boundary_switch_frame,
-        } => {
-            let boundary_cycle_index =
-                boundary_cycle_index(calibration, base_profile, boundary_switch_frame);
-            let endpoint_mode = if cycle_counter < boundary_cycle_index {
-                CycleEndpointMode::LeftClosedRightOpen
-            } else if cycle_counter == boundary_cycle_index {
-                CycleEndpointMode::LeftClosedRightClosed
-            } else {
-                CycleEndpointMode::LeftOpenRightClosed
-            };
-            CycleTiming {
-                profile_index,
-                total_bar_width,
-                total_frames: if endpoint_mode == CycleEndpointMode::LeftClosedRightClosed {
-                    base_total_frames.saturating_add(1)
-                } else {
-                    base_total_frames
-                },
-                endpoint_mode,
-            }
-        }
+        endpoint_mode,
     }
 }
 
@@ -531,47 +501,10 @@ fn lookup_bar_frame(
     pixel_width: i32,
     cost_is_negative: bool,
 ) -> Option<FrameLookup> {
-    let total_frames = cycle_timing.total_frames;
-    if total_frames <= 0 {
+    if cycle_timing.total_frames <= 0 {
         return None;
     }
-
-    match cycle_timing.endpoint_mode {
-        CycleEndpointMode::LegacyDirect => {
-            lookup_legacy_bar_frame(table, pixel_width, cost_is_negative)
-        }
-        CycleEndpointMode::LeftClosedRightOpen
-        | CycleEndpointMode::LeftClosedRightClosed
-        | CycleEndpointMode::LeftOpenRightClosed => {
-            lookup_open_interior_bar_frame(table, cycle_timing, pixel_width, cost_is_negative)
-        }
-    }
-}
-
-fn lookup_legacy_bar_frame(
-    table: &CalibrationTable,
-    pixel_width: i32,
-    cost_is_negative: bool,
-) -> Option<FrameLookup> {
-    let total_frames = table.total_frames;
-    if total_frames <= 0 {
-        return None;
-    }
-
-    if cost_is_negative {
-        let phase = table.lookup_phase(pixel_width)?;
-        let logical_frame = frame_from_phase(phase, effective_total_frames(total_frames, true));
-        Some(FrameLookup {
-            logical_frame,
-            phase,
-        })
-    } else {
-        let logical_frame = table.lookup(pixel_width)?;
-        Some(FrameLookup {
-            logical_frame,
-            phase: logical_frame as f64 / total_frames as f64,
-        })
-    }
+    lookup_open_interior_bar_frame(table, cycle_timing, pixel_width, cost_is_negative)
 }
 
 fn lookup_open_interior_bar_frame(
@@ -643,9 +576,6 @@ fn lookup_open_interior_display_frame_f64(
 }
 
 fn open_interior_endpoint_frame(cycle_timing: CycleTiming, pixel_width: i32) -> Option<i32> {
-    if cycle_timing.endpoint_mode == CycleEndpointMode::LegacyDirect {
-        return None;
-    }
     let total_bar_width = cycle_timing.total_bar_width;
 
     if matches!(
@@ -674,7 +604,7 @@ fn open_interior_excludes_width(cycle_timing: CycleTiming, pixel_width: i32) -> 
 
 fn open_interior_internal_frame(endpoint_mode: CycleEndpointMode, internal_frame: i32) -> i32 {
     match endpoint_mode {
-        CycleEndpointMode::LegacyDirect | CycleEndpointMode::LeftOpenRightClosed => internal_frame,
+        CycleEndpointMode::LeftOpenRightClosed => internal_frame,
         CycleEndpointMode::LeftClosedRightOpen | CycleEndpointMode::LeftClosedRightClosed => {
             internal_frame.saturating_add(1)
         }
@@ -683,7 +613,7 @@ fn open_interior_internal_frame(endpoint_mode: CycleEndpointMode, internal_frame
 
 fn open_interior_internal_frame_f64(endpoint_mode: CycleEndpointMode, internal_frame: f64) -> f64 {
     match endpoint_mode {
-        CycleEndpointMode::LegacyDirect | CycleEndpointMode::LeftOpenRightClosed => internal_frame,
+        CycleEndpointMode::LeftOpenRightClosed => internal_frame,
         CycleEndpointMode::LeftClosedRightOpen | CycleEndpointMode::LeftClosedRightClosed => {
             internal_frame + 1.0
         }
@@ -720,177 +650,6 @@ fn rounded_frame_count(frames: f64) -> i32 {
     frames.round() as i32
 }
 
-// Analyzer has no Drop resources — it owns only plain data and Arcs.
-
-// ---------------------------------------------------------------------------
-// RulerEngine — backward-compat wrapper that owns a CaptureBackend + Analyzer.
-//
-// Existing callers (ruler-pyo3, ruler-recorder, ruler-app/worker before the
-// pipeline migration) continue to work unchanged. New pipeline-based code
-// should use Analyzer directly.
-// ---------------------------------------------------------------------------
-
-/// Backward-compatible wrapper that owns a capture backend and delegates
-/// analysis to an inner [`Analyzer`].
-///
-/// **Deprecation path**: callers should migrate to the three-layer
-/// architecture ([`crate::pipeline::CapturePipeline`] + [`Analyzer`]).
-/// This wrapper will be removed once all in-tree callers are migrated.
-pub struct RulerEngine {
-    backend: Option<Box<dyn CaptureBackend>>,
-    analyzer: Analyzer,
-}
-
-impl Default for RulerEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RulerEngine {
-    pub fn new() -> Self {
-        Self {
-            backend: None,
-            analyzer: Analyzer::new(),
-        }
-    }
-
-    /// Borrow the inner [`Analyzer`] for direct access to analysis-only
-    /// methods (used by callers migrating to the pipeline architecture).
-    pub fn analyzer(&self) -> &Analyzer {
-        &self.analyzer
-    }
-
-    /// Mutably borrow the inner [`Analyzer`].
-    pub fn analyzer_mut(&mut self) -> &mut Analyzer {
-        &mut self.analyzer
-    }
-
-    pub fn connect(&mut self, config: CaptureConfig) -> Result<(u32, u32), String> {
-        let mut backend = create_backend(config)?;
-        backend.connect()?;
-        let dims = backend.dimensions();
-        self.analyzer.set_roi(dims.0 as i32, dims.1 as i32);
-        self.backend = Some(backend);
-        log::info!(
-            "ruler-core connected: dimensions={}x{}, roi={:?}",
-            dims.0,
-            dims.1,
-            self.analyzer.roi
-        );
-        Ok(dims)
-    }
-
-    pub fn capture_frame(&mut self) -> Result<CapturedFrame, String> {
-        let mut backend = self
-            .backend
-            .take()
-            .ok_or_else(|| "Not connected".to_string())?;
-        let frame_data: CapturedFrame = backend.capture_frame()?;
-        self.backend = Some(backend);
-        Ok(frame_data)
-    }
-
-    pub fn capture_and_analyze(&mut self) -> Result<FrameResult, String> {
-        let frame_data = self.capture_frame()?;
-        self.analyzer.analyze_captured_frame(&frame_data)
-    }
-
-    pub fn analyze_captured_frame(
-        &mut self,
-        frame_data: &CapturedFrame,
-    ) -> Result<FrameResult, String> {
-        self.analyzer.analyze_captured_frame(frame_data)
-    }
-
-    pub fn analyze_raw_buffer(
-        &mut self,
-        buffer: &[u8],
-        width: u32,
-        height: u32,
-        format: PixelFormat,
-    ) -> Result<FrameResult, String> {
-        self.analyzer.analyze_raw_buffer(buffer, width, height, format)
-    }
-
-    pub fn analyze_frame_with_battle_state(
-        &mut self,
-        buffer: &[u8],
-        width: u32,
-        height: u32,
-        format: PixelFormat,
-        battle_state: BattleState,
-    ) -> Result<FrameResult, String> {
-        self.analyzer
-            .analyze_frame_with_battle_state(buffer, width, height, format, battle_state)
-    }
-
-    pub fn load_calibration<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
-        self.analyzer.load_calibration(path)
-    }
-
-    pub fn load_calibration_json(&mut self, json: &str) -> Result<(), String> {
-        self.analyzer.load_calibration_json(json)
-    }
-
-    pub fn set_roi(&mut self, screen_width: i32, screen_height: i32) {
-        self.analyzer.set_roi(screen_width, screen_height);
-    }
-
-    pub fn set_roi_value(&mut self, roi: Roi) {
-        self.analyzer.set_roi_value(roi);
-    }
-
-    pub fn set_ui_scaler(&mut self, ui_scaler: f64) {
-        self.analyzer.set_ui_scaler(ui_scaler);
-    }
-
-    pub fn ui_scaler(&self) -> f64 {
-        self.analyzer.ui_scaler()
-    }
-
-    pub fn roi(&self) -> Option<Roi> {
-        self.analyzer.roi()
-    }
-
-    pub fn window_info(&self) -> Option<WindowInfo> {
-        self.backend.as_ref().and_then(|backend| backend.window_info())
-    }
-
-    pub fn status(&self) -> EngineStatus {
-        EngineStatus {
-            connected: self.backend.is_some(),
-            has_calibration: self.analyzer.calibration.is_some(),
-            roi_ready: self.analyzer.roi.is_some(),
-        }
-    }
-
-    pub fn reset_timer(&mut self) {
-        self.analyzer.reset_timer();
-    }
-
-    pub fn adjust_timer(&mut self, frames: i32) {
-        self.analyzer.adjust_timer(frames);
-    }
-
-    pub fn set_profile_index(&mut self, index: usize) {
-        self.analyzer.set_profile_index(index);
-    }
-
-    pub fn disconnect(&mut self) {
-        log::info!("disconnecting ruler-core backend");
-        if let Some(mut backend) = self.backend.take() {
-            backend.disconnect();
-        }
-    }
-}
-
-impl Drop for RulerEngine {
-    fn drop(&mut self) {
-        self.disconnect();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,6 +664,9 @@ mod tests {
         engine
             .load_calibration_json(
                 r#"{
+                    "format_version": 2,
+                    "timing_model": "open_interior_v1",
+                    "total_bar_width": 20,
                     "profiles": [{
                         "total_frames": 30,
                         "pixel_map": {"0": 0, "5": 1, "10": 2}
@@ -933,7 +695,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.raw_pixel_width, Some(2));
-        assert_eq!(result.logical_frame, Some(0));
+        // Open-interior left-closed cycle maps width 2 -> internal 0 -> frame 1.
+        assert_eq!(result.logical_frame, Some(1));
+        // First observed in-battle frame only sets the phase anchor (elapsed 0).
         assert_eq!(result.elapsed_frames, 0);
         assert!(!result.cost_is_negative);
     }
@@ -1012,6 +776,9 @@ mod tests {
         engine
             .load_calibration_json(
                 r#"{
+                    "format_version": 2,
+                    "timing_model": "open_interior_v1",
+                    "total_bar_width": 100,
                     "profiles": [{
                         "total_frames": 8,
                         "pixel_map": {"0": 0, "3": 2, "5": 4, "7": 7}
@@ -1027,17 +794,17 @@ mod tests {
         assert_eq!(result.elapsed_frames, 0);
 
         let result = analyze_width(&mut engine, 1, true);
-        assert_eq!(result.logical_frame, Some(1));
+        assert_eq!(result.logical_frame, Some(3));
         assert_eq!(result.total_frames_in_cycle, 16);
-        assert_eq!(result.elapsed_frames, 1);
+        assert_eq!(result.elapsed_frames, 3);
 
         let result = analyze_width(&mut engine, 4, true);
-        assert_eq!(result.logical_frame, Some(6));
-        assert_eq!(result.elapsed_frames, 6);
+        assert_eq!(result.logical_frame, Some(8));
+        assert_eq!(result.elapsed_frames, 8);
 
         let result = analyze_width(&mut engine, 6, true);
-        assert_eq!(result.logical_frame, Some(11));
-        assert_eq!(result.elapsed_frames, 11);
+        assert_eq!(result.logical_frame, Some(13));
+        assert_eq!(result.elapsed_frames, 13);
     }
 
     #[test]
@@ -1437,19 +1204,12 @@ mod tests {
         engine
     }
 
+    /// Calibration whose cycles stay before the boundary (`LeftClosedRightOpen`)
+    /// and never reach the bar endpoints, so the open-interior `+1` offset cancels
+    /// the `width -> width-1` map and the logical frame equals the pixel width.
+    /// This reproduces the former direct-lookup identity used by these tests.
     fn calibration_json(total_frames: &[i32]) -> String {
-        let profiles = total_frames
-            .iter()
-            .map(|total_frames| {
-                let pixel_map = (0..*total_frames)
-                    .map(|frame| format!(r#""{frame}": {frame}"#))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(r#"{{"total_frames": {total_frames}, "pixel_map": {{{pixel_map}}}}}"#)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(r#"{{"profiles": [{profiles}]}}"#)
+        open_interior_calibration_json(total_frames, 10_000, 10_000)
     }
 
     fn open_interior_engine_with_profiles(
@@ -1487,6 +1247,7 @@ mod tests {
             .join(", ");
         format!(
             r#"{{
+                "format_version": 2,
                 "timing_model": "open_interior_v1",
                 "total_bar_width": {total_bar_width},
                 "boundary_switch_frame": {boundary_switch_frame},

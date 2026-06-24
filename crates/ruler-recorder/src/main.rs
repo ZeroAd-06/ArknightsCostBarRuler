@@ -20,8 +20,9 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use ruler_core::capture::create_backend;
 use ruler_core::config::RulerConfig;
-use ruler_core::engine::{FrameResult, RulerEngine};
+use ruler_core::engine::{Analyzer, FrameResult};
 use ruler_core::BattleState;
 use ruler_recorder::{
     bytes_per_pixel, calibration_path_from_config, flip_rows, pix_fmt_str, timestamp_for_filename,
@@ -147,16 +148,23 @@ fn main() {
         ruler_config.active_calibration_profile.as_deref(),
     );
 
-    // ---- init engine ------------------------------------------------------
-    let mut engine = RulerEngine::new();
-    let (width, height) = engine.connect(capture_config).unwrap_or_else(|e| {
+    // ---- init backend + analyzer ------------------------------------------
+    let mut backend = create_backend(capture_config).unwrap_or_else(|e| {
+        eprintln!("FATAL: backend init failed: {e}");
+        std::process::exit(1);
+    });
+    backend.connect().unwrap_or_else(|e| {
         eprintln!("FATAL: connect failed: {e}");
         std::process::exit(1);
     });
+    let (width, height) = backend.dimensions();
     eprintln!("  connected  : {width}x{height}");
 
+    let mut analyzer = Analyzer::new();
+    analyzer.set_roi(width as i32, height as i32);
+
     if let Some(ref p) = cal_path {
-        engine.load_calibration(p).unwrap_or_else(|e| {
+        analyzer.load_calibration(p).unwrap_or_else(|e| {
             eprintln!("FATAL: calibration failed: {e}");
             std::process::exit(1);
         });
@@ -165,10 +173,8 @@ fn main() {
         eprintln!("  warning    : no calibration specified in config — analysis fields empty");
     }
 
-    engine.set_roi(width as i32, height as i32);
-
     // ---- capture first frame to detect pixel format -----------------------
-    let first_frame = engine.capture_frame().unwrap_or_else(|e| {
+    let first_frame = backend.capture_frame().unwrap_or_else(|e| {
         eprintln!("FATAL: first capture failed: {e}");
         std::process::exit(1);
     });
@@ -236,7 +242,7 @@ fn main() {
     // ---- write first frame ------------------------------------------------
     write_video_frame(&mut ffmpeg_stdin, &first_frame.data, width, height, bpp)
         .expect("ffmpeg write failed");
-    let result = engine
+    let result = analyzer
         .analyze_captured_frame(&first_frame)
         .unwrap_or_else(|e| {
             eprintln!("WARNING: first frame analysis failed: {e}");
@@ -263,7 +269,7 @@ fn main() {
         let t0 = Instant::now();
 
         // 1. Capture
-        let frame = match engine.capture_frame() {
+        let frame = match backend.capture_frame() {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("\nWARN: capture failed: {e}");
@@ -284,7 +290,7 @@ fn main() {
         }
 
         // 3. Analyse (best-effort — missing calibration still records video + partial CSV)
-        let result = match engine.analyze_captured_frame(&frame) {
+        let result = match analyzer.analyze_captured_frame(&frame) {
             Ok(r) => r,
             Err(e) => {
                 if !ANALYSE_WARNED.swap(true, Ordering::Relaxed) {
@@ -329,6 +335,7 @@ fn main() {
     drop(ffmpeg_stdin);
     let _ = ffmpeg.wait();
     csv.flush().ok();
+    backend.disconnect();
 
     let elapsed = start_time.elapsed();
     let total = csv.frame_count();

@@ -493,7 +493,7 @@ mod platform {
         );
         wizard.set_replay_path(
             previous_config
-                .and_then(|config| config.replay_hevc_path.clone())
+                .and_then(|config| config.replay_video_path.clone())
                 .unwrap_or_default()
                 .into(),
         );
@@ -782,7 +782,7 @@ mod platform {
             debug_recording_csv: draft.record_csv,
             trace_logging_enabled: draft.trace_logging,
             log_output_dir: previous.and_then(|config| config.log_output_dir.clone()),
-            replay_hevc_path: (draft.kind == 4).then_some(replay_path).flatten(),
+            replay_video_path: (draft.kind == 4).then_some(replay_path).flatten(),
             replay_fps,
         })
     }
@@ -1999,7 +1999,7 @@ mod platform {
             draft.replay_path = "  C:/clip.mkv  ".to_string();
             let config = build_manual_config(&draft, None, "en_US", "missing").unwrap();
             assert_eq!(config.capture_type, "replay");
-            assert_eq!(config.replay_hevc_path.as_deref(), Some("C:/clip.mkv"));
+            assert_eq!(config.replay_video_path.as_deref(), Some("C:/clip.mkv"));
             assert_eq!(config.replay_fps, Some(60.0));
             assert_eq!(config.language.as_deref(), Some("en_US"));
 
@@ -2050,7 +2050,7 @@ mod platform {
                     debug_recording_csv: false,
                     trace_logging_enabled: false,
                     log_output_dir: None,
-                    replay_hevc_path: None,
+                    replay_video_path: None,
                     replay_fps: None,
                 },
                 latency: None,

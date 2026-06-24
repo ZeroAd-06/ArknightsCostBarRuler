@@ -160,8 +160,7 @@ ArknightsCostBarRuler/
 │   ├── ruler-app/          # 桌面应用: Slint + 原生 Win32
 │   │   ├── ui/             # Slint 界面 (hud / menu / wizard / theme)
 │   │   └── src/            # 悬浮窗、托盘、worker、API、配置向导、调试录制…
-│   ├── ruler-recorder/     # 调试录制器 + ruler-verifier 离线校验器
-│   └── ruler-pyo3/         # PyO3 绑定: 把核心暴露给 Python (cdylib: ruler_rust)
+│   └── ruler-recorder/     # 调试录制器 + ruler-verifier 离线校验器
 ├── icons/                  # 托盘 / HUD 图标 (含 Material Symbols)
 ├── ruler/locales/          # 本地化翻译 (zh_CN / en_US)
 └── LICENSES/               # 第三方许可证原文

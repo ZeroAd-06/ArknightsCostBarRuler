@@ -109,60 +109,22 @@ impl LDPlayerController {
         Ok(device)
     }
 
-    fn resolve_dimensions(&mut self) -> Result<(), String> {
-        let device_id = self.resolve_device_id()?;
-
-        // `ldopengl64.dll`'s `cap()` returns a bare pointer to the *currently
-        // displayed* (rotation-following) frame buffer, with no size metadata.
-        // `wm size` only reports the device's "natural" orientation and never
-        // reflects app rotation — a portrait phone profile stays `720x1280`
-        // even while Arknights renders a `1280x720` landscape buffer. So we
-        // must size our copy buffer from the *current* display dimensions.
-        //
-        // `dumpsys window displays` reports `cur=<W>x<H>` for the live display
-        // (matches the rotated frame buffer). Fall back to `wm size` only when
-        // the current size can't be parsed, so we're never worse than before.
-        let dumpsys =
-            self.run_command("adb", &["-s", &device_id, "shell", "dumpsys", "window", "displays"])?;
-        if let Some((width, height)) = parse_current_display_size(&dumpsys) {
-            self.width = width;
-            self.height = height;
-            log::info!(
-                "LDPlayer dimensions from dumpsys cur= : {}x{}",
-                width,
-                height
-            );
-            return Ok(());
-        }
-
-        let output = self.run_command("adb", &["-s", &device_id, "shell", "wm", "size"])?;
-        let size_line = output
-            .lines()
-            .find(|line| line.contains("Physical size"))
-            .ok_or_else(|| format!("Failed to parse 'adb shell wm size' output: {output}"))?;
-        let size = size_line
-            .split(':')
-            .nth(1)
-            .ok_or_else(|| format!("Malformed wm size output: {size_line}"))?
-            .trim();
-        let mut parts = size.split('x');
-        let width = parts
-            .next()
-            .ok_or_else(|| "Missing width in wm size output".to_string())?
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid width from wm size: {e}"))?;
-        let height = parts
-            .next()
-            .ok_or_else(|| "Missing height in wm size output".to_string())?
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid height from wm size: {e}"))?;
-
-        self.width = width;
-        self.height = height;
-        Ok(())
-    }
-
-    fn resolve_pid(&self) -> Result<u32, String> {
+    /// Resolve the player's PID *and* its configured display dimensions from a
+    /// single `dnconsole list2` call.
+    ///
+    /// `ldopengl64.dll`'s `cap()` returns a bare pointer to the instance's
+    /// frame buffer with no size metadata, and that buffer is always sized to
+    /// the instance's *configured* resolution — it does **not** follow device
+    /// rotation. (LD's own `dnopengl/main.cpp` demo feeds `cap()` straight into
+    /// a BMP using `player.width`/`player.height` from this same `list2` row,
+    /// and MAA does likewise via `wm size` + `width=max,height=min`.) So the
+    /// configured `width,height` fields of `dnconsole list2` are the source of
+    /// truth, *not* `dumpsys window displays`' rotation-following `cur=`.
+    ///
+    /// `list2` rows are comma-separated per LD's `%u,name,topWnd,bndWnd,sysboot,
+    /// playerpid,vboxpid,width,height,dpi` format. We pull `playerpid` (field 6)
+    /// and `width`/`height` (fields 8/9) from the row matching our instance.
+    fn resolve_pid_and_dimensions(&mut self) -> Result<u32, String> {
         let dnconsole = PathBuf::from(&self.install_path).join("dnconsole.exe");
         if !dnconsole.exists() {
             return Err(format!(
@@ -173,20 +135,22 @@ impl LDPlayerController {
 
         let program = dnconsole.to_string_lossy().into_owned();
         let output = self.run_command(&program, &["list2"])?;
-        for line in output.lines() {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() >= 6 && parts[0].trim() == self.instance_index.to_string() {
-                return parts[5]
-                    .trim()
-                    .parse::<u32>()
-                    .map_err(|e| format!("Invalid LDPlayer PID in dnconsole output: {e}"));
+        match parse_list2_row(&output, self.instance_index) {
+            Some(InstanceInfo { pid, width, height }) => {
+                log::info!(
+                    "LDPlayer dimensions from dnconsole list2: {}x{}",
+                    width,
+                    height
+                );
+                self.width = width;
+                self.height = height;
+                Ok(pid)
             }
+            None => Err(format!(
+                "Unable to find running LDPlayer instance {} in dnconsole list2 output",
+                self.instance_index
+            )),
         }
-
-        Err(format!(
-            "Unable to find running LDPlayer instance {} in dnconsole list2 output",
-            self.instance_index
-        ))
     }
 
     unsafe fn create_instance_symbol(
@@ -220,13 +184,12 @@ impl CaptureBackend for LDPlayerController {
             self.instance_index,
             self.device_id
         );
-        self.resolve_dimensions()?;
+        let pid = self.resolve_pid_and_dimensions()?;
         let device_id = self
             .device_id
             .as_deref()
             .ok_or_else(|| "LDPlayer ADB device id was not resolved".to_string())?;
         self.input_overlay_guard = Some(AndroidInputOverlayGuard::disable_for_device(device_id)?);
-        let pid = self.resolve_pid()?;
 
         let dll_path = PathBuf::from(&self.install_path).join("ldopengl64.dll");
         if !dll_path.exists() {
@@ -307,6 +270,11 @@ impl CaptureBackend for LDPlayerController {
         std::mem::swap(&mut self.buffer, &mut self.spare_buffer);
         let frame_data = std::mem::take(&mut self.spare_buffer);
 
+        // `ldopengl64.dll`'s `cap()` returns the GL frame buffer as 3-byte BGR
+        // (matching LD's own `dnopengl/main.cpp` demo, which reads `cap()` with
+        // `GL_BGR_EXT` and writes it straight into a BMP, and MAA's `CV_8UC3`).
+        // The buffer is bottom-up (raw GL Y axis); our scanner already indexes
+        // rows bottom-up (`buffer_row = height-1-y`), so no flip is needed.
         Ok(CapturedFrame {
             data: frame_data,
             width: self.width,
@@ -348,29 +316,35 @@ impl Drop for LDPlayerController {
     }
 }
 
-/// Parse the current (rotation-following) display size out of
-/// `adb shell dumpsys window displays` output.
+/// PID + configured display dimensions parsed from one `dnconsole list2` row.
+struct InstanceInfo {
+    pid: u32,
+    width: u32,
+    height: u32,
+}
+
+/// Parse the row for `instance_index` out of `dnconsole list2` output.
 ///
-/// The output contains blocks like:
-/// ```text
-/// init=720x1280 240dpi cur=1280x720 app=1280x720
-/// ```
-/// `cur=<W>x<H>` is the live display resolution and matches the rotated frame
-/// buffer that `ldopengl64.dll`'s `cap()` returns. Returns the first `cur=`
-/// match, or `None` if the output has no parseable `cur=` token.
-fn parse_current_display_size(dumpsys: &str) -> Option<(u32, u32)> {
-    for token in dumpsys.split_whitespace() {
-        let Some(size) = token.strip_prefix("cur=") else {
+/// LD's `list2` rows are comma-separated as
+/// `index,name,topWnd,bndWnd,sysboot,playerpid,vboxpid,width,height,dpi`
+/// (see LD's own `dnopengl/main.cpp` `parselist2` sscanf format). We pull the
+/// player PID (field 6) and the configured width/height (fields 8/9), which is
+/// the resolution `ldopengl64.dll`'s `cap()` buffer is sized to. Returns `None`
+/// if the instance row is missing or malformed.
+fn parse_list2_row(list2_output: &str, instance_index: u32) -> Option<InstanceInfo> {
+    let target = instance_index.to_string();
+    for line in list2_output.lines() {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 10 || parts[0].trim() != target {
             continue;
-        };
-        let Some((width, height)) = size.split_once('x') else {
-            continue;
-        };
-        let width = width.trim().parse::<u32>().ok()?;
-        let height = height.trim().parse::<u32>().ok()?;
-        if width > 0 && height > 0 {
-            return Some((width, height));
         }
+        let pid = parts[5].trim().parse::<u32>().ok()?;
+        let width = parts[7].trim().parse::<u32>().ok()?;
+        let height = parts[8].trim().parse::<u32>().ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        return Some(InstanceInfo { pid, width, height });
     }
     None
 }
@@ -380,22 +354,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_cur_size_from_dumpsys_displays() {
-        // Fragment of real `dumpsys window displays` output captured on a
-        // portrait LDPlayer profile running Arknights (ROTATION_90): the
-        // natural orientation is 720x1280 but the live display is 1280x720.
-        let dumpsys = "Display: mDisplayInfo\n  init=720x1280 240dpi cur=1280x720 app=1280x720\n  mRotation=1";
-        assert_eq!(parse_current_display_size(dumpsys), Some((1280, 720)));
+    fn parses_pid_and_dimensions_from_list2_row() {
+        // Real `dnconsole list2` output from LDPlayer14 instance 0
+        // (index,name,topWnd,bndWnd,sysboot,playerpid,vboxpid,width,height,dpi).
+        let list2 = "0,雷电模拟器,67573056,23924780,1,60572,40988,1920,1080,280";
+        let info = parse_list2_row(list2, 0).expect("instance 0 should parse");
+        assert_eq!(info.pid, 60572);
+        assert_eq!(info.width, 1920);
+        assert_eq!(info.height, 1080);
     }
 
     #[test]
-    fn parse_cur_size_returns_none_without_cur_token() {
-        let dumpsys = "init=720x1280 240dpi app=720x1280";
-        assert_eq!(parse_current_display_size(dumpsys), None);
+    fn parses_correct_row_when_multiple_instances_listed() {
+        let list2 = "0,雷电模拟器,67573056,23924780,1,60572,40988,1920,1080,280\n\
+                     1,雷电模拟器-1,123,456,1,70111,40112,1280,720,280";
+        let info = parse_list2_row(list2, 1).expect("instance 1 should parse");
+        assert_eq!(info.pid, 70111);
+        assert_eq!(info.width, 1280);
+        assert_eq!(info.height, 720);
     }
 
     #[test]
-    fn parse_cur_size_returns_none_for_empty() {
-        assert_eq!(parse_current_display_size(""), None);
+    fn parse_list2_returns_none_for_missing_instance() {
+        let list2 = "0,雷电模拟器,67573056,23924780,1,60572,40988,1920,1080,280";
+        assert!(parse_list2_row(list2, 9).is_none());
+    }
+
+    #[test]
+    fn parse_list2_returns_none_for_empty() {
+        assert!(parse_list2_row("", 0).is_none());
     }
 }

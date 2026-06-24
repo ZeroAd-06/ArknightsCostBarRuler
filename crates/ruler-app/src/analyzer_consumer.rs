@@ -43,10 +43,21 @@ pub enum AnalyzerCommand {
     /// Adjust the timer by a delta (positive or negative).
     AdjustTimer { frames: i32 },
     /// Set the active profile index within the calibration table.
+    ///
+    /// Part of the consumer command protocol but not currently wired to a UI
+    /// gesture — the active profile is selected automatically during
+    /// calibration inference. Kept here so future callers (or external API
+    /// consumers) can drive the analyzer without a protocol churn.
+    #[allow(dead_code)]
     SetProfileIndex { index: usize },
     /// Set the display mode (raw frame number vs. logical frame).
     SetDisplayMode(FrameDisplayMode),
     /// Update the ROI (e.g. after ui_scaler change).
+    ///
+    /// Part of the consumer command protocol but not currently wired up — ROI
+    /// is established at spawn from `pipeline_info` and via calibration. Kept
+    /// so live ROI changes can be added without a protocol break.
+    #[allow(dead_code)]
     SetRoi { width: i32, height: i32 },
     /// Toggle the lap timer on/off.
     ToggleLapTimer,
@@ -233,10 +244,6 @@ impl AnalyzerConsumer {
             running,
             handle: Some(handle),
         })
-    }
-
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
     }
 }
 

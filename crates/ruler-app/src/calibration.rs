@@ -8,12 +8,9 @@
 //! continues to run but its results are ignored — the UI shows the
 //! calibration progress instead.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use ruler_core::{
     analysis::{calibration::infer_calibration_from_samples_with_ui_scaler_and_total_bar_width, scanner},
-    pipeline::{frame::Frame as PipelineFrame, ConsumerPipe},
+    pipeline::ConsumerPipe,
 };
 
 use crate::worker::SharedAppState;

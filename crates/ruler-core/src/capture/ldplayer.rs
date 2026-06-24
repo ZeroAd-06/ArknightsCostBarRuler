@@ -83,32 +83,6 @@ impl LDPlayerController {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    fn resolve_device_id(&mut self) -> Result<String, String> {
-        if let Some(device_id) = &self.device_id {
-            return Ok(device_id.clone());
-        }
-
-        let output = self.run_command("adb", &["devices"])?;
-        let device = output
-            .lines()
-            .skip(1)
-            .find_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-                let mut parts = trimmed.split_whitespace();
-                let id = parts.next()?;
-                let status = parts.next()?;
-                (status == "device").then(|| id.to_string())
-            })
-            .ok_or_else(|| {
-                "No available ADB device found for LDPlayer resolution query".to_string()
-            })?;
-        self.device_id = Some(device.clone());
-        Ok(device)
-    }
-
     /// Resolve the player's PID *and* its configured display dimensions from a
     /// single `dnconsole list2` call.
     ///

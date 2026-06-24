@@ -23,10 +23,7 @@ use std::{
     time::Instant,
 };
 
-use ruler_core::{
-    capture::CapturedFrame, engine::FrameResult, pipeline::frame::Frame as PipelineFrame,
-    PixelFormat,
-};
+use ruler_core::{engine::FrameResult, pipeline::frame::Frame as PipelineFrame, PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Helpers (shared with ruler-recorder)
@@ -268,19 +265,6 @@ impl DebugRecorder {
         })
     }
 
-    /// Record the video payload for one captured frame as early as possible so
-    /// ffmpeg's wallclock timestamps track capture timing instead of post-analysis delay.
-    pub fn record_video_frame(&mut self, frame: &CapturedFrame) {
-        if let Some(ref mut pipe) = self.ffmpeg {
-            let mut buf = frame.data.clone();
-            flip_rows(&mut buf, self.width, self.height, self.bpp);
-            if let Err(e) = pipe.write_frame(&buf) {
-                log::error!("debug recording: ffmpeg write error, stopping video: {e}");
-                self.ffmpeg = None;
-            }
-        }
-    }
-
     /// Record the analysis CSV row for one frame.
     pub fn record_analysis_row(&mut self, result: &FrameResult, capture_dur_us: u128) {
         if let Some(ref mut csv) = self.csv {
@@ -318,7 +302,7 @@ impl DebugRecorder {
 // DebugRecorderConsumer — Layer 1 InOrder consumer that runs on its own thread
 // ---------------------------------------------------------------------------
 
-use ruler_core::pipeline::{ConsumerPipe, PipelineError};
+use ruler_core::pipeline::ConsumerPipe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 

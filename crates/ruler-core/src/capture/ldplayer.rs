@@ -111,6 +111,30 @@ impl LDPlayerController {
 
     fn resolve_dimensions(&mut self) -> Result<(), String> {
         let device_id = self.resolve_device_id()?;
+
+        // `ldopengl64.dll`'s `cap()` returns a bare pointer to the *currently
+        // displayed* (rotation-following) frame buffer, with no size metadata.
+        // `wm size` only reports the device's "natural" orientation and never
+        // reflects app rotation — a portrait phone profile stays `720x1280`
+        // even while Arknights renders a `1280x720` landscape buffer. So we
+        // must size our copy buffer from the *current* display dimensions.
+        //
+        // `dumpsys window displays` reports `cur=<W>x<H>` for the live display
+        // (matches the rotated frame buffer). Fall back to `wm size` only when
+        // the current size can't be parsed, so we're never worse than before.
+        let dumpsys =
+            self.run_command("adb", &["-s", &device_id, "shell", "dumpsys", "window", "displays"])?;
+        if let Some((width, height)) = parse_current_display_size(&dumpsys) {
+            self.width = width;
+            self.height = height;
+            log::info!(
+                "LDPlayer dimensions from dumpsys cur= : {}x{}",
+                width,
+                height
+            );
+            return Ok(());
+        }
+
         let output = self.run_command("adb", &["-s", &device_id, "shell", "wm", "size"])?;
         let size_line = output
             .lines()
@@ -321,5 +345,57 @@ impl CaptureBackend for LDPlayerController {
 impl Drop for LDPlayerController {
     fn drop(&mut self) {
         self.disconnect();
+    }
+}
+
+/// Parse the current (rotation-following) display size out of
+/// `adb shell dumpsys window displays` output.
+///
+/// The output contains blocks like:
+/// ```text
+/// init=720x1280 240dpi cur=1280x720 app=1280x720
+/// ```
+/// `cur=<W>x<H>` is the live display resolution and matches the rotated frame
+/// buffer that `ldopengl64.dll`'s `cap()` returns. Returns the first `cur=`
+/// match, or `None` if the output has no parseable `cur=` token.
+fn parse_current_display_size(dumpsys: &str) -> Option<(u32, u32)> {
+    for token in dumpsys.split_whitespace() {
+        let Some(size) = token.strip_prefix("cur=") else {
+            continue;
+        };
+        let Some((width, height)) = size.split_once('x') else {
+            continue;
+        };
+        let width = width.trim().parse::<u32>().ok()?;
+        let height = height.trim().parse::<u32>().ok()?;
+        if width > 0 && height > 0 {
+            return Some((width, height));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_cur_size_from_dumpsys_displays() {
+        // Fragment of real `dumpsys window displays` output captured on a
+        // portrait LDPlayer profile running Arknights (ROTATION_90): the
+        // natural orientation is 720x1280 but the live display is 1280x720.
+        let dumpsys = "Display: mDisplayInfo\n  init=720x1280 240dpi cur=1280x720 app=1280x720\n  mRotation=1";
+        assert_eq!(parse_current_display_size(dumpsys), Some((1280, 720)));
+    }
+
+    #[test]
+    fn parse_cur_size_returns_none_without_cur_token() {
+        let dumpsys = "init=720x1280 240dpi app=720x1280";
+        assert_eq!(parse_current_display_size(dumpsys), None);
+    }
+
+    #[test]
+    fn parse_cur_size_returns_none_for_empty() {
+        assert_eq!(parse_current_display_size(""), None);
     }
 }

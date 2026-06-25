@@ -9,6 +9,8 @@
     "config.selector.selected_ok": "已选择: {name}\n平均截图延迟: {latency}",
     "config.selector.selected_error": "该目标当前不可用:\n{error}",
     "config.selector.auto_next": "下次自动选择该实例",
+    "config.selector.telemetry": "发送匿名统计数据",
+    "config.selector.telemetry_hint": "为了满足我的好奇心，也方便后续开发。",
     "config.selector.refresh": "刷新",
     "config.selector.cancelled": "目标选择未完成，程序不会启动截图 worker",
     "config.selector.error.waiting_probe": "仍在等待该目标的第一次真实截图成功",

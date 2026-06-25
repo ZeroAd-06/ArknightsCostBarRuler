@@ -226,12 +226,17 @@ fn main() {
     wizard.set_cap_start("保存并启动".into());
     wizard.set_cap_cancel("取消".into());
     wizard.set_preview_placeholder("预览不可用".into());
+    wizard.set_cap_telemetry("发送匿名统计数据".into());
+    wizard.set_cap_telemetry_hint("为了满足我的好奇心，也方便后续开发。".into());
+    wizard.set_cap_debug_show("显示调试选项".into());
+    wizard.set_cap_debug_hide("隐藏调试选项".into());
     wizard.set_auto_checked(true);
+    wizard.set_telemetry_checked(true);
     wizard.set_has_preview(true);
     wizard.set_preview(synthetic_preview(160, 90));
 
     let ww = (560.0 * scale).round() as usize;
-    let wh = (404.0 * scale).round() as usize;
+    let wh = (443.0 * scale).round() as usize;
     wizard_window
         .window()
         .try_dispatch_event(WindowEvent::ScaleFactorChanged {

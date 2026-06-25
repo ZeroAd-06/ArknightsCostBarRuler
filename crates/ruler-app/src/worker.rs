@@ -336,6 +336,7 @@ use crate::{
     calibration,
     debug_recorder::{DebugRecorderConfig, DebugRecorderConsumer},
     profiles::calibration_basename,
+    telemetry::{self, RunTelemetryStats},
     ui_state::{FrameDisplayMode, OverlayMode},
 };
 
@@ -355,6 +356,7 @@ struct WorkerContext {
     analyzer_command_tx: Option<Sender<AnalyzerCommand>>,
     analyzer: Option<AnalyzerConsumer>,
     debug_recorder: Option<DebugRecorderConsumer>,
+    telemetry_stats: Arc<RunTelemetryStats>,
 }
 
 fn run_worker_loop(
@@ -395,6 +397,7 @@ fn run_worker_loop(
         analyzer_command_tx: None,
         analyzer: None,
         debug_recorder: None,
+        telemetry_stats: Arc::new(RunTelemetryStats::default()),
     };
 
     if let Err(error) = bootstrap(&mut context, Arc::clone(&state)) {
@@ -418,6 +421,11 @@ fn run_worker_loop(
     drop(context.debug_recorder.take());
     if let Some(mut pipeline) = context.pipeline.take() {
         pipeline.shutdown();
+    }
+    if let Err(error) =
+        telemetry::write_session_stats(&context.log_session_dir, &context.telemetry_stats)
+    {
+        log::warn!("{error}");
     }
 }
 
@@ -457,6 +465,7 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         info.height,
         info.pipe_name
     );
+    telemetry::send_startup_telemetry(&context.config, &info, &context.log_session_dir);
     state.update_ui(|ui, _| {
         ui.capture_dimensions = Some((info.width, info.height));
         ui.cursor_blocked = false;
@@ -495,6 +504,7 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         ui_scaler,
         calibration_path: initial_cal_path,
         pipeline_info: info.clone(),
+        telemetry_stats: Arc::clone(&context.telemetry_stats),
         #[cfg(windows)]
         cursor_guard,
     };

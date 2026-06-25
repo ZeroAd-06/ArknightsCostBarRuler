@@ -18,6 +18,7 @@ slint = { version = "1.16", default-features = false, features = [
     "unstable-fontique-08",
 ] }
 tungstenite = "0.24"
+uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]
 image = { version = "0.25", default-features = false, features = ["ico", "png"] }

@@ -9,6 +9,12 @@ use crate::capture::{CaptureConfig, CaptureType};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RulerConfig {
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub telemetry_enabled: Option<bool>,
+    #[serde(default)]
+    pub screenshot_delay_ms: Option<f64>,
     #[serde(rename = "type")]
     pub capture_type: String,
     #[serde(default)]
@@ -277,6 +283,9 @@ mod tests {
 
     fn minimal_config() -> RulerConfig {
         RulerConfig {
+            uuid: None,
+            telemetry_enabled: None,
+            screenshot_delay_ms: None,
             capture_type: "replay".to_string(),
             install_path: None,
             instance_index: None,

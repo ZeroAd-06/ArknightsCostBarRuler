@@ -47,7 +47,14 @@ pub(super) fn populate_captions(
     wizard.set_cap_start(i18n.tr("config.btn.save_start").into());
     wizard.set_cap_cancel(i18n.tr("config.btn.cancel").into());
     wizard.set_preview_placeholder(i18n.tr("config.window.preview.unavailable").into());
+    wizard.set_cap_telemetry(i18n.tr("config.selector.telemetry").into());
+    wizard.set_cap_telemetry_hint(i18n.tr("config.selector.telemetry_hint").into());
     wizard.set_auto_checked(false);
+    wizard.set_telemetry_checked(
+        previous_config
+            .and_then(|config| config.telemetry_enabled)
+            .unwrap_or(true),
+    );
 
     // adb-unavailable banner text. The flag itself is updated in
     // `sync_to_slint` based on `ruler_core::capture::adb_resolver::adb_available()`.
@@ -259,6 +266,7 @@ pub(super) fn wire_callbacks(
         move || {
             let wizard = weak.upgrade().expect("wizard dropped");
             let auto = wizard.get_auto_checked();
+            let telemetry_enabled = wizard.get_telemetry_checked();
             let record_video = wizard.get_record_video();
             let record_csv = wizard.get_record_csv();
             let trace_logging = wizard.get_trace_logging();
@@ -278,6 +286,7 @@ pub(super) fn wire_callbacks(
                     record_video,
                     record_csv,
                     trace_logging,
+                    telemetry_enabled,
                 };
                 let core_ref = core.borrow();
                 let built = build_manual_config(
@@ -310,6 +319,10 @@ pub(super) fn wire_callbacks(
                     .or_else(|| Some(core.i18n.locale().to_string()));
                 config.auto_select_target = auto;
                 config.target_fingerprint = Some(candidate.fingerprint.clone());
+                config.telemetry_enabled = Some(telemetry_enabled);
+                config.screenshot_delay_ms = candidate
+                    .latency
+                    .map(|latency| latency.as_secs_f64() * 1000.0);
                 config.debug_recording_enabled = record_video || record_csv;
                 config.debug_recording_video = record_video;
                 config.debug_recording_csv = record_csv;
@@ -335,6 +348,7 @@ struct ManualDraft {
     record_video: bool,
     record_csv: bool,
     trace_logging: bool,
+    telemetry_enabled: bool,
 }
 
 /// Build a `RulerConfig` from a manual draft, validating the fields the
@@ -396,6 +410,9 @@ fn build_manual_config(
         (draft.kind == 4).then(|| draft.replay_fps_text.trim().parse::<f64>().unwrap_or(60.0));
 
     Ok(RulerConfig {
+        uuid: previous.and_then(|config| config.uuid.clone()),
+        telemetry_enabled: Some(draft.telemetry_enabled),
+        screenshot_delay_ms: None,
         capture_type: capture_type.to_string(),
         install_path: is_emulator.then_some(install_path).flatten(),
         instance_index: is_emulator.then_some(instance_index).flatten(),
@@ -496,6 +513,7 @@ mod tests {
     fn manual_draft(kind: i32) -> ManualDraft {
         ManualDraft {
             kind,
+            telemetry_enabled: true,
             install_path: String::new(),
             instance_index: String::new(),
             device_id: String::new(),

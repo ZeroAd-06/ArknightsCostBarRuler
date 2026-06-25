@@ -176,6 +176,9 @@ pub(super) fn base_config(
     previous: Option<&RulerConfig>,
 ) -> RulerConfig {
     RulerConfig {
+        uuid: previous.and_then(|config| config.uuid.clone()),
+        telemetry_enabled: previous.and_then(|config| config.telemetry_enabled),
+        screenshot_delay_ms: previous.and_then(|config| config.screenshot_delay_ms),
         capture_type: capture_type.to_string(),
         install_path,
         instance_index,

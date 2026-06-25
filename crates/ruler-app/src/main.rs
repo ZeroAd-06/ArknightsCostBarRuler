@@ -21,6 +21,7 @@ mod pc_cursor_guard;
 #[cfg(windows)]
 mod slint_win;
 mod target_discovery;
+mod telemetry;
 mod tray;
 mod ui;
 mod ui_state;

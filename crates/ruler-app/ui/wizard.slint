@@ -35,6 +35,8 @@ export component Wizard inherits Window {
     in property <string> cap-start;
     in property <string> cap-cancel;
     in property <string> preview-placeholder;
+    in property <string> cap-telemetry;
+    in property <string> cap-telemetry-hint;
 
     // adb-unavailability banner: shown when neither PATH adb nor a bundled
     // emulator adb could be launched. Set by the Rust side via
@@ -44,6 +46,7 @@ export component Wizard inherits Window {
     in property <string> adb-unavailable-hint;
 
     in-out property <bool> auto-checked;
+    in-out property <bool> telemetry-checked;
 
     // debug-related state
     in-out property <bool> debug-expanded;
@@ -397,40 +400,91 @@ export component Wizard inherits Window {
         }
 
         // ===== auto-select toggle =====
-        Rectangle {
-            height: 22px;
-            HorizontalLayout {
-                spacing: 8px;
-                alignment: start;
-                check := Rectangle {
-                    width: 18px;
-                    height: 18px;
-                    y: (parent.height - self.height) / 2;
-                    border-width: 1px;
-                    border-color: root.auto-checked ? Palette.accent : Palette.hairline-faint;
-                    background: root.auto-checked ? Palette.accent-dim : transparent;
-                    animate background, border-color { duration: 110ms; }
-                    if (root.auto-checked): Path {
-                        width: 14px;
-                        height: 14px;
-                        x: (parent.width - self.width) / 2;
+        VerticalLayout {
+            spacing: 5px;
+
+            Rectangle {
+                height: 20px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    check := Rectangle {
+                        width: 18px;
+                        height: 18px;
                         y: (parent.height - self.height) / 2;
-                        viewbox-x: 0;
-                        viewbox-y: -960;
-                        viewbox-width: 960;
-                        viewbox-height: 960;
-                        commands: Icons.check;
-                        fill: Palette.text-primary;
+                        border-width: 1px;
+                        border-color: root.auto-checked ? Palette.accent : Palette.hairline-faint;
+                        background: root.auto-checked ? Palette.accent-dim : transparent;
+                        animate background, border-color { duration: 110ms; }
+                        if (root.auto-checked): Path {
+                            width: 14px;
+                            height: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-x: 0;
+                            viewbox-y: -960;
+                            viewbox-width: 960;
+                            viewbox-height: 960;
+                            commands: Icons.check;
+                            fill: Palette.text-primary;
+                        }
+                        cta := TouchArea {
+                            clicked => { root.auto-checked = !root.auto-checked; }
+                        }
                     }
-                    cta := TouchArea {
-                        clicked => { root.auto-checked = !root.auto-checked; }
+                    Text {
+                        text: root.cap-auto;
+                        color: Palette.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
                     }
                 }
-                Text {
-                    text: root.cap-auto;
-                    color: Palette.text-secondary;
-                    font-size: 11px;
-                    vertical-alignment: center;
+            }
+
+            Rectangle {
+                height: 36px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        y: 1px;
+                        border-width: 1px;
+                        border-color: root.telemetry-checked ? Palette.accent : Palette.hairline-faint;
+                        background: root.telemetry-checked ? Palette.accent-dim : transparent;
+                        animate background, border-color { duration: 110ms; }
+                        if (root.telemetry-checked): Path {
+                            width: 14px;
+                            height: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-x: 0;
+                            viewbox-y: -960;
+                            viewbox-width: 960;
+                            viewbox-height: 960;
+                            commands: Icons.check;
+                            fill: Palette.text-primary;
+                        }
+                        tta := TouchArea {
+                            clicked => { root.telemetry-checked = !root.telemetry-checked; }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: root.cap-telemetry;
+                            color: Palette.text-secondary;
+                            font-size: 11px;
+                        }
+                        Text {
+                            text: root.cap-telemetry-hint;
+                            color: Palette.text-faint;
+                            font-size: 9px;
+                            wrap: word-wrap;
+                        }
+                    }
                 }
             }
         }

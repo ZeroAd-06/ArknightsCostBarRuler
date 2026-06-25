@@ -12,7 +12,7 @@ use crate::target_discovery::{LatencyClass, PreviewFrame, TargetCandidate};
 use crate::ui::{TargetRow, Wizard};
 
 // Fixed logical design height of `wizard.slint` (physical = logical * scale).
-pub(super) const WIZARD_LOGICAL_H: f32 = 404.0;
+pub(super) const WIZARD_LOGICAL_H: f32 = 443.0;
 // Extra logical height for the debug panel. Two budgets: the recording-only
 // section (manual target off) and the taller recording + manual-target panel
 // (sized for the dropdown-open type list / the 3-field MuMu-LDPlayer case).

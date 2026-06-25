@@ -9,6 +9,8 @@
     "config.selector.selected_ok": "Selected: {name}\nAverage screenshot latency: {latency}",
     "config.selector.selected_error": "This target is currently unavailable:\n{error}",
     "config.selector.auto_next": "Automatically select this instance next time",
+    "config.selector.telemetry": "Send anonymous statistics",
+    "config.selector.telemetry_hint": "Feeds my curiosity and helps future development.",
     "config.selector.refresh": "Refresh",
     "config.selector.cancelled": "Target selection was not completed; screenshot worker will not start",
     "config.selector.error.waiting_probe": "Still waiting for this target's first successful real screenshot",

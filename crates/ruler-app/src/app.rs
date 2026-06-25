@@ -15,6 +15,7 @@ use crate::{
     overlay::{OverlayPlacement, OverlayRuntime},
     resources::ResourceLocator,
     target_discovery::{discover_targets, probe_candidate_once},
+    telemetry::ensure_config_uuid,
     worker::{SharedAppState, StartupStatus, WorkerRuntime},
 };
 
@@ -185,7 +186,9 @@ fn resolve_startup_config(
     // --debug: force the config wizard regardless of current config.
     if debug {
         log::info!("debug mode: forcing config wizard");
-        if let Some(config) = run_config_wizard(resources, i18n, previous_config.as_ref(), true) {
+        if let Some(mut config) = run_config_wizard(resources, i18n, previous_config.as_ref(), true)
+        {
+            ensure_config_uuid(&mut config);
             config
                 .save_to_path(resources.config_path())
                 .map_err(|error| StartupError::new(error.to_string()))?;
@@ -212,6 +215,8 @@ fn resolve_startup_config(
         if config.auto_select_target {
             match try_auto_select_config(config) {
                 Ok(Some(config)) => {
+                    let mut config = config;
+                    ensure_config_uuid(&mut config);
                     config
                         .save_to_path(resources.config_path())
                         .map_err(|error| StartupError::new(error.to_string()))?;
@@ -234,7 +239,8 @@ fn resolve_startup_config(
         }
     }
 
-    if let Some(config) = run_config_wizard(resources, i18n, previous_config.as_ref(), false) {
+    if let Some(mut config) = run_config_wizard(resources, i18n, previous_config.as_ref(), false) {
+        ensure_config_uuid(&mut config);
         config
             .save_to_path(resources.config_path())
             .map_err(|error| StartupError::new(error.to_string()))?;
@@ -295,6 +301,9 @@ fn try_auto_select_config(config: &RulerConfig) -> Result<Option<RulerConfig>, S
     selected.overlay_pos_y = config.overlay_pos_y;
     selected.overlay_scale = config.overlay_scale;
     selected.ui_scaler = config.ui_scaler;
+    selected.uuid = config.uuid.clone();
+    selected.telemetry_enabled = config.telemetry_enabled;
+    selected.screenshot_delay_ms = probe.latency.map(|latency| latency.as_secs_f64() * 1000.0);
     Ok(Some(selected))
 }
 

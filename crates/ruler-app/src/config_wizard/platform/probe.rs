@@ -385,6 +385,9 @@ mod tests {
             name: fingerprint.to_string(),
             detail: String::new(),
             config: RulerConfig {
+                uuid: None,
+                telemetry_enabled: None,
+                screenshot_delay_ms: None,
                 capture_type: "adb".to_string(),
                 install_path: None,
                 instance_index: None,

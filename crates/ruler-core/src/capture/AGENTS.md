@@ -25,6 +25,6 @@
 
 ## NOTES
 - `create_backend()` 当前同时服务于 probe、engine 和 pipeline；这里的行为变化通常会跨多个运行面扩散。
-- startup selector / probe 相关问题常常一半在这里，一半在 `crates/ruler-app/src/target_discovery.rs`；排查时两边一起看。
+- startup selector / probe 相关问题常常一半在这里，一半在 `crates/ruler-app/src/target_discovery/`；排查时两边一起看。
 - 如果线上设备不好复现，优先保住 replay 路径可用，这通常是唯一稳定的二次验证面。
 - 新增后端前先确认 recorder、app 向导和 replay 需要共用哪些能力，避免后面再回填接口。

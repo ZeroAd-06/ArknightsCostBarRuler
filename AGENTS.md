@@ -27,7 +27,7 @@ ArknightsCostBarRuler/
 | Task | Location | Notes |
 |------|----------|-------|
 | 启动流程、托盘、HUD 生命周期 | `crates/ruler-app/src/{main,app,worker,overlay}.rs` | UI 只读共享状态，核心逻辑不在这里算 |
-| 配置向导、目标扫描、截图延迟探测 | `crates/ruler-app/src/{config_wizard,target_discovery}.rs` | 向导是单 UI 线程 + 后台 probe worker |
+| 配置向导、目标扫描、截图延迟探测 | `crates/ruler-app/src/{config_wizard,target_discovery}/` | 向导是单 UI 线程 + 后台 probe worker;均已拆成 `platform/` 子模块 |
 | 费用条识别、ROI、边界周期、负费 | `crates/ruler-core/src/analysis/` + `engine.rs` | 改这里前先看录制样本和 `docs/cost-bar-boundary-cycle.md` |
 | 截图后端 / 回放后端 | `crates/ruler-core/src/capture/` | MuMu / LDPlayer / Windows / ADB / Replay 共存 |
 | 帧管线与消费者协议 | `crates/ruler-core/src/pipeline/` + `docs/ARCHITECTURE.md` | `SkipToLatest` 和 `InOrder` 语义不能混 |
@@ -42,7 +42,7 @@ ArknightsCostBarRuler/
 | `SharedAppState` | struct | `crates/ruler-app/src/worker.rs` | 17 | app 层的唯一共享状态面，HUD/API 只读它 |
 | `CaptureConfig` | struct | `crates/ruler-core/src/capture/mod.rs` | 9 | 所有截图后端的统一配置入口 |
 | `create_backend` | function | `crates/ruler-core/src/capture/mod.rs` | 7 | backend 工厂，被 engine / pipeline / probe 共同复用 |
-| `WizardCore` | struct | `crates/ruler-app/src/config_wizard.rs` | 11 | 配置向导运行时状态和 probe 协调中心 |
+| `WizardCore` | struct | `crates/ruler-app/src/config_wizard/platform/mod.rs` | 11 | 配置向导运行时状态和 probe 协调中心 |
 | `FrameStore` | struct | `crates/ruler-core/src/pipeline/store.rs` | 1 direct | 帧缓存/落盘层，撑住多消费者和慢消费者 |
 
 ## CONVENTIONS
@@ -77,4 +77,4 @@ cargo run --release -p ruler-recorder --bin ruler-verifier -- <video-file>
 
 ## NOTES
 - 仓库内 `calibration/`、`cost_data/`、`recordings/`、`log/` 都可能是当前问题的证据，不是普通杂物目录。
-- `crates/ruler-app/src/config_wizard.rs` 常处于高频迭代区；动向导前先看 worktree 是否已有未提交修改。
+- `crates/ruler-app/src/config_wizard/` 常处于高频迭代区；动向导前先看 worktree 是否已有未提交修改。

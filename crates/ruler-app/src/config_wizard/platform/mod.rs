@@ -26,7 +26,7 @@ use slint::{
         software_renderer::{MinimalSoftwareWindow, SoftwareRenderer},
         Key, PointerEventButton, WindowAdapter, WindowEvent,
     },
-    ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel,
+    ComponentHandle, ModelRc, PhysicalSize, VecModel,
 };
 use windows::{
     core::PCWSTR,
@@ -55,7 +55,10 @@ use windows::{
 
 use crate::{
     i18n::I18n,
-    slint_win::{create_dib, ensure_platform, logical_pos, present_layered, wide, PreBgra},
+    slint_win::{
+        create_dib, decode_wm_char, dispatch_key, ensure_platform, logical_pos, present_layered,
+        wide, PreBgra,
+    },
     target_discovery::TargetCandidate,
     ui::{TargetRow, Wizard},
 };
@@ -579,39 +582,6 @@ unsafe fn handle_left_up(hwnd: HWND) {
             position,
             button: PointerEventButton::Left,
         });
-}
-
-fn dispatch_key(window: &Rc<MinimalSoftwareWindow>, text: SharedString) {
-    let _ = window
-        .window()
-        .try_dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
-    let _ = window
-        .window()
-        .try_dispatch_event(WindowEvent::KeyReleased { text });
-}
-
-/// Decode one WM_CHAR UTF-16 code unit into text, buffering the high half of a
-/// surrogate pair across calls. Returns `None` for control characters and for
-/// the (stashed) high surrogate. Mirrors the menu's inline-rename input path.
-fn decode_wm_char(pending_high: &Cell<u16>, unit: u16) -> Option<SharedString> {
-    if (0xd800..0xdc00).contains(&unit) {
-        pending_high.set(unit);
-        return None;
-    }
-    let units: Vec<u16> = if (0xdc00..0xe000).contains(&unit) {
-        let high = pending_high.replace(0);
-        if high == 0 {
-            return None;
-        }
-        vec![high, unit]
-    } else {
-        pending_high.set(0);
-        if unit < 0x20 || unit == 0x7f {
-            return None;
-        }
-        vec![unit]
-    };
-    Some(String::from_utf16_lossy(&units).into())
 }
 
 /// Forward a typed character to the focused Slint `TextInput` (the manual-panel

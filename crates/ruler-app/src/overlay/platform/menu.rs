@@ -14,7 +14,7 @@ use slint::{
         software_renderer::{MinimalSoftwareWindow, SoftwareRenderer},
         Key, PointerEventButton, WindowAdapter, WindowEvent,
     },
-    ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel,
+    ComponentHandle, ModelRc, PhysicalSize, VecModel,
 };
 
 use super::hud::{window_state, window_state_mut};
@@ -22,7 +22,10 @@ use super::OVERLAY_TIMER_INTERVAL_MS;
 use crate::{
     commands::UiCommand,
     i18n::I18n,
-    slint_win::{client_xy, create_dib, logical_pos, present_layered, wide, PreBgra},
+    slint_win::{
+        client_xy, create_dib, decode_wm_char, dispatch_key, logical_pos, present_layered, wide,
+        PreBgra,
+    },
     ui::{ProfileRow, RulerMenu},
     ui_state::{FrameDisplayMode, OverlayMode},
     worker::SharedAppState,
@@ -476,41 +479,6 @@ fn wire_menu_callbacks(
 }
 
 // ===================== inline-edit keyboard plumbing =====================
-
-/// Dispatch a press + release for `text` (a typed character or a `Key` glyph)
-/// to whichever text field currently holds focus (the inline rename field).
-fn dispatch_key(window: &Rc<MinimalSoftwareWindow>, text: SharedString) {
-    let _ = window
-        .window()
-        .try_dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
-    let _ = window
-        .window()
-        .try_dispatch_event(WindowEvent::KeyReleased { text });
-}
-
-/// Decode one WM_CHAR UTF-16 code unit into text, buffering the high half of a
-/// surrogate pair across calls. Returns `None` for control characters and for
-/// the (stashed) high surrogate.
-fn decode_wm_char(pending_high: &Cell<u16>, unit: u16) -> Option<SharedString> {
-    if (0xd800..0xdc00).contains(&unit) {
-        pending_high.set(unit);
-        return None;
-    }
-    let units: Vec<u16> = if (0xdc00..0xe000).contains(&unit) {
-        let high = pending_high.replace(0);
-        if high == 0 {
-            return None;
-        }
-        vec![high, unit]
-    } else {
-        pending_high.set(0);
-        if unit < 0x20 || unit == 0x7f {
-            return None;
-        }
-        vec![unit]
-    };
-    Some(String::from_utf16_lossy(&units).into())
-}
 
 unsafe extern "system" fn menu_window_proc(
     hwnd: HWND,

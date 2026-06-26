@@ -2,7 +2,7 @@ use std::ffi::c_void;
 
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame, WindowInfo};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
 };
@@ -12,18 +12,9 @@ const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
 
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn EnumWindows(
-        lp_enum_func: Option<unsafe extern "system" fn(HWND, LPARAM) -> BOOL>,
-        lparam: LPARAM,
-    ) -> BOOL;
-    fn FindWindowW(lp_class_name: *const u16, lp_window_name: *const u16) -> HWND;
-    fn GetClassNameW(hwnd: HWND, lp_class_name: *mut u16, n_max_count: i32) -> i32;
     fn GetClientRect(hwnd: HWND, lp_rect: *mut RECT) -> BOOL;
-    fn GetWindowTextLengthW(hwnd: HWND) -> i32;
-    fn GetWindowTextW(hwnd: HWND, lp_string: *mut u16, n_max_count: i32) -> i32;
     fn IsIconic(hwnd: HWND) -> BOOL;
     fn IsWindow(hwnd: HWND) -> BOOL;
-    fn IsWindowVisible(hwnd: HWND) -> BOOL;
     fn PrintWindow(hwnd: HWND, hdc_blt: HDC, n_flags: u32) -> BOOL;
     fn ClientToScreen(hwnd: HWND, lp_point: *mut POINT) -> BOOL;
     fn GetDC(hwnd: HWND) -> HDC;
@@ -58,52 +49,6 @@ unsafe extern "system" {
         usage: u32,
     ) -> i32;
     fn SelectObject(hdc: HDC, h: HGDIOBJ) -> HGDIOBJ;
-}
-
-struct SearchContext {
-    title: Option<String>,
-    class: Option<String>,
-    found: Option<HWND>,
-}
-
-unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let context = unsafe { &mut *(lparam.0 as *mut SearchContext) };
-
-    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
-        return BOOL(1);
-    }
-
-    let title_len = unsafe { GetWindowTextLengthW(hwnd) };
-    let title = if title_len > 0 {
-        let mut buffer = vec![0u16; title_len as usize + 1];
-        let read = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
-        String::from_utf16_lossy(&buffer[..read as usize])
-    } else {
-        String::new()
-    };
-
-    let mut class_buffer = vec![0u16; 256];
-    let class_len =
-        unsafe { GetClassNameW(hwnd, class_buffer.as_mut_ptr(), class_buffer.len() as i32) };
-    let class_name = String::from_utf16_lossy(&class_buffer[..class_len.max(0) as usize]);
-
-    let title_match = context
-        .title
-        .as_ref()
-        .map(|expected| title.contains(expected))
-        .unwrap_or(true);
-    let class_match = context
-        .class
-        .as_ref()
-        .map(|expected| class_name.to_lowercase().contains(&expected.to_lowercase()))
-        .unwrap_or(true);
-
-    if title_match && class_match {
-        context.found = Some(hwnd);
-        BOOL(0)
-    } else {
-        BOOL(1)
-    }
 }
 
 pub struct WindowsController {
@@ -149,50 +94,6 @@ impl WindowsController {
         }
     }
 
-    fn wide_null(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    fn locate_window(&self) -> Result<HWND, String> {
-        if let Some(hwnd) = self.hwnd {
-            if unsafe { IsWindow(hwnd) }.as_bool() {
-                return Ok(hwnd);
-            }
-        }
-
-        if let Some(title) = &self.window_title {
-            let title_buf = Self::wide_null(title);
-            let class_buf = self.window_class.as_deref().map(Self::wide_null);
-            let hwnd = unsafe {
-                FindWindowW(
-                    class_buf
-                        .as_ref()
-                        .map(|buf| buf.as_ptr())
-                        .unwrap_or(std::ptr::null()),
-                    title_buf.as_ptr(),
-                )
-            };
-            if !hwnd.0.is_null() {
-                return Ok(hwnd);
-            }
-        }
-
-        let mut context = SearchContext {
-            title: self.window_title.clone(),
-            class: self.window_class.clone(),
-            found: None,
-        };
-        unsafe {
-            let _ = EnumWindows(
-                Some(enum_windows_proc),
-                LPARAM((&mut context as *mut SearchContext) as isize),
-            );
-        }
-        context
-            .found
-            .ok_or_else(|| "Could not find a matching target window".to_string())
-    }
-
     fn cleanup_gdi(&mut self) {
         unsafe {
             if let Some(bmp) = self.bmp.take() {
@@ -212,7 +113,11 @@ impl CaptureBackend for WindowsController {
     fn connect(&mut self) -> Result<(), String> {
         self.cleanup_gdi();
 
-        let hwnd = self.locate_window()?;
+        let hwnd = super::window_find::locate_target_window(
+            self.hwnd.map(|handle| handle.0 as isize),
+            &self.window_title,
+            &self.window_class,
+        )?;
         self.hwnd = Some(hwnd);
 
         if !unsafe { IsWindow(hwnd) }.as_bool() {

@@ -214,6 +214,7 @@ fn count_pixels_at_thresholds(
     let bytes_per_pixel = match format {
         PixelFormat::Rgba => 4,
         PixelFormat::Bgr => 3,
+        PixelFormat::Bgra => 4,
     };
     let stride = width as usize * bytes_per_pixel;
     let min_len = stride.saturating_mul(height as usize);
@@ -237,7 +238,7 @@ fn count_pixels_at_thresholds(
                 PixelFormat::Rgba => {
                     buffer[offset] as u16 + buffer[offset + 1] as u16 + buffer[offset + 2] as u16
                 }
-                PixelFormat::Bgr => {
+                PixelFormat::Bgr | PixelFormat::Bgra => {
                     buffer[offset + 2] as u16 + buffer[offset + 1] as u16 + buffer[offset] as u16
                 }
             };
@@ -272,6 +273,7 @@ fn estimate_bright_pixels_sampled(
     let bytes_per_pixel = match format {
         PixelFormat::Rgba => 4,
         PixelFormat::Bgr => 3,
+        PixelFormat::Bgra => 4,
     };
     let stride = width as usize * bytes_per_pixel;
     let min_len = stride.saturating_mul(height as usize);
@@ -293,7 +295,7 @@ fn estimate_bright_pixels_sampled(
                     buffer[offset + 2],
                     threshold,
                 ),
-                PixelFormat::Bgr => is_bright_enough(
+                PixelFormat::Bgr | PixelFormat::Bgra => is_bright_enough(
                     buffer[offset + 2],
                     buffer[offset + 1],
                     buffer[offset],
@@ -412,6 +414,7 @@ fn sample_battle_begin_band(
     let bytes_per_pixel = match format {
         PixelFormat::Rgba => 4,
         PixelFormat::Bgr => 3,
+        PixelFormat::Bgra => 4,
     };
     let stride = width as usize * bytes_per_pixel;
     let min_len = stride.saturating_mul(height as usize);
@@ -442,7 +445,9 @@ fn sample_battle_begin_band(
         while x < rect.right {
             let (r, g, b) = match format {
                 PixelFormat::Rgba => (buffer[offset], buffer[offset + 1], buffer[offset + 2]),
-                PixelFormat::Bgr => (buffer[offset + 2], buffer[offset + 1], buffer[offset]),
+                PixelFormat::Bgr | PixelFormat::Bgra => {
+                    (buffer[offset + 2], buffer[offset + 1], buffer[offset])
+                }
             };
             let brightness = r as u16 + g as u16 + b as u16;
             stats.total += 1;

@@ -7,6 +7,10 @@ pub mod ldplayer;
 pub mod mumu;
 pub mod replay;
 #[cfg(windows)]
+pub mod wgc;
+#[cfg(windows)]
+pub(crate) mod window_find;
+#[cfg(windows)]
 pub mod windows;
 
 pub use adb::AdbController;
@@ -14,6 +18,8 @@ pub use adb_resolver::{adb_available, adb_command, resolve_adb_with, resolved_ad
 pub use ldplayer::LDPlayerController;
 pub use mumu::MuMuController;
 pub use replay::ReplayCaptureBackend;
+#[cfg(windows)]
+pub use wgc::WgcController;
 #[cfg(windows)]
 pub use windows::WindowsController;
 
@@ -96,11 +102,31 @@ pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, 
         CaptureType::Windows => {
             #[cfg(windows)]
             {
-                Ok(Box::new(WindowsController::new(
+                // Prefer Windows Graphics Capture (fast, DWM-composited GPU
+                // texture). `connect()` here is a lightweight pre-check (locate
+                // window + `IsSupported` + client size); if it fails we fall
+                // back to the GDI backend, so unsupported systems still work.
+                let mut wgc = WgcController::new(
                     config.window_handle,
-                    config.window_title,
-                    config.window_class,
-                )))
+                    config.window_title.clone(),
+                    config.window_class.clone(),
+                );
+                match wgc.connect() {
+                    Ok(()) => {
+                        log::info!("Windows capture: using Windows Graphics Capture (WGC)");
+                        Ok(Box::new(wgc))
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Windows capture: WGC unavailable ({error}); falling back to GDI"
+                        );
+                        Ok(Box::new(WindowsController::new(
+                            config.window_handle,
+                            config.window_title,
+                            config.window_class,
+                        )))
+                    }
+                }
             }
             #[cfg(not(windows))]
             {

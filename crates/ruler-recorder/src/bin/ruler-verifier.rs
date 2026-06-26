@@ -320,6 +320,7 @@ impl RawVideoDecoder {
         let pix_fmt = match format {
             PixelFormat::Rgba => "rgba",
             PixelFormat::Bgr => "bgr24",
+            PixelFormat::Bgra => "bgra",
         };
 
         let mut child = Command::new("ffmpeg")

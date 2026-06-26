@@ -1,5 +1,5 @@
 //! Zero-copy pixel scanner for cost-bar and battle-state analysis.
-//! Operates directly on raw RGBA/BGR buffers.
+//! Operates directly on raw RGBA/BGR/BGRA buffers.
 
 mod battle_state;
 mod cost_bar;
@@ -11,6 +11,9 @@ pub use cost_bar::{get_raw_filled_pixel_width, is_cost_negative, is_cost_negativ
 pub enum PixelFormat {
     Rgba,
     Bgr,
+    /// BGRA8 (B,G,R,A byte order). Produced by the Windows Graphics Capture
+    /// backend. Same channel order as `Bgr` with a trailing alpha byte.
+    Bgra,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

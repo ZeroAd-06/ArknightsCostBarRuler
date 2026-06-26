@@ -19,6 +19,7 @@ pub fn pixel_format_tag(format: PixelFormat) -> u32 {
     match format {
         PixelFormat::Rgba => 0,
         PixelFormat::Bgr => 1,
+        PixelFormat::Bgra => 2,
     }
 }
 
@@ -27,6 +28,7 @@ pub fn pixel_format_from_tag(tag: u32) -> Option<PixelFormat> {
     match tag {
         0 => Some(PixelFormat::Rgba),
         1 => Some(PixelFormat::Bgr),
+        2 => Some(PixelFormat::Bgra),
         _ => None,
     }
 }
@@ -36,6 +38,7 @@ pub fn bytes_per_pixel(format: PixelFormat) -> u32 {
     match format {
         PixelFormat::Rgba => 4,
         PixelFormat::Bgr => 3,
+        PixelFormat::Bgra => 4,
     }
 }
 

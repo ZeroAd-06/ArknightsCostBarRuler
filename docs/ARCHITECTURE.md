@@ -118,7 +118,7 @@
 [8]  frame_id (u64)
 [4]  width (u32)
 [4]  height (u32)
-[4]  format_tag (u32) — 0=RGBA, 1=BGR
+[4]  format_tag (u32) — 0=RGBA, 1=BGR, 2=BGRA
 [8]  capture_duration_us (u64)
 [8]  capture_timestamp_ns (u64)
 [8]  data_len (u64)

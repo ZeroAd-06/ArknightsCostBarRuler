@@ -38,6 +38,7 @@ fn read_pixel(
     let bytes_per_pixel = match format {
         PixelFormat::Rgba => 4,
         PixelFormat::Bgr => 3,
+        PixelFormat::Bgra => 4,
     };
     let stride = width as usize * bytes_per_pixel;
     let buffer_row = (height as i32 - 1 - y) as usize;
@@ -59,6 +60,13 @@ fn read_pixel(
             let g = buffer[offset + 1];
             let r = buffer[offset + 2];
             Some((r, g, b, ALPHA_OPAQUE))
+        }
+        PixelFormat::Bgra => {
+            let b = buffer[offset];
+            let g = buffer[offset + 1];
+            let r = buffer[offset + 2];
+            let a = buffer[offset + 3];
+            Some((r, g, b, a))
         }
     }
 }

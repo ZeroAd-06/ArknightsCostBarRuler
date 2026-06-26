@@ -40,7 +40,7 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 | `costIsNegative` | `boolean` | 当前是否处于负费显示。 |
 | `battleState` | `string \| null` | 战斗状态识别结果。 |
 | `captureWidth` / `captureHeight` | `integer \| null` | 本帧截图尺寸。 |
-| `captureFormat` | `string \| null` | 本帧像素格式，目前常见为 `rgba` 或 `bgr`。 |
+| `captureFormat` | `string \| null` | 本帧像素格式，目前常见为 `rgba`、`bgr` 或 `bgra`。 |
 | `captureTimestampNs` | `integer \| null` | 截图时间戳，单位纳秒。 |
 | `captureDurationUs` | `integer \| null` | 截图耗时，单位微秒。 |
 | `cursorBlocked` | `boolean` | PC 自绘光标是否遮挡费用条；被遮挡帧不会写入历史分析记录。 |

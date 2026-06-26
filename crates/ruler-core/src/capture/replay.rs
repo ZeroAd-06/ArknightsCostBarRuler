@@ -16,6 +16,7 @@ fn bytes_per_pixel(fmt: PixelFormat) -> u32 {
     match fmt {
         PixelFormat::Rgba => 4,
         PixelFormat::Bgr => 3,
+        PixelFormat::Bgra => 4,
     }
 }
 
@@ -217,6 +218,7 @@ impl CaptureBackend for ReplayCaptureBackend {
         let pix_fmt_str = match self.pix_fmt {
             PixelFormat::Rgba => "rgba",
             PixelFormat::Bgr => "bgr24",
+            PixelFormat::Bgra => "bgra",
         };
 
         let mut child = Command::new("ffmpeg")

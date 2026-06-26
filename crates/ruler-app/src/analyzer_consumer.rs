@@ -518,6 +518,7 @@ fn pixel_format_name(format: PixelFormat) -> &'static str {
     match format {
         PixelFormat::Rgba => "rgba",
         PixelFormat::Bgr => "bgr",
+        PixelFormat::Bgra => "bgra",
     }
 }
 

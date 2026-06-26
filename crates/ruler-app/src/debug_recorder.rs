@@ -33,6 +33,7 @@ fn pix_fmt_str(fmt: PixelFormat) -> &'static str {
     match fmt {
         PixelFormat::Rgba => "rgba",
         PixelFormat::Bgr => "bgr24",
+        PixelFormat::Bgra => "bgra",
     }
 }
 
@@ -40,6 +41,7 @@ fn bytes_per_pixel(fmt: PixelFormat) -> u32 {
     match fmt {
         PixelFormat::Rgba => 4,
         PixelFormat::Bgr => 3,
+        PixelFormat::Bgra => 4,
     }
 }
 

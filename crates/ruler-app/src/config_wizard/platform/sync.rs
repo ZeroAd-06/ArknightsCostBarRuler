@@ -336,6 +336,7 @@ fn preview_rgba_scaled(frame: &PreviewFrame, target_w: u32, target_h: u32) -> Op
     let bytes_per_pixel = match frame.format {
         PixelFormat::Rgba => 4usize,
         PixelFormat::Bgr => 3usize,
+        PixelFormat::Bgra => 4usize,
     };
     let src_w = frame.width as usize;
     let src_h = frame.height as usize;
@@ -369,7 +370,7 @@ fn preview_rgba_scaled(frame: &PreviewFrame, target_w: u32, target_h: u32) -> Op
                             g += u32::from(frame.data[src + 1]);
                             b += u32::from(frame.data[src + 2]);
                         }
-                        PixelFormat::Bgr => {
+                        PixelFormat::Bgr | PixelFormat::Bgra => {
                             b += u32::from(frame.data[src]);
                             g += u32::from(frame.data[src + 1]);
                             r += u32::from(frame.data[src + 2]);

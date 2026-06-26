@@ -258,6 +258,21 @@ pub(super) fn wire_callbacks(
         let drag_on_title = Rc::clone(drag_on_title);
         move || drag_on_title.set(false)
     });
+    wizard.on_open_update({
+        let core = Rc::clone(core);
+        move || {
+            let url = core
+                .borrow()
+                .app_state
+                .snapshot()
+                .ui
+                .update_notice
+                .map(|notice| notice.html_url);
+            if let Some(url) = url {
+                unsafe { crate::menu::win32::open_url(&url) };
+            }
+        }
+    });
     wizard.on_confirm({
         let core = Rc::clone(core);
         let result = Rc::clone(result);

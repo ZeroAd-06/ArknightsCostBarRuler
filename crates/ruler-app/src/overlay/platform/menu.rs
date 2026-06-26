@@ -317,6 +317,8 @@ unsafe fn populate_menu(menu: &RulerMenu, ui: &crate::ui_state::UiSnapshot, i18n
         )
         .into(),
     );
+    menu.set_update_available(ui.update_notice.is_some());
+    menu.set_update_text(i18n.tr("update.badge.menu").into());
 }
 
 /// Rebuild just the profile-row model (at open, and when the list changes).
@@ -445,9 +447,21 @@ fn wire_menu_callbacks(
         }
     });
     menu.on_about({
+        let state = Arc::clone(state);
         let closing = Rc::clone(closing);
         move || {
-            unsafe { crate::menu::win32::open_about_page() };
+            let url = state
+                .snapshot()
+                .ui
+                .update_notice
+                .map(|notice| notice.html_url);
+            unsafe {
+                if let Some(url) = url {
+                    crate::menu::win32::open_url(&url);
+                } else {
+                    crate::menu::win32::open_about_page();
+                }
+            }
             closing.set(true);
         }
     });
@@ -532,12 +546,14 @@ unsafe extern "system" fn menu_window_proc(
                 let inside = x >= 0 && y >= 0 && x < state.buf_w as i32 && y < state.buf_h as i32;
                 if inside {
                     let position = logical_pos(lparam, state.scale);
-                    let _ = state.window.window().try_dispatch_event(
-                        WindowEvent::PointerReleased {
-                            position,
-                            button: PointerEventButton::Left,
-                        },
-                    );
+                    let _ =
+                        state
+                            .window
+                            .window()
+                            .try_dispatch_event(WindowEvent::PointerReleased {
+                                position,
+                                button: PointerEventButton::Left,
+                            });
                 }
             }
             LRESULT(0)
@@ -625,7 +641,12 @@ unsafe fn menu_tick(hwnd: HWND) {
     state
         .menu
         .set_timer_enabled(snapshot.ui.active_profile.is_some());
-    state.menu.set_undo_reset_enabled(snapshot.ui.can_undo_reset);
+    state
+        .menu
+        .set_undo_reset_enabled(snapshot.ui.can_undo_reset);
+    state
+        .menu
+        .set_update_available(snapshot.ui.update_notice.is_some());
 
     // While calibrating, force the effective profile list to empty so the
     // `for` loop in menu.slint renders zero rows and the popup can shrink.

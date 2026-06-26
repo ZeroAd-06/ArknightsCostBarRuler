@@ -121,6 +121,8 @@ fn main() {
     hud.set_total_str("/30".into());
     hud.set_lap_str("48".into());
     hud.set_cost_negative(false);
+    hud.set_update_available(true);
+    hud.set_update_text("更新".into());
     render_png(&hud_window, hw, hh, "hud_running.png");
 
     hud.set_force_controls(true);
@@ -155,6 +157,8 @@ fn main() {
     menu.set_cap_delete("删除".into());
     menu.set_label_new("新建".into());
     menu.set_about_text(format!("v{} by Z_06", env!("CARGO_PKG_VERSION")).into());
+    menu.set_update_available(true);
+    menu.set_update_text("有更新".into());
 
     let menu_w_logical = 300.0_f32;
     let menu_h_logical = 190.0 + 30.0 * n as f32;
@@ -230,6 +234,8 @@ fn main() {
     wizard.set_cap_telemetry_hint("为了满足我的好奇心，也方便后续开发。".into());
     wizard.set_cap_debug_show("显示调试选项".into());
     wizard.set_cap_debug_hide("隐藏调试选项".into());
+    wizard.set_update_available(true);
+    wizard.set_update_text("新版本 v2.3.0".into());
     wizard.set_auto_checked(true);
     wizard.set_telemetry_checked(true);
     wizard.set_has_preview(true);

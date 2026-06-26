@@ -16,9 +16,15 @@ pub mod win32 {
         },
     };
 
+    const ABOUT_PAGE_URL: &str = "https://github.com/ZeroAd-06/ArknightsCostBarRuler";
+
     pub unsafe fn open_about_page() {
+        open_url(ABOUT_PAGE_URL);
+    }
+
+    pub unsafe fn open_url(url: &str) {
         let operation = wide("open");
-        let url = wide("https://github.com/ZeroAd-06/ArknightsCostBarRuler");
+        let url = wide(url);
         let _ = ShellExecuteW(
             HWND::default(),
             PCWSTR(operation.as_ptr()),

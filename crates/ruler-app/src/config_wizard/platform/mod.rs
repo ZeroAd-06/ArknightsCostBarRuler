@@ -16,7 +16,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     rc::Rc,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -61,6 +64,7 @@ use crate::{
     },
     target_discovery::TargetCandidate,
     ui::{TargetRow, Wizard},
+    worker::SharedAppState,
 };
 
 mod callbacks;
@@ -90,6 +94,7 @@ const WIZARD_LOGICAL_W: f32 = 560.0;
 /// tick. Both run on the single UI thread, so a plain `Rc<RefCell<_>>` is safe.
 struct WizardCore {
     i18n: I18n,
+    app_state: Arc<SharedAppState>,
     previous_config: Option<RulerConfig>,
     candidates: Vec<TargetCandidate>,
     selected_index: Option<usize>,
@@ -175,6 +180,7 @@ impl Drop for WizardWindow {
 
 pub(super) fn run_config_wizard(
     i18n: &I18n,
+    app_state: Arc<SharedAppState>,
     previous_config: Option<&RulerConfig>,
     debug: bool,
 ) -> Option<RulerConfig> {
@@ -198,6 +204,7 @@ pub(super) fn run_config_wizard(
     let (probe_tx, probe_rx) = mpsc::channel();
     let core = Rc::new(RefCell::new(WizardCore {
         i18n: i18n.clone(),
+        app_state,
         previous_config: previous_config.cloned(),
         candidates: Vec::new(),
         selected_index: None,

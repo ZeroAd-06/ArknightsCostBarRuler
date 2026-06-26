@@ -1,5 +1,8 @@
 fn main() {
     println!("cargo:rerun-if-changed=ui/hud.slint");
+    println!("cargo:rerun-if-changed=ui/menu.slint");
+    println!("cargo:rerun-if-changed=ui/wizard.slint");
+    println!("cargo:rerun-if-changed=ui/theme.slint");
     println!("cargo:rerun-if-changed=../../icons/deco.png");
 
     let config = slint_build::CompilerConfiguration::new().with_style("fluent".into());

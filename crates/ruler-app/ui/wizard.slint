@@ -37,6 +37,8 @@ export component Wizard inherits Window {
     in property <string> preview-placeholder;
     in property <string> cap-telemetry;
     in property <string> cap-telemetry-hint;
+    in property <bool> update-available: false;
+    in property <string> update-text: "";
 
     // adb-unavailability banner: shown when neither PATH adb nor a bundled
     // emulator adb could be launched. Set by the Rust side via
@@ -98,6 +100,7 @@ export component Wizard inherits Window {
     callback confirm();
     callback cancel();
     callback close();
+    callback open-update();
     callback title-pressed();
     callback title-released();
 
@@ -160,6 +163,26 @@ export component Wizard inherits Window {
                     letter-spacing: 0.5px;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                }
+                if (root.update-available): Rectangle {
+                    width: 96px;
+                    height: 22px;
+                    y: (parent.height - self.height) / 2;
+                    border-width: 1px;
+                    border-color: Palette.accent;
+                    background: upa.has-hover ? Palette.accent.with-alpha(0.30) : Palette.accent-dim;
+                    animate background { duration: 110ms; }
+                    Text {
+                        text: root.update-text;
+                        color: Palette.text-primary;
+                        font-size: 11px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    upa := TouchArea {
+                        clicked => { root.open-update(); }
+                    }
                 }
                 IconBtn {
                     icon: Icons.cross;

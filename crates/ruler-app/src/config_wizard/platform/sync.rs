@@ -60,6 +60,25 @@ pub(super) fn sync_to_slint(wizard: &Wizard, core: &mut WizardCore) {
         sync_header_status(wizard, core);
     }
     sync_adb_availability(wizard);
+    sync_update_notice(wizard, core);
+}
+
+fn sync_update_notice(wizard: &Wizard, core: &WizardCore) {
+    let notice = core.app_state.snapshot().ui.update_notice;
+    let available = notice.is_some();
+    if wizard.get_update_available() != available {
+        wizard.set_update_available(available);
+    }
+    let Some(notice) = notice else {
+        return;
+    };
+    let version = format!("v{}", notice.version.trim_start_matches('v'));
+    let text = core
+        .i18n
+        .tr_with("update.badge.wizard", &[("version", version)]);
+    if wizard.get_update_text() != text {
+        wizard.set_update_text(text.into());
+    }
 }
 
 /// Render the manual-target state: the manual row is highlighted, there is no
@@ -444,16 +463,16 @@ mod tests {
     #[test]
     fn wizard_logical_height_tracks_debug_and_manual_panels() {
         // Collapsed debug panel: just the base height.
-        assert_eq!(wizard_logical_height(false, false), 404.0);
-        assert_eq!(wizard_logical_height(false, true), 404.0);
+        assert_eq!(wizard_logical_height(false, false), WIZARD_LOGICAL_H);
+        assert_eq!(wizard_logical_height(false, true), WIZARD_LOGICAL_H);
         // Expanded: recording-only vs the taller manual-target panel.
         assert_eq!(
             wizard_logical_height(true, false),
-            404.0 + WIZARD_DEBUG_RECORDING_H
+            WIZARD_LOGICAL_H + WIZARD_DEBUG_RECORDING_H
         );
         assert_eq!(
             wizard_logical_height(true, true),
-            404.0 + WIZARD_DEBUG_MANUAL_H
+            WIZARD_LOGICAL_H + WIZARD_DEBUG_MANUAL_H
         );
         assert!(
             wizard_logical_height(true, true) > wizard_logical_height(true, false),

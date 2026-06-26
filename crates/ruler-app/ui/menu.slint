@@ -35,6 +35,8 @@ export component RulerMenu inherits Window {
     in property <string> cap-delete;
     in property <string> label-new;
     in property <string> about-text;
+    in property <bool> update-available: false;
+    in property <string> update-text: "";
 
     // inline edit / delete state: index of the row in that mode, or -1 (none).
     // Driven from Slint clicks; overlay.rs reads/clears them while routing keys.
@@ -581,6 +583,22 @@ export component RulerMenu inherits Window {
                             color: Palette.text-secondary;
                             font-size: 11px;
                             vertical-alignment: center;
+                        }
+                        if (root.update-available): Rectangle {
+                            width: 48px;
+                            height: 18px;
+                            border-width: 1px;
+                            border-color: Palette.accent;
+                            background: ata.has-hover ? Palette.accent.with-alpha(0.30) : Palette.accent-dim;
+                            animate background { duration: 110ms; }
+                            Text {
+                                text: root.update-text;
+                                color: Palette.text-primary;
+                                font-size: 10px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                     ata := TouchArea {

@@ -17,7 +17,10 @@ use crate::{
     commands::UiCommand,
     profiles::ProfileStore,
     resources::ResourceLocator,
-    ui_state::{ApiFrameLookup, ApiFrameRecord, ApiHistoryBounds, ApiStateSnapshot, UiSnapshot},
+    ui_state::{
+        ApiFrameLookup, ApiFrameRecord, ApiHistoryBounds, ApiStateSnapshot, UiSnapshot,
+        UpdateNotice,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -173,6 +176,10 @@ impl SharedAppState {
 
     pub fn request_exit(&self) {
         self.update_ui(|ui, _| ui.should_exit = true);
+    }
+
+    pub fn set_update_notice(&self, notice: Option<UpdateNotice>) {
+        self.update_ui(|ui, _| ui.update_notice = notice);
     }
 
     /// Set the one-shot cancel flag for an in-flight calibration. The worker
@@ -967,5 +974,39 @@ fn sleep_until(deadline: Instant, running: &AtomicBool) {
             break;
         }
         thread::sleep((deadline - now).min(Duration::from_millis(1)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use super::*;
+
+    #[test]
+    fn update_notice_enters_snapshot_and_notifies_overlay() {
+        let state = SharedAppState::default();
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        state.set_overlay_waker(Some(Arc::new({
+            let wake_count = Arc::clone(&wake_count);
+            move || {
+                wake_count.fetch_add(1, Ordering::SeqCst);
+            }
+        })));
+        let notice = UpdateNotice {
+            version: "2.3.0".to_string(),
+            release_title: "Ruler 2.3.0".to_string(),
+            html_url: "https://github.com/ZeroAd-06/ArknightsCostBarRuler/releases/tag/20260627"
+                .to_string(),
+            download_url: None,
+        };
+
+        state.set_update_notice(Some(notice.clone()));
+
+        assert_eq!(state.snapshot().ui.update_notice, Some(notice));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
     }
 }

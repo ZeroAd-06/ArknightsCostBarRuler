@@ -332,6 +332,19 @@ fn wire_callbacks(
             let _ = tx.send(UiCommand::AdjustTimer { frames });
         }
     });
+    hud.on_open_update({
+        let state = Arc::clone(state);
+        move || {
+            let url = state
+                .snapshot()
+                .ui
+                .update_notice
+                .map(|notice| notice.html_url);
+            if let Some(url) = url {
+                unsafe { crate::menu::win32::open_url(&url) };
+            }
+        }
+    });
     hud.on_bg_pressed({
         let drag_on_bg = Rc::clone(drag_on_bg);
         move || drag_on_bg.set(true)
@@ -539,6 +552,8 @@ fn sync_properties(state: &mut WindowState, ui: &crate::ui_state::UiSnapshot) {
 
         hud.set_cursor_blocked(ui.cursor_blocked);
         hud.set_cursor_warning_text(state.i18n.tr("overlay.cursor.blocked").into());
+        hud.set_update_available(ui.update_notice.is_some());
+        hud.set_update_text(state.i18n.tr("update.badge.short").into());
 
         let message = match ui.mode {
             OverlayMode::Idle => state.i18n.tr("overlay.msg.idle"),
@@ -776,6 +791,7 @@ unsafe fn outer_area_should_pass_through(hwnd: HWND, state: &mut WindowState) ->
 
     let x = cursor.x - window_rect.left;
     let y = cursor.y - window_rect.top;
-    let running = matches!(state.state.snapshot().ui.mode, OverlayMode::Running);
-    outer_area_should_pass_through_at(x, y, state.scale, running)
+    let ui = state.state.snapshot().ui;
+    let running = matches!(ui.mode, OverlayMode::Running);
+    outer_area_should_pass_through_at(x, y, state.scale, running, ui.update_notice.is_some())
 }

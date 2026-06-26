@@ -1,10 +1,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod api;
-mod calibration;
 mod analyzer_consumer;
+mod api;
 mod app;
 mod arknights_settings;
+mod calibration;
 mod commands;
 mod config_wizard;
 mod debug_recorder;
@@ -14,10 +14,10 @@ mod icons;
 mod logging;
 mod menu;
 mod overlay;
-mod profiles;
-mod resources;
 #[cfg(windows)]
 mod pc_cursor_guard;
+mod profiles;
+mod resources;
 #[cfg(windows)]
 mod slint_win;
 mod target_discovery;
@@ -25,6 +25,7 @@ mod telemetry;
 mod tray;
 mod ui;
 mod ui_state;
+mod update_check;
 mod worker;
 
 use app::RulerApp;

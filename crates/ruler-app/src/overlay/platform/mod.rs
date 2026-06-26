@@ -25,6 +25,8 @@ const LOGICAL_H: f32 = 82.0;
 // Keep this in sync with the toolbar `width` in `ui/hud.slint`; hit-testing
 // uses the same rect for the transparent window extension.
 const LOGICAL_TOOLBAR_W: f32 = 134.0;
+const LOGICAL_UPDATE_BADGE_W: f32 = 48.0;
+const LOGICAL_UPDATE_BADGE_LEFT_PAD: f32 = 4.0;
 const LOGICAL_TOOLBAR_H: f32 = 24.0;
 const LOGICAL_TOOLBAR_RIGHT_PAD: f32 = 4.0;
 const LOGICAL_TOOLBAR_TOP_GAP: f32 = 2.0;

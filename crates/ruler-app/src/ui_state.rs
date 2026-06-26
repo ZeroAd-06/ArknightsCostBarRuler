@@ -89,6 +89,14 @@ pub struct ProfileMenuItem {
     pub is_active: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateNotice {
+    pub version: String,
+    pub release_title: String,
+    pub html_url: String,
+    pub download_url: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ApiStateSnapshot {
     pub is_running: bool,
@@ -205,6 +213,7 @@ pub struct UiSnapshot {
     pub overlay_scale_pct: u16,
     pub should_exit: bool,
     pub cursor_blocked: bool,
+    pub update_notice: Option<UpdateNotice>,
     // Monotonic counter bumped each time the timer is reset (manual or auto).
     // The overlay compares this against its own copy to detect new resets and
     // drive the cover animation. Wrapping is fine — only inequality matters.
@@ -231,6 +240,7 @@ impl Default for UiSnapshot {
             overlay_scale_pct: 100,
             should_exit: false,
             cursor_blocked: false,
+            update_notice: None,
             reset_pulse: 0,
             reset_kind: ResetKind::Manual,
         }

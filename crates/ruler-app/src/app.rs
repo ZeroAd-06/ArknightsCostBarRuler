@@ -16,6 +16,7 @@ use crate::{
     resources::ResourceLocator,
     target_discovery::{discover_targets, probe_candidate_once},
     telemetry::ensure_config_uuid,
+    update_check::spawn_update_check,
     worker::{SharedAppState, StartupStatus, WorkerRuntime},
 };
 
@@ -39,7 +40,11 @@ impl RulerApp {
             .and_then(|config| config.language.as_deref());
         let i18n = Arc::new(I18n::load(&resources, preferred_locale));
 
-        let startup_status = resolve_startup_config(&resources, &i18n, initial_status, debug)?;
+        let state = Arc::new(SharedAppState::default());
+        spawn_update_check(Arc::clone(&state));
+
+        let startup_status =
+            resolve_startup_config(&resources, &i18n, Arc::clone(&state), initial_status, debug)?;
         logging.apply_trace_setting(
             startup_status
                 .loaded_config
@@ -48,7 +53,6 @@ impl RulerApp {
                 .unwrap_or(false),
         );
 
-        let state = Arc::new(SharedAppState::default());
         state.update_startup_status(&startup_status);
 
         let icons = Arc::new(IconSet::load(&resources));
@@ -177,6 +181,7 @@ fn determine_startup_status(resources: &ResourceLocator) -> StartupStatus {
 fn resolve_startup_config(
     resources: &ResourceLocator,
     i18n: &I18n,
+    state: Arc<SharedAppState>,
     initial_status: StartupStatus,
     debug: bool,
 ) -> Result<StartupStatus, StartupError> {
@@ -186,8 +191,13 @@ fn resolve_startup_config(
     // --debug: force the config wizard regardless of current config.
     if debug {
         log::info!("debug mode: forcing config wizard");
-        if let Some(mut config) = run_config_wizard(resources, i18n, previous_config.as_ref(), true)
-        {
+        if let Some(mut config) = run_config_wizard(
+            resources,
+            i18n,
+            Arc::clone(&state),
+            previous_config.as_ref(),
+            true,
+        ) {
             ensure_config_uuid(&mut config);
             config
                 .save_to_path(resources.config_path())
@@ -239,7 +249,13 @@ fn resolve_startup_config(
         }
     }
 
-    if let Some(mut config) = run_config_wizard(resources, i18n, previous_config.as_ref(), false) {
+    if let Some(mut config) = run_config_wizard(
+        resources,
+        i18n,
+        Arc::clone(&state),
+        previous_config.as_ref(),
+        false,
+    ) {
         ensure_config_uuid(&mut config);
         config
             .save_to_path(resources.config_path())

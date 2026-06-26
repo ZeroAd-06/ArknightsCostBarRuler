@@ -34,6 +34,8 @@ export component Hud inherits Window {
     in property <bool> undo-reset-enabled: false;
     in property <bool> cursor-blocked: false;
     in property <string> cursor-warning-text: "";
+    in property <bool> update-available: false;
+    in property <string> update-text: "";
 
     // ---- reset cover animation (driven from Rust each tick) ----
     // A cyan bar sweeps down from the top to cover the panel, holds, then
@@ -55,6 +57,7 @@ export component Hud inherits Window {
     callback lap-clicked();
     callback back-cycle();
     callback fwd-cycle();
+    callback open-update();
     callback bg-pressed();
     callback bg-released();
 
@@ -283,6 +286,31 @@ export component Hud inherits Window {
 
         // Hover-revealed control toolbar (running only). It sits below the
         // primary HUD panel, so it never covers or compresses the readout.
+        if (root.update-available): Rectangle {
+            width: 48px;
+            height: root.toolbar-height;
+            x: 4px;
+            y: root.panel-height + 2px;
+            background: uta.has-hover ? Palette.accent.with-alpha(0.30) : Palette.toolbar;
+            border-width: 1px;
+            border-color: Palette.accent;
+            opacity: root.show-controls ? 1 : 0;
+            visible: self.opacity > 0.01;
+            animate opacity { duration: 140ms; }
+            animate background { duration: 110ms; }
+            Text {
+                text: root.update-text;
+                color: Palette.text-primary;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            uta := TouchArea {
+                clicked => { root.open-update(); }
+            }
+        }
+
         Rectangle {
             width: 134px;
             height: root.toolbar-height;

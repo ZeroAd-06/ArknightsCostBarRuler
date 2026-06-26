@@ -8,7 +8,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_
 
 use super::{
     LOGICAL_H, LOGICAL_PANEL_H, LOGICAL_TOOLBAR_H, LOGICAL_TOOLBAR_RIGHT_PAD,
-    LOGICAL_TOOLBAR_TOP_GAP, LOGICAL_TOOLBAR_W, LOGICAL_W,
+    LOGICAL_TOOLBAR_TOP_GAP, LOGICAL_TOOLBAR_W, LOGICAL_UPDATE_BADGE_LEFT_PAD,
+    LOGICAL_UPDATE_BADGE_W, LOGICAL_W,
 };
 
 // Reset cover animation timing (compact ~0.7s total). All three phases
@@ -89,23 +90,37 @@ pub(super) fn advance_displayed_progress(displayed: f32, target: f32) -> f32 {
     }
 }
 
-pub(super) fn outer_area_should_pass_through_at(x: i32, y: i32, scale: f32, running: bool) -> bool {
+pub(super) fn outer_area_should_pass_through_at(
+    x: i32,
+    y: i32,
+    scale: f32,
+    running: bool,
+    update_available: bool,
+) -> bool {
     if y < (LOGICAL_PANEL_H * scale).round() as i32 {
         return false;
     }
-    if running && toolbar_hit_zone_contains(x as f32 / scale, y as f32 / scale) {
+    if running && toolbar_hit_zone_contains(x as f32 / scale, y as f32 / scale, update_available) {
         return false;
     }
     true
 }
 
-fn toolbar_hit_zone_contains(logical_x: f32, logical_y: f32) -> bool {
+fn toolbar_hit_zone_contains(logical_x: f32, logical_y: f32, update_available: bool) -> bool {
     let left = LOGICAL_W - LOGICAL_TOOLBAR_W - LOGICAL_TOOLBAR_RIGHT_PAD;
     let right = LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD;
     let top = LOGICAL_PANEL_H;
     let bottom = LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + LOGICAL_TOOLBAR_H;
 
-    logical_x >= left && logical_x < right && logical_y >= top && logical_y < bottom
+    let in_vertical_band = logical_y >= top && logical_y < bottom;
+    if !in_vertical_band {
+        return false;
+    }
+    let in_controls = logical_x >= left && logical_x < right;
+    let in_update_badge = update_available
+        && logical_x >= LOGICAL_UPDATE_BADGE_LEFT_PAD
+        && logical_x < LOGICAL_UPDATE_BADGE_LEFT_PAD + LOGICAL_UPDATE_BADGE_W;
+    in_controls || in_update_badge
 }
 
 /// Returns `(left, top, width, height, base_scale)` in physical pixels.
@@ -150,7 +165,7 @@ mod tests {
         let x = ((LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD - 10.0) * scale).round() as i32;
         let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
 
-        assert!(!outer_area_should_pass_through_at(x, y, scale, true));
+        assert!(!outer_area_should_pass_through_at(x, y, scale, true, false));
     }
 
     #[test]
@@ -160,7 +175,7 @@ mod tests {
         let x = ((toolbar_left + 12.0) * scale).round() as i32;
         let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
 
-        assert!(!outer_area_should_pass_through_at(x, y, scale, true));
+        assert!(!outer_area_should_pass_through_at(x, y, scale, true, false));
     }
 
     #[test]
@@ -169,7 +184,25 @@ mod tests {
         let x = ((LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD - 10.0) * scale).round() as i32;
         let y = ((LOGICAL_PANEL_H + 1.0) * scale).round() as i32;
 
-        assert!(!outer_area_should_pass_through_at(x, y, scale, true));
+        assert!(!outer_area_should_pass_through_at(x, y, scale, true, false));
+    }
+
+    #[test]
+    fn update_badge_zone_stays_hit_testable_when_available() {
+        let scale = 2.5;
+        let x = ((LOGICAL_UPDATE_BADGE_LEFT_PAD + 10.0) * scale).round() as i32;
+        let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
+
+        assert!(!outer_area_should_pass_through_at(x, y, scale, true, true));
+    }
+
+    #[test]
+    fn update_badge_zone_passes_through_without_update() {
+        let scale = 2.5;
+        let x = ((LOGICAL_UPDATE_BADGE_LEFT_PAD + 10.0) * scale).round() as i32;
+        let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
+
+        assert!(outer_area_should_pass_through_at(x, y, scale, true, false));
     }
 
     #[test]
@@ -178,7 +211,7 @@ mod tests {
         let x = (20.0_f32 * scale).round() as i32;
         let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
 
-        assert!(outer_area_should_pass_through_at(x, y, scale, true));
+        assert!(outer_area_should_pass_through_at(x, y, scale, true, false));
     }
 
     #[test]
@@ -187,7 +220,7 @@ mod tests {
         let x = ((LOGICAL_W - LOGICAL_TOOLBAR_RIGHT_PAD - 10.0) * scale).round() as i32;
         let y = ((LOGICAL_PANEL_H + LOGICAL_TOOLBAR_TOP_GAP + 10.0) * scale).round() as i32;
 
-        assert!(outer_area_should_pass_through_at(x, y, scale, false));
+        assert!(outer_area_should_pass_through_at(x, y, scale, false, false));
     }
 
     #[test]

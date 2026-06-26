@@ -261,6 +261,17 @@ pub(super) fn run_config_wizard(
         .window()
         .try_dispatch_event(WindowEvent::WindowActiveChanged(true));
 
+    // Keep a handle to the shared state so the probe workers can be stopped
+    // explicitly once the window closes, instead of relying on `WizardCore`'s
+    // `Drop`. The Slint component retains `Rc<RefCell<WizardCore>>` clones in
+    // its callback slots, and under the custom software-rendering platform that
+    // component can outlive `DestroyWindow`, deferring the `Drop` indefinitely.
+    // A deferred `Drop` means the probe workers keep capturing full-resolution
+    // frames at ~4 Hz into the unbounded `probe_rx` channel that nothing drains
+    // after the wizard closes — a memory leak that scales with capture
+    // resolution (~15-30 MB/s at 720p-1080p).
+    let core_for_shutdown = Rc::clone(&core);
+
     unsafe {
         let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
             return None;
@@ -349,6 +360,20 @@ pub(super) fn run_config_wizard(
         }
 
         let _ = DestroyWindow(hwnd);
+    }
+
+    // Stop the probe workers and release every full-resolution frame they may
+    // still be holding, regardless of whether the `WizardCore` itself is about
+    // to be dropped. Without this, a `WizardCore` retained by the Slint
+    // component keeps its capture threads alive, flooding `probe_rx` after the
+    // window is gone (see `core_for_shutdown` above).
+    {
+        let mut core = core_for_shutdown.borrow_mut();
+        stop_probe_worker_list(&mut core.probe_workers);
+        core.candidates.clear();
+        core.preview_token = None;
+        // Drain any frames already queued on the channel.
+        while core.probe_rx.try_recv().is_ok() {}
     }
 
     let config = result.borrow_mut().take();

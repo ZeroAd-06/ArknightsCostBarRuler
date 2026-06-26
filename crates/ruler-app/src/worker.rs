@@ -457,7 +457,8 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         .map_err(|e| e.to_string())?;
     let spill_dir = context.log_session_dir.join("frame_spill");
     let pipeline_config =
-        PipelineConfig::new(capture_config, spill_dir, context.session_id.clone());
+        PipelineConfig::new(capture_config, spill_dir, context.session_id.clone())
+            .with_capture_delay_ms(context.config.screenshot_delay_ms);
     let (pipeline, info) = CapturePipeline::start(pipeline_config).map_err(|e| e.to_string())?;
     log::info!(
         "capture pipeline started: {}x{}, pipe={}",

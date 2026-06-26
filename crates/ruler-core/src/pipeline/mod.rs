@@ -38,6 +38,7 @@ pub mod frame;
 #[cfg(windows)]
 pub mod pipe;
 pub mod store;
+mod timing;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -50,6 +51,7 @@ use crate::capture::{create_backend, CaptureBackend, CaptureConfig, CapturedFram
 use crate::pipeline::cursor::{ConsumerPolicy, Cursor, CursorRegistry};
 use crate::pipeline::frame::{Frame, FrameId};
 use crate::pipeline::store::{FrameStore, SpillConfig, StoreError};
+use crate::pipeline::timing::{capture_interval_from_delay_ms, CaptureThrottle};
 
 #[cfg(windows)]
 pub use crate::pipeline::pipe::{
@@ -111,6 +113,10 @@ pub struct PipelineConfig {
     /// Maximum total in-memory bytes before spilling begins. Defaults to
     /// 512 MiB.
     pub max_in_memory_bytes: usize,
+    /// Minimum wall-clock interval between capture attempts. `None` keeps the
+    /// pipeline unthrottled for callers that intentionally drive capture as
+    /// fast as the backend can produce frames.
+    pub capture_interval: Option<Duration>,
     /// Unique session identifier used to derive the named pipe name. Should
     /// be unique per running process to avoid collisions.
     pub session_id: String,
@@ -122,8 +128,14 @@ impl PipelineConfig {
             capture,
             spill_dir,
             max_in_memory_bytes: SpillConfig::DEFAULT_MAX_BYTES,
+            capture_interval: None,
             session_id,
         }
+    }
+
+    pub fn with_capture_delay_ms(mut self, delay_ms: Option<f64>) -> Self {
+        self.capture_interval = Some(capture_interval_from_delay_ms(delay_ms));
+        self
     }
 }
 
@@ -284,10 +296,11 @@ impl CapturePipeline {
 
         // Spawn capture thread.
         let capture_inner = Arc::clone(&inner);
+        let capture_throttle = CaptureThrottle::new(config.capture_interval);
         let capture_handle = thread::Builder::new()
             .name("ruler-pipeline-capture".to_string())
             .spawn(move || {
-                run_capture_loop(capture_inner, backend);
+                run_capture_loop(capture_inner, backend, capture_throttle);
             })
             .map_err(|e| PipelineError::Io(io_err_from("capture thread", e)))?;
 
@@ -390,7 +403,11 @@ fn io_err_from(ctx: &str, e: std::io::Error) -> std::io::Error {
 
 /// Capture loop: continuously captures frames from the backend and pushes
 /// them to the frame store.
-fn run_capture_loop(inner: Arc<PipelineInner>, mut backend: Box<dyn CaptureBackend>) {
+fn run_capture_loop(
+    inner: Arc<PipelineInner>,
+    mut backend: Box<dyn CaptureBackend>,
+    throttle: CaptureThrottle,
+) {
     let pipeline_start = Instant::now();
     while !inner.shutdown.load(Ordering::Relaxed) {
         let capture_start = Instant::now();
@@ -425,6 +442,7 @@ fn run_capture_loop(inner: Arc<PipelineInner>, mut backend: Box<dyn CaptureBacke
             .store(frame_id, Ordering::Release);
         inner.notify_frame_available();
         inner.notify_cursor_advanced(); // a new frame may allow release of older ones... no, release happens when cursors advance
+        throttle.sleep_after_capture(capture_start);
     }
     log::info!("capture pipeline: capture loop exiting");
     backend.disconnect();

@@ -337,16 +337,13 @@ fn analyze_and_publish(state: &SharedAppState, ctx: &mut AnalyzerContext, frame:
         }
     }
 
-    // Convert pipeline Frame to CapturedFrame for the analyzer.
-    let captured = ruler_core::capture::CapturedFrame {
-        data: (*frame.data).clone(),
-        width: frame.width,
-        height: frame.height,
-        format: frame.format,
-    };
-
     ctx.telemetry_stats.record_analyzed_frame();
-    match ctx.analyzer.analyze_captured_frame(&captured) {
+    match ctx.analyzer.analyze_raw_buffer(
+        frame.data.as_slice(),
+        frame.width,
+        frame.height,
+        frame.format,
+    ) {
         Ok(result) => {
             // Debug CSV row.
             if let Some(ref mut recorder) = ctx.debug_recorder {

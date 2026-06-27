@@ -1,10 +1,12 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ruler_core::{
     capture::{create_backend, CapturedFrame},
     PixelFormat, RulerConfig,
 };
+
+use crate::probe_capture::{capture_timed_probe_frame, warm_up_capture_backend};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TargetKind {
@@ -157,10 +159,8 @@ pub fn probe_config_once(fingerprint: String, config: &RulerConfig) -> ProbeResu
 
     let result = (|| {
         backend.connect()?;
-        let start = Instant::now();
-        let frame = backend.capture_frame()?;
-        let latency = start.elapsed();
-        Ok::<_, String>((latency, frame))
+        warm_up_capture_backend(backend.as_mut())?;
+        capture_timed_probe_frame(backend.as_mut())
     })();
     backend.disconnect();
 

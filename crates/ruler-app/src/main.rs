@@ -16,6 +16,7 @@ mod menu;
 mod overlay;
 #[cfg(windows)]
 mod pc_cursor_guard;
+mod probe_capture;
 mod profiles;
 mod resources;
 #[cfg(windows)]

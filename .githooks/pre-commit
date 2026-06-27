@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+mapfile -d '' rust_paths < <(
+  git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs'
+)
+
+if ((${#rust_paths[@]} == 0)); then
+  git diff --cached --check
+  exit 0
+fi
+
+if ! command -v rustfmt >/dev/null 2>&1; then
+  echo "pre-commit: rustfmt 不可用，无法自动格式化已暂存的 Rust 文件。" >&2
+  exit 1
+fi
+
+dirty_paths=()
+for path in "${rust_paths[@]}"; do
+  if ! git diff --quiet -- "$path"; then
+    dirty_paths+=("$path")
+  fi
+done
+
+if ((${#dirty_paths[@]} > 0)); then
+  echo "pre-commit: 以下 Rust 文件同时存在未暂存改动，无法安全自动格式化：" >&2
+  printf '  %s\n' "${dirty_paths[@]}" >&2
+  echo "请先整理这些文件的暂存状态，再重新提交。" >&2
+  exit 1
+fi
+
+rustfmt --edition 2021 "${rust_paths[@]}"
+git add -- "${rust_paths[@]}"
+git diff --cached --check

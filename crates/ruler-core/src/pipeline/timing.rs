@@ -85,6 +85,9 @@ mod tests {
 
         assert_eq!(super::capture_interval_from_delay_ms(None), expected);
         assert_eq!(super::capture_interval_from_delay_ms(Some(0.0)), expected);
-        assert_eq!(super::capture_interval_from_delay_ms(Some(f64::NAN)), expected);
+        assert_eq!(
+            super::capture_interval_from_delay_ms(Some(f64::NAN)),
+            expected
+        );
     }
 }

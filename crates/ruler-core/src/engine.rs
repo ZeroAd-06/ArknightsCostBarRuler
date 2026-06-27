@@ -1036,11 +1036,7 @@ mod tests {
         result
     }
 
-    fn analyze_width(
-        engine: &mut Analyzer,
-        raw_width: i32,
-        cost_is_negative: bool,
-    ) -> FrameResult {
+    fn analyze_width(engine: &mut Analyzer, raw_width: i32, cost_is_negative: bool) -> FrameResult {
         analyze_width_with_state(
             engine,
             raw_width,

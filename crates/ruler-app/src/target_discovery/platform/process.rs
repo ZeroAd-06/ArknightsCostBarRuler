@@ -8,14 +8,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use netstat2::{
-    get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
-};
+use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 use ruler_core::capture::adb_resolver::adb_command;
 use sysinfo::System;
-use windows::Win32::Globalization::{
-    MultiByteToWideChar, CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
-};
+use windows::Win32::Globalization::{MultiByteToWideChar, CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
 
 use super::{ProcessInfo, TcpListener};
 
@@ -147,10 +143,7 @@ fn shares_ancestor(
         .any(|pid| right_ancestors.contains(pid))
 }
 
-fn ancestors(
-    process: &ProcessInfo,
-    process_by_pid: &HashMap<u32, ProcessInfo>,
-) -> HashSet<u32> {
+fn ancestors(process: &ProcessInfo, process_by_pid: &HashMap<u32, ProcessInfo>) -> HashSet<u32> {
     let mut result = HashSet::new();
     let mut current = process.parent_process_id;
     for _ in 0..8 {
@@ -202,7 +195,11 @@ pub(super) fn run_dnconsole_text(
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
-    log::trace!("target discovery dnconsole command: {} {}", program, args.join(" "));
+    log::trace!(
+        "target discovery dnconsole command: {} {}",
+        program,
+        args.join(" ")
+    );
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
     let bytes = run_command_capture(&mut command, program, args, timeout)?;
@@ -256,14 +253,8 @@ fn decode_ansi(bytes: &[u8]) -> String {
     }
     // First call with a null output buffer returns the required wide-char
     // count (cbMultiByte is taken from the input slice length, no NUL).
-    let wide_len = unsafe {
-        MultiByteToWideChar(
-            CP_ACP,
-            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
-            bytes,
-            None,
-        )
-    };
+    let wide_len =
+        unsafe { MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None) };
     if wide_len <= 0 {
         // Fall back to a lossy UTF-8 decode so callers still get *something*.
         return String::from_utf8_lossy(bytes).into_owned();

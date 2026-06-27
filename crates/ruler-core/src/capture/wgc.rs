@@ -44,19 +44,19 @@ use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{BOOL, HMODULE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
-use windows::Win32::System::Com::CoIncrementMTAUsage;
 
 use crate::analysis::scanner::PixelFormat;
 use crate::capture::{CaptureBackend, CapturedFrame, WindowInfo};
@@ -175,7 +175,9 @@ impl WgcController {
 
         let (device, context) = create_d3d_device()?;
 
-        let dxgi: IDXGIDevice = device.cast().map_err(|e| format!("DXGI device cast: {e}"))?;
+        let dxgi: IDXGIDevice = device
+            .cast()
+            .map_err(|e| format!("DXGI device cast: {e}"))?;
         let inspectable = unsafe {
             CreateDirect3D11DeviceFromDXGIDevice(&dxgi)
                 .map_err(|e| format!("CreateDirect3D11DeviceFromDXGIDevice: {e}"))?
@@ -353,7 +355,9 @@ impl CaptureBackend for WgcController {
 
         // Handle a window resize: rebuild the pool/staging and skip this frame.
         // Compare against the capture-texture (pool) size, not the client size.
-        let size = frame.ContentSize().map_err(|e| format!("frame.ContentSize: {e}"))?;
+        let size = frame
+            .ContentSize()
+            .map_err(|e| format!("frame.ContentSize: {e}"))?;
         if size.Width.max(0) as u32 != self.pool_width
             || size.Height.max(0) as u32 != self.pool_height
         {

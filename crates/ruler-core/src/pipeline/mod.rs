@@ -54,9 +54,7 @@ use crate::pipeline::store::{FrameStore, SpillConfig, StoreError};
 use crate::pipeline::timing::{capture_interval_from_delay_ms, CaptureThrottle};
 
 #[cfg(windows)]
-pub use crate::pipeline::pipe::{
-    ConsumerPipe, PipeError, PipeHandle, PipeServer, protocol,
-};
+pub use crate::pipeline::pipe::{protocol, ConsumerPipe, PipeError, PipeHandle, PipeServer};
 
 /// Errors that can occur while starting or running the pipeline.
 #[derive(Debug)]
@@ -188,7 +186,10 @@ struct PipelineInner {
 
 impl PipelineInner {
     fn notify_frame_available(&self) {
-        let _lock = self.frame_available_lock.lock().expect("frame_available lock poisoned");
+        let _lock = self
+            .frame_available_lock
+            .lock()
+            .expect("frame_available lock poisoned");
         self.frame_available.notify_all();
     }
 
@@ -216,7 +217,10 @@ impl PipelineInner {
     }
 
     fn notify_cursor_advanced(&self) {
-        let _lock = self.cursor_advanced_lock.lock().expect("cursor_advanced lock poisoned");
+        let _lock = self
+            .cursor_advanced_lock
+            .lock()
+            .expect("cursor_advanced lock poisoned");
         self.cursor_advanced.notify_all();
     }
 }
@@ -237,8 +241,7 @@ impl CapturePipeline {
     /// janitor threads.
     pub fn start(config: PipelineConfig) -> Result<(Self, PipelineInfo), PipelineError> {
         // Connect backend.
-        let mut backend = create_backend(config.capture.clone())
-            .map_err(PipelineError::Backend)?;
+        let mut backend = create_backend(config.capture.clone()).map_err(PipelineError::Backend)?;
         backend.connect().map_err(PipelineError::Backend)?;
         let dims = backend.dimensions();
         let window_info = backend.window_info();
@@ -437,9 +440,7 @@ fn run_capture_loop(
         };
 
         inner.store.push(frame);
-        inner
-            .latest_frame_id
-            .store(frame_id, Ordering::Release);
+        inner.latest_frame_id.store(frame_id, Ordering::Release);
         inner.notify_frame_available();
         inner.notify_cursor_advanced(); // a new frame may allow release of older ones... no, release happens when cursors advance
         throttle.sleep_after_capture(capture_start);
@@ -517,11 +518,7 @@ fn run_sender_loop(
 }
 
 #[cfg(windows)]
-fn run_in_order_sender(
-    inner: &PipelineInner,
-    pipe: &mut PipeHandle,
-    cursor: &Cursor,
-) {
+fn run_in_order_sender(inner: &PipelineInner, pipe: &mut PipeHandle, cursor: &Cursor) {
     while !inner.shutdown.load(Ordering::Relaxed) {
         let next_id = cursor.next_to_deliver();
         // Wait until a frame with id >= next_id exists.
@@ -583,11 +580,7 @@ fn run_in_order_sender(
 }
 
 #[cfg(windows)]
-fn run_skip_to_latest_sender(
-    inner: &PipelineInner,
-    pipe: &mut PipeHandle,
-    cursor: &Cursor,
-) {
+fn run_skip_to_latest_sender(inner: &PipelineInner, pipe: &mut PipeHandle, cursor: &Cursor) {
     while !inner.shutdown.load(Ordering::Relaxed) {
         // Wait for the client to ask for a frame.
         match pipe::read_pull(pipe) {

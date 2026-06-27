@@ -9,7 +9,9 @@
 //! calibration progress instead.
 
 use ruler_core::{
-    analysis::{calibration::infer_calibration_from_samples_with_ui_scaler_and_total_bar_width, scanner},
+    analysis::{
+        calibration::infer_calibration_from_samples_with_ui_scaler_and_total_bar_width, scanner,
+    },
     pipeline::ConsumerPipe,
 };
 
@@ -42,7 +44,9 @@ pub fn collect_calibration_samples(
         return Err("capture ROI has invalid width".to_string());
     }
 
-    let first_frame = pipe.recv_frame().map_err(|e| format!("calibration: first frame: {e}"))?;
+    let first_frame = pipe
+        .recv_frame()
+        .map_err(|e| format!("calibration: first frame: {e}"))?;
     let screen_width = first_frame.width;
     let screen_height = first_frame.height;
 
@@ -168,7 +172,9 @@ pub fn collect_calibration_samples(
         }
 
         if cycle_samples.len() < CALIBRATION_CYCLES {
-            frame = pipe.recv_frame().map_err(|e| format!("calibration: recv: {e}"))?;
+            frame = pipe
+                .recv_frame()
+                .map_err(|e| format!("calibration: recv: {e}"))?;
         }
     }
 

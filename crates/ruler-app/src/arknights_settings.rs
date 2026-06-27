@@ -134,6 +134,9 @@ mod tests {
             value.get(UI_SCALER_FIELD).and_then(Value::as_f64),
             Some(0.5)
         );
-        assert_eq!(value.get(CURSOR_SIZE_FIELD).and_then(Value::as_f64), Some(0.25));
+        assert_eq!(
+            value.get(CURSOR_SIZE_FIELD).and_then(Value::as_f64),
+            Some(0.25)
+        );
     }
 }

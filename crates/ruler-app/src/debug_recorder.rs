@@ -305,8 +305,8 @@ impl DebugRecorder {
 // ---------------------------------------------------------------------------
 
 use ruler_core::pipeline::ConsumerPipe;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Configuration for spawning a [`DebugRecorderConsumer`].
 pub struct DebugRecorderConfig {
@@ -353,7 +353,8 @@ impl DebugRecorderConsumer {
                 let mut recorder = recorder;
                 log::info!(
                     "debug recorder consumer started: video={}, csv={}",
-                    config.record_video, config.record_csv
+                    config.record_video,
+                    config.record_csv
                 );
                 while running_clone.load(Ordering::Relaxed) {
                     match pipe.recv_frame() {

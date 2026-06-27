@@ -11,9 +11,7 @@ use super::adb::{
     adb_has_arknights_package, adb_serial_for_ports, ldplayer_adb_serial_for_instance,
 };
 use super::process::{matching_vbox_pids, related_listener_ports, run_dnconsole_text};
-use super::{
-    base_config, non_empty, stable_path, ProcessInfo, TcpListener, COMMAND_TIMEOUT,
-};
+use super::{base_config, non_empty, stable_path, ProcessInfo, TcpListener, COMMAND_TIMEOUT};
 use crate::target_discovery::{LatencyClass, TargetCandidate, TargetKind};
 
 #[derive(Clone, Debug)]
@@ -215,8 +213,7 @@ fn is_ldplayer_discovery_process(name: &str) -> bool {
 
 fn ldplayer_instances_for_install(install_path: &Path) -> Vec<LDPlayerInstance> {
     let dnconsole = install_path.join("dnconsole.exe");
-    let Ok(output) =
-        run_dnconsole_text(&dnconsole.to_string_lossy(), &["list2"], COMMAND_TIMEOUT)
+    let Ok(output) = run_dnconsole_text(&dnconsole.to_string_lossy(), &["list2"], COMMAND_TIMEOUT)
     else {
         return Vec::new();
     };

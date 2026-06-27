@@ -44,7 +44,9 @@ pub trait CaptureBackend: Send {
     fn capture_frame(&mut self) -> Result<CapturedFrame, String>;
     fn disconnect(&mut self);
     fn dimensions(&self) -> (u32, u32);
-    fn window_info(&self) -> Option<WindowInfo> { None }
+    fn window_info(&self) -> Option<WindowInfo> {
+        None
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +132,11 @@ pub fn create_backend(config: CaptureConfig) -> Result<Box<dyn CaptureBackend>, 
             }
             #[cfg(not(windows))]
             {
-                let _ = (config.window_handle, config.window_title, config.window_class);
+                let _ = (
+                    config.window_handle,
+                    config.window_title,
+                    config.window_class,
+                );
                 Err("Windows capture is only available on Windows".to_string())
             }
         }

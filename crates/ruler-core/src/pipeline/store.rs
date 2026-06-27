@@ -150,17 +150,14 @@ impl FrameStore {
     /// has computed the new minimum acked id.
     pub fn release_before(&self, acked: FrameId) {
         let mut inner = self.inner.lock().expect("frame store poisoned");
-        let to_remove: Vec<FrameId> = inner
-            .slots
-            .range(..=acked)
-            .map(|(id, _)| *id)
-            .collect();
+        let to_remove: Vec<FrameId> = inner.slots.range(..=acked).map(|(id, _)| *id).collect();
         for id in to_remove {
             if let Some(slot) = inner.slots.remove(&id) {
                 match slot {
                     FrameSlot::InMemory(f) => {
-                        inner.total_in_memory_bytes =
-                            inner.total_in_memory_bytes.saturating_sub(f.approx_heap_bytes());
+                        inner.total_in_memory_bytes = inner
+                            .total_in_memory_bytes
+                            .saturating_sub(f.approx_heap_bytes());
                     }
                     FrameSlot::Spilled(sp) => {
                         // Best-effort delete of the spill file; ignore errors.
@@ -212,8 +209,9 @@ impl FrameStore {
             let mut inner = self.inner.lock().expect("frame store poisoned");
             match inner.slots.remove(&id) {
                 Some(FrameSlot::InMemory(f)) => {
-                    inner.total_in_memory_bytes =
-                        inner.total_in_memory_bytes.saturating_sub(f.approx_heap_bytes());
+                    inner.total_in_memory_bytes = inner
+                        .total_in_memory_bytes
+                        .saturating_sub(f.approx_heap_bytes());
                     f
                 }
                 Some(FrameSlot::Spilled(sp)) => {
@@ -253,8 +251,9 @@ impl FrameStore {
             }
             Err(error) => {
                 let mut inner = self.inner.lock().expect("frame store poisoned");
-                inner.total_in_memory_bytes =
-                    inner.total_in_memory_bytes.saturating_add(frame.approx_heap_bytes());
+                inner.total_in_memory_bytes = inner
+                    .total_in_memory_bytes
+                    .saturating_add(frame.approx_heap_bytes());
                 inner.slots.insert(id, FrameSlot::InMemory(frame));
                 Err(StoreError::SpillIo(error.to_string()))
             }
@@ -270,7 +269,9 @@ impl FrameStore {
             }
         };
 
-        let frame = spilled.reload().map_err(|e| StoreError::ReloadIo(e.to_string()))?;
+        let frame = spilled
+            .reload()
+            .map_err(|e| StoreError::ReloadIo(e.to_string()))?;
         let heap = frame.approx_heap_bytes();
 
         let mut inner = self.inner.lock().expect("frame store poisoned");

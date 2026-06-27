@@ -3,14 +3,14 @@
 
 use std::path::Path;
 
-use ruler_core::RulerConfig;
 use ::windows::Win32::{
     Foundation::{BOOL, HWND, LPARAM},
     UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible,
+        EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible,
     },
 };
+use ruler_core::RulerConfig;
 
 use super::{base_config, stable_path, ProcessInfo};
 use crate::target_discovery::{LatencyClass, TargetCandidate, TargetKind};

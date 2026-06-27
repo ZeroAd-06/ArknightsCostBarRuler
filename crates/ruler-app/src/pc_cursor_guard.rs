@@ -110,7 +110,12 @@ impl SelfDrawnCursorGuard {
             return false;
         }
 
-        let cursor_rect = self.cursor_rect(cursor.client_x, cursor.client_y, window.width, window.height);
+        let cursor_rect = self.cursor_rect(
+            cursor.client_x,
+            cursor.client_y,
+            window.width,
+            window.height,
+        );
         let cost_bar_rect = cost_bar_rect(roi, window.width, window.height, self.ui_scaler);
         let cost_area_rect = cost_area_rect(window.width, window.height, self.ui_scaler);
         cursor_rect.intersects(cost_bar_rect) || cursor_rect.intersects(cost_area_rect)
@@ -126,7 +131,9 @@ impl SelfDrawnCursorGuard {
         } else {
             self.ever_saw_hidden = true;
             self.self_drawn_enabled = true;
-            log::info!("Arknights PC self-drawn cursor detected; cursor guard stays enabled for this run");
+            log::info!(
+                "Arknights PC self-drawn cursor detected; cursor guard stays enabled for this run"
+            );
         }
     }
 
@@ -191,7 +198,12 @@ fn cursor_state_in_client(window: WindowInfo) -> Option<CursorState> {
     }
 
     // WindowFromPoint still needs screen coordinates.
-    let top_hwnd = unsafe { WindowFromPoint(POINT { x: screen_x, y: screen_y }) };
+    let top_hwnd = unsafe {
+        WindowFromPoint(POINT {
+            x: screen_x,
+            y: screen_y,
+        })
+    };
     let uncovered = top_hwnd.0 as isize == window.hwnd;
     let native_visible = cursor_info()
         .map(|info| (info.flags & CURSOR_SHOWING) != 0)
@@ -238,7 +250,8 @@ fn cost_area_rect(width: u32, height: u32, ui_scaler: f64) -> Rect {
         left: (width as f64 - COST_SIGN_LEFT_OFFSET_FROM_RIGHT_REF * scale).floor() as i32,
         right: (width as f64 - COST_SIGN_RIGHT_OFFSET_FROM_RIGHT_REF * scale).ceil() as i32,
         top: (height as f64 - COST_SIGN_TOP_OFFSET_FROM_BOTTOM_REF * scale).floor() as i32 - pad_y,
-        bottom: (height as f64 - COST_SIGN_BOTTOM_OFFSET_FROM_BOTTOM_REF * scale).ceil() as i32 + pad_y,
+        bottom: (height as f64 - COST_SIGN_BOTTOM_OFFSET_FROM_BOTTOM_REF * scale).ceil() as i32
+            + pad_y,
     }
     .clamped(max_x, max_y)
 }
@@ -275,5 +288,9 @@ fn cursor_size_factor(cursor_size: f64) -> f64 {
 }
 
 fn finite_or_default(value: f64, default: f64) -> f64 {
-    if value.is_finite() { value } else { default }
+    if value.is_finite() {
+        value
+    } else {
+        default
+    }
 }

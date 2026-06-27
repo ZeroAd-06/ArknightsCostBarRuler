@@ -115,10 +115,7 @@ extern "system" {
         lp_security_attributes: *const c_void,
     ) -> HANDLE;
 
-    fn ConnectNamedPipe(
-        h_named_pipe: HANDLE,
-        lp_overlapped: *const c_void,
-    ) -> i32;
+    fn ConnectNamedPipe(h_named_pipe: HANDLE, lp_overlapped: *const c_void) -> i32;
 
     fn ReadFile(
         h_file: HANDLE,
@@ -244,7 +241,9 @@ impl Read for PipeHandle {
         };
         if ok == 0 {
             let code = unsafe { GetLastError() };
-            return Err(io::Error::other(format!("ReadFile failed (GetLastError={code})")));
+            return Err(io::Error::other(format!(
+                "ReadFile failed (GetLastError={code})"
+            )));
         }
         if bytes_read == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "pipe closed"));
@@ -267,7 +266,9 @@ impl Write for PipeHandle {
         };
         if ok == 0 {
             let code = unsafe { GetLastError() };
-            return Err(io::Error::other(format!("WriteFile failed (GetLastError={code})")));
+            return Err(io::Error::other(format!(
+                "WriteFile failed (GetLastError={code})"
+            )));
         }
         Ok(bytes_written as usize)
     }
@@ -296,7 +297,9 @@ fn read_u32_le(r: &mut impl Read) -> io::Result<u32> {
 
 fn read_u64_le(r: &mut impl Read) -> io::Result<u64> {
     let b = read_exact(r, 8)?;
-    Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+    Ok(u64::from_le_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ]))
 }
 
 fn write_u16_le(w: &mut impl Write, v: u16) -> io::Result<()> {
@@ -425,7 +428,10 @@ impl Drop for PipeServer {
 fn read_subscribe(pipe: &mut PipeHandle) -> Result<(ConsumerPolicy, FrameId), PipeError> {
     let magic = read_exact(pipe, 4)?;
     if magic != protocol::SUBSCRIBE_MAGIC {
-        return Err(PipeError::Protocol(format!("bad subscribe magic: {:?}", magic)));
+        return Err(PipeError::Protocol(format!(
+            "bad subscribe magic: {:?}",
+            magic
+        )));
     }
     let policy_byte = read_exact(pipe, 1)?;
     let policy = match policy_byte[0] {
@@ -472,7 +478,10 @@ pub fn write_error(pipe: &mut PipeHandle, message: &str) -> io::Result<()> {
 pub fn read_ack(pipe: &mut PipeHandle) -> Result<FrameId, PipeError> {
     let magic = read_exact(pipe, 4)?;
     if magic != protocol::ACK_MAGIC {
-        return Err(PipeError::Protocol(format!("expected RACK, got {:?}", magic)));
+        return Err(PipeError::Protocol(format!(
+            "expected RACK, got {:?}",
+            magic
+        )));
     }
     let frame_id = read_u64_le(pipe)?;
     Ok(frame_id)
@@ -482,7 +491,10 @@ pub fn read_ack(pipe: &mut PipeHandle) -> Result<FrameId, PipeError> {
 pub fn read_pull(pipe: &mut PipeHandle) -> Result<(), PipeError> {
     let magic = read_exact(pipe, 4)?;
     if magic != protocol::PULL_MAGIC {
-        return Err(PipeError::Protocol(format!("expected RPUL, got {:?}", magic)));
+        return Err(PipeError::Protocol(format!(
+            "expected RPUL, got {:?}",
+            magic
+        )));
     }
     Ok(())
 }
@@ -515,7 +527,11 @@ impl ConsumerPipe {
     /// created the pipe instance yet) and `ERROR_PIPE_BUSY` (all instances are
     /// momentarily busy between connections) until [`CONNECT_TIMEOUT`]. Any
     /// other failure returns immediately.
-    pub fn connect(pipe_name: &str, policy: ConsumerPolicy, start_frame_id: FrameId) -> io::Result<Self> {
+    pub fn connect(
+        pipe_name: &str,
+        policy: ConsumerPolicy,
+        start_frame_id: FrameId,
+    ) -> io::Result<Self> {
         let wide_name = wide(pipe_name);
         let deadline = Instant::now() + CONNECT_TIMEOUT;
         let handle = loop {
@@ -589,8 +605,9 @@ impl ConsumerPipe {
                 let capture_duration_us = read_u64_le(&mut self.handle)?;
                 let capture_timestamp_ns = read_u64_le(&mut self.handle)?;
                 let data_len = read_u64_le(&mut self.handle)? as usize;
-                let format = pixel_format_from_tag(format_tag)
-                    .ok_or_else(|| PipeError::Protocol(format!("unknown format tag {format_tag}")))?;
+                let format = pixel_format_from_tag(format_tag).ok_or_else(|| {
+                    PipeError::Protocol(format!("unknown format tag {format_tag}"))
+                })?;
                 let mut data = vec![0u8; data_len];
                 self.handle.read_exact(&mut data)?;
                 Ok(Frame {

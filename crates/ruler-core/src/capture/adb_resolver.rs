@@ -73,10 +73,7 @@ pub fn resolve_adb_with(candidates: &[PathBuf]) -> Option<AdbExecutable> {
 /// Return the cached resolution. Returns `None` if `resolve_adb_with` has
 /// not been called yet, or the last resolution failed.
 pub fn resolved_adb() -> Option<AdbExecutable> {
-    resolved_cell()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
+    resolved_cell().lock().ok().and_then(|guard| guard.clone())
 }
 
 /// `true` if adb is currently resolved.
@@ -87,13 +84,11 @@ pub fn adb_available() -> bool {
 /// Convenience for callers that want either a `Command` or an error string
 /// suitable for surfacing to the user (e.g. the wizard's target probe).
 pub fn adb_command() -> Result<Command, String> {
-    resolved_adb()
-        .map(|exe| exe.to_command())
-        .ok_or_else(|| {
-            "adb is not available: install Android platform-tools on PATH \
+    resolved_adb().map(|exe| exe.to_command()).ok_or_else(|| {
+        "adb is not available: install Android platform-tools on PATH \
              or start MuMu / LDPlayer emulator with its bundled adb"
-                .to_string()
-        })
+            .to_string()
+    })
 }
 
 fn resolve_adb_inner(candidates: &[PathBuf]) -> Option<AdbExecutable> {
@@ -138,10 +133,7 @@ fn try_run_adb(program: &Path) -> bool {
     match output {
         Ok(output) => output.status.success(),
         Err(error) => {
-            log::trace!(
-                "adb probe failed for '{}': {error}",
-                program.display()
-            );
+            log::trace!("adb probe failed for '{}': {error}", program.display());
             false
         }
     }

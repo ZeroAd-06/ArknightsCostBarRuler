@@ -14,9 +14,7 @@ use super::adb::{
 use super::process::{
     parse_named_number, parse_trailing_segment_number, related_listener_ports, run_command_text,
 };
-use super::{
-    base_config, non_empty, stable_path, ProcessInfo, TcpListener, COMMAND_TIMEOUT,
-};
+use super::{base_config, non_empty, stable_path, ProcessInfo, TcpListener, COMMAND_TIMEOUT};
 use crate::target_discovery::{LatencyClass, TargetCandidate, TargetKind};
 
 #[derive(Clone, Debug)]
@@ -46,15 +44,13 @@ pub(super) fn discover_mumu(
 ) {
     for install in discover_mumu_tool_installs(processes) {
         let program = install.manager_path.to_string_lossy().into_owned();
-        let Ok(output) =
-            run_command_text(&program, &["info", "--vmindex", "all"], COMMAND_TIMEOUT)
+        let Ok(output) = run_command_text(&program, &["info", "--vmindex", "all"], COMMAND_TIMEOUT)
         else {
             continue;
         };
 
         for info in parse_mumu_manager_infos(&output) {
-            let Some(serial) =
-                adb_serial_for_address(&info.host, info.port, connected_adb_serials)
+            let Some(serial) = adb_serial_for_address(&info.host, info.port, connected_adb_serials)
             else {
                 continue;
             };
@@ -159,8 +155,8 @@ pub(super) fn discover_mumu_tool_installs(processes: &[ProcessInfo]) -> Vec<MuMu
         .iter()
         .filter(|process| is_mumu_discovery_process(&process.name))
     {
-        let Some(install_path) = resolve_mumu_install_path_for_process(process, processes)
-            .or_else(|| {
+        let Some(install_path) =
+            resolve_mumu_install_path_for_process(process, processes).or_else(|| {
                 process
                     .executable_path
                     .as_deref()
@@ -446,8 +442,7 @@ mod tests {
 
     #[test]
     fn parses_mumu_manager_single_output() {
-        let output =
-            r#"{"index":"2","name":"MuMu-2","adb_host_ip":"0.0.0.0","adb_port":16448}"#;
+        let output = r#"{"index":"2","name":"MuMu-2","adb_host_ip":"0.0.0.0","adb_port":16448}"#;
         let infos = parse_mumu_manager_infos(output);
 
         assert_eq!(infos.len(), 1);
@@ -502,8 +497,7 @@ mod tests {
             root.display()
         ));
         let resolved =
-            resolve_mumu_install_path_for_process(&headless, &[headless.clone(), device])
-                .unwrap();
+            resolve_mumu_install_path_for_process(&headless, &[headless.clone(), device]).unwrap();
 
         assert_eq!(resolved, root);
     }

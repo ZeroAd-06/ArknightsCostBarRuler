@@ -80,7 +80,7 @@ fn recorded_debug_models_match_synthesis_without_missing_widths() {
 
     for model in models {
         let n_eff = model.n_eff[0] as f64 / model.n_eff[1] as f64;
-        let profiles = synthesize_profiles(120, n_eff);
+        let profiles = synthesize_profiles(120, 120.0, n_eff);
         assert!(!profiles.is_empty(), "{} produced no profiles", model.label);
 
         for (sequence_index, sequence) in model.sequences.iter().enumerate() {

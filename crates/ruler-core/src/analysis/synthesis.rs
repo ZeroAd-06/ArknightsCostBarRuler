@@ -9,13 +9,29 @@ pub const MIN_DETECTABLE_WIDTH: i32 = 2;
 const EPSILON: f64 = 1e-6;
 const MAX_PROFILE_PERIOD: i32 = 60;
 
-pub fn synthesized_width(total_bar_width: i32, n_eff: f64, global_frame: i32) -> i32 {
+pub fn synthesized_width(
+    total_bar_width: i32,
+    bar_width_frac: f64,
+    n_eff: f64,
+    global_frame: i32,
+) -> i32 {
     if total_bar_width <= 0 || n_eff <= 0.0 || !n_eff.is_finite() {
         return 0;
     }
 
+    // `bar_width_frac` is the sub-pixel ROI width (x2 - x1) before rounding;
+    // `total_bar_width` is its rounded integer. The bar length L is built from
+    // the fractional width to keep sub-pixel precision (see
+    // roi::cost_bar_width_frac_with_ui_scaler) — rounding it first shifts a few
+    // frames across a round() boundary and makes calibration infer an absurd N.
+    // The hidden offset and the final clamp stay on the integer pixel grid.
+    let bar_width_frac = if bar_width_frac.is_finite() && bar_width_frac > 0.0 {
+        bar_width_frac
+    } else {
+        total_bar_width as f64
+    };
     let visible_width = total_bar_width as f64;
-    let bar_length = BAR_LENGTH_RATIO * visible_width;
+    let bar_length = BAR_LENGTH_RATIO * bar_width_frac;
     let hidden_width = bar_length - visible_width;
     let phase = normalized_phase(global_frame as f64 / n_eff);
     let raw_width = (bar_length * phase - hidden_width).round() as i32 + 1;
@@ -27,8 +43,8 @@ pub fn synthesized_width(total_bar_width: i32, n_eff: f64, global_frame: i32) ->
     }
 }
 
-pub fn synthesized_widths(total_bar_width: i32, n_eff: f64) -> BTreeSet<i32> {
-    synthesize_profiles(total_bar_width, n_eff)
+pub fn synthesized_widths(total_bar_width: i32, bar_width_frac: f64, n_eff: f64) -> BTreeSet<i32> {
+    synthesize_profiles(total_bar_width, bar_width_frac, n_eff)
         .into_iter()
         .flat_map(|profile| {
             profile
@@ -39,14 +55,20 @@ pub fn synthesized_widths(total_bar_width: i32, n_eff: f64) -> BTreeSet<i32> {
         .collect()
 }
 
-pub fn synthesize_profiles(total_bar_width: i32, n_eff: f64) -> Vec<ProfileData> {
+pub fn synthesize_profiles(
+    total_bar_width: i32,
+    bar_width_frac: f64,
+    n_eff: f64,
+) -> Vec<ProfileData> {
     if total_bar_width <= 0 || n_eff <= 0.0 || !n_eff.is_finite() {
         return Vec::new();
     }
 
     let profile_count = profile_period_for_n_eff(n_eff);
     (0..profile_count)
-        .map(|cycle_index| synthesize_cycle_profile(total_bar_width, n_eff, cycle_index))
+        .map(|cycle_index| {
+            synthesize_cycle_profile(total_bar_width, bar_width_frac, n_eff, cycle_index)
+        })
         .collect()
 }
 
@@ -75,7 +97,12 @@ pub fn is_half_frame_n(n_eff: f64) -> bool {
     (rounded - doubled).abs() < EPSILON && rounded as i64 % 2 != 0
 }
 
-fn synthesize_cycle_profile(total_bar_width: i32, n_eff: f64, cycle_index: i32) -> ProfileData {
+fn synthesize_cycle_profile(
+    total_bar_width: i32,
+    bar_width_frac: f64,
+    n_eff: f64,
+    cycle_index: i32,
+) -> ProfileData {
     let start_frame = ceil_frame(cycle_index as f64 * n_eff);
     let end_frame = ceil_frame((cycle_index + 1) as f64 * n_eff);
     let total_frames = (end_frame - start_frame).max(1);
@@ -83,7 +110,7 @@ fn synthesize_cycle_profile(total_bar_width: i32, n_eff: f64, cycle_index: i32) 
 
     for global_frame in (start_frame + 1)..end_frame {
         let local_frame = global_frame - start_frame - 1;
-        let width = synthesized_width(total_bar_width, n_eff, global_frame);
+        let width = synthesized_width(total_bar_width, bar_width_frac, n_eff, global_frame);
         pixel_map.entry(width.to_string()).or_insert(local_frame);
     }
 
@@ -126,7 +153,7 @@ mod tests {
 
     #[test]
     fn synthesizes_single_integer_profile() {
-        let profiles = synthesize_profiles(180, 30.0);
+        let profiles = synthesize_profiles(180, 180.0, 30.0);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].total_frames, 30);
         assert_eq!(profiles[0].pixel_map.get("0"), Some(&0));
@@ -136,15 +163,15 @@ mod tests {
 
     #[test]
     fn synthesizes_expected_known_widths() {
-        assert_eq!(synthesized_width(180, 30.0, 0), 0);
-        assert_eq!(synthesized_width(180, 30.0, 1), 0);
-        assert_eq!(synthesized_width(180, 30.0, 2), 6);
-        assert_eq!(synthesized_width(180, 30.0, 29), 175);
+        assert_eq!(synthesized_width(180, 180.0, 30.0, 0), 0);
+        assert_eq!(synthesized_width(180, 180.0, 30.0, 1), 0);
+        assert_eq!(synthesized_width(180, 180.0, 30.0, 2), 6);
+        assert_eq!(synthesized_width(180, 180.0, 30.0, 29), 175);
     }
 
     #[test]
     fn synthesizes_half_frame_alternating_profiles() {
-        let profiles = synthesize_profiles(180, 37.5);
+        let profiles = synthesize_profiles(180, 180.0, 37.5);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].total_frames, 38);
         assert_eq!(profiles[1].total_frames, 37);
@@ -153,7 +180,7 @@ mod tests {
 
     #[test]
     fn synthesizes_repeating_profiles_for_tenth_speed_bonus() {
-        let profiles = synthesize_profiles(120, 30.0 / 1.1);
+        let profiles = synthesize_profiles(120, 120.0, 30.0 / 1.1);
         assert_eq!(profiles.len(), 11);
         assert_eq!(
             profiles
@@ -168,8 +195,8 @@ mod tests {
 
     #[test]
     fn width_union_contains_both_half_frame_profiles() {
-        let profiles = synthesize_profiles(180, 37.5);
-        let widths = synthesized_widths(180, 37.5);
+        let profiles = synthesize_profiles(180, 180.0, 37.5);
+        let widths = synthesized_widths(180, 180.0, 37.5);
         for profile in profiles {
             for width in profile.pixel_map.keys() {
                 let width = width.parse::<i32>().unwrap();
@@ -191,5 +218,27 @@ mod tests {
         assert_eq!(profile_period_for_n_eff(30.0), 1);
         assert_eq!(profile_period_for_n_eff(37.5), 2);
         assert_eq!(profile_period_for_n_eff(30.0 / 1.1), 11);
+    }
+
+    #[test]
+    fn fractional_bar_width_recovers_off_by_one_widths_at_216() {
+        // 2558×1440 ui_scaler=0.0: integer ROI width is 216 but the true
+        // sub-pixel width is ~215.832. Building L from the integer width yields
+        // {37,52,67} at frames 6/8/10; the real fractional bar yields {38,53,68}
+        // — the widths actually observed in-game. Feeding the integer width to L
+        // is exactly what made calibration reject N=30 and climb to N≈134.
+        let integer = synthesized_widths(216, 216.0, 30.0);
+        let fractional = synthesized_widths(216, 215.832, 30.0);
+        for w in [38, 53, 68] {
+            assert!(
+                fractional.contains(&w),
+                "fractional missing {w}: {fractional:?}"
+            );
+            assert!(!integer.contains(&w), "integer unexpectedly has {w}");
+        }
+        for w in [37, 52, 67] {
+            assert!(integer.contains(&w), "integer missing {w}: {integer:?}");
+            assert!(!fractional.contains(&w), "fractional unexpectedly has {w}");
+        }
     }
 }

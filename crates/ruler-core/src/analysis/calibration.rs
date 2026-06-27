@@ -1,6 +1,8 @@
 /// Calibration data loading from JSON files (versioned multi-profile format).
 use crate::analysis::mapping::CalibrationTable;
-use crate::analysis::roi::{find_cost_bar_roi_with_ui_scaler, DEFAULT_UI_SCALER};
+use crate::analysis::roi::{
+    cost_bar_width_frac_with_ui_scaler, find_cost_bar_roi_with_ui_scaler, DEFAULT_UI_SCALER,
+};
 use crate::analysis::synthesis::{synthesize_profiles, MIN_DETECTABLE_WIDTH};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -144,12 +146,15 @@ pub fn infer_calibration_from_samples_with_ui_scaler(
     calibration_time: f64,
 ) -> Result<CalibrationData, String> {
     let total_bar_width = total_bar_width_from_screen(screen_width, screen_height, ui_scaler);
+    let bar_width_frac =
+        cost_bar_width_frac_with_ui_scaler(screen_width as i32, screen_height as i32, ui_scaler);
     infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
         cycle_samples,
         screen_width,
         screen_height,
         ui_scaler,
         total_bar_width,
+        Some(bar_width_frac),
         calibration_time,
     )
 }
@@ -160,6 +165,7 @@ pub fn infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
     screen_height: u32,
     ui_scaler: f64,
     total_bar_width: i32,
+    bar_width_frac: Option<f64>,
     calibration_time: f64,
 ) -> Result<CalibrationData, String> {
     if cycle_samples.is_empty() {
@@ -169,18 +175,27 @@ pub fn infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
         return Err("校准失败：费用条 ROI 宽度无效，请重新配置截图区域。".to_string());
     }
 
+    // Bar length L is built from the sub-pixel width (x2 - x1) when the caller
+    // can supply it; otherwise fall back to the integer width. See
+    // roi::cost_bar_width_frac_with_ui_scaler for why this matters.
+    let bar_width_frac = bar_width_frac
+        .filter(|frac| frac.is_finite() && *frac > 0.0)
+        .unwrap_or(total_bar_width as f64);
+
     let observed_max_width = observed_max_raw_width(cycle_samples).ok_or_else(|| {
         "校准失败：未能从样本中确定费用条宽度，请保持费用条可见并重试。".to_string()
     })?;
-    let (n_eff, profile_offset) =
-        find_matching_model(cycle_samples, total_bar_width, observed_max_width).ok_or_else(
-            || {
-                "校准失败：样本与理论费用条序列不匹配，请重新进入关卡后在正常速度下重试。"
-                    .to_string()
-            },
-        )?;
+    let (n_eff, profile_offset) = find_matching_model(
+        cycle_samples,
+        total_bar_width,
+        bar_width_frac,
+        observed_max_width,
+    )
+    .ok_or_else(|| {
+        "校准失败：样本与理论费用条序列不匹配，请重新进入关卡后在正常速度下重试。".to_string()
+    })?;
 
-    let mut profiles = synthesize_profiles(total_bar_width, n_eff);
+    let mut profiles = synthesize_profiles(total_bar_width, bar_width_frac, n_eff);
     if profiles.is_empty() {
         return Err("校准失败：未能构建任何有效的费用循环模型。".to_string());
     }
@@ -239,6 +254,7 @@ fn observed_max_raw_width(cycle_samples: &[Vec<i32>]) -> Option<i32> {
 fn find_matching_model(
     cycle_samples: &[Vec<i32>],
     total_bar_width: i32,
+    bar_width_frac: f64,
     observed_max_width: i32,
 ) -> Option<(f64, usize)> {
     let reliable_cycles = collect_reliable_cycle_widths(cycle_samples, total_bar_width);
@@ -249,7 +265,7 @@ fn find_matching_model(
 
     let mut best_match: Option<ModelMatch> = None;
     for n_eff in inference_candidates() {
-        let profiles = synthesize_profiles(total_bar_width, n_eff);
+        let profiles = synthesize_profiles(total_bar_width, bar_width_frac, n_eff);
         if let Some((offset, extra_width_count)) = matching_profile_offset_and_extra_width_count(
             &reliable_cycles,
             &profiles,
@@ -519,7 +535,7 @@ mod tests {
     fn infer_calibration_uses_explicit_total_bar_width() {
         let samples = sample_cycles_for_n(157, 30.0);
         let data = infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
-            &samples, 1920, 1080, 0.0, 157, 123.0,
+            &samples, 1920, 1080, 0.0, 157, None, 123.0,
         )
         .unwrap();
 
@@ -571,7 +587,7 @@ mod tests {
 
     #[test]
     fn infer_calibration_rotates_profiles_to_observed_offset() {
-        let expected = synthesize_profiles(180, 37.5);
+        let expected = synthesize_profiles(180, 180.0, 37.5);
         let mut samples = sample_cycles_for_n(180, 37.5);
         samples.rotate_left(1);
 
@@ -605,7 +621,7 @@ mod tests {
     }
 
     fn sample_cycles_for_n(total_bar_width: i32, n_eff: f64) -> Vec<Vec<i32>> {
-        synthesize_profiles(total_bar_width, n_eff)
+        synthesize_profiles(total_bar_width, total_bar_width as f64, n_eff)
             .into_iter()
             .map(|profile| {
                 let mut widths: Vec<i32> = profile

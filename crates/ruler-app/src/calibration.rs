@@ -197,12 +197,18 @@ pub fn infer_calibration(
     total_bar_width: i32,
     calibration_time: f64,
 ) -> Result<ruler_core::analysis::calibration::CalibrationData, String> {
+    let bar_width_frac = ruler_core::analysis::roi::cost_bar_width_frac_with_ui_scaler(
+        screen_width as i32,
+        screen_height as i32,
+        ui_scaler,
+    );
     infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
         cycle_samples,
         screen_width,
         screen_height,
         ui_scaler,
         total_bar_width,
+        Some(bar_width_frac),
         calibration_time,
     )
 }

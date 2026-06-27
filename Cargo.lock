@@ -3970,7 +3970,7 @@ dependencies = [
 
 [[package]]
 name = "ruler-app"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "icu_provider",
  "image",
@@ -3992,7 +3992,7 @@ dependencies = [
 
 [[package]]
 name = "ruler-core"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "crossbeam-channel",
  "image",
@@ -4005,7 +4005,7 @@ dependencies = [
 
 [[package]]
 name = "ruler-recorder"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "ruler-core",
 ]

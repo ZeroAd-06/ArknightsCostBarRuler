@@ -1,6 +1,6 @@
 [package]
 name = "ruler-recorder"
-version = "2.2.2"
+version = "2.2.3"
 edition.workspace = true
 default-run = "ruler-recorder"
 

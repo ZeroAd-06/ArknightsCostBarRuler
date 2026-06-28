@@ -1,4 +1,4 @@
-// Arknights Cost Bar Ruler — HUD overlay
+// Arknights Cost Bar Ruler ??HUD overlay
 // Cold / sharp / minimal. Timer is the hero; cost frame is a quiet secondary cluster.
 // Rendered by the software renderer into a per-pixel-alpha layered window.
 // All user-facing strings are localized in Rust and pushed in as properties.
@@ -83,7 +83,7 @@ export component Hud inherits Window {
         animate border-color { duration: 200ms; }
     }
 
-    // top accent hairline — state colored
+    // top accent hairline ??state colored
     Rectangle {
         x: 0;
         y: 0;
@@ -111,7 +111,7 @@ export component Hud inherits Window {
         }
     }
 
-    // ===== RUNNING: timer hero + secondary cluster (packed left, no gap) =====
+    // ===== RUNNING: timer hero + fixed secondary counter anchor =====
     running-layer := Rectangle {
         x: 0;
         y: 0;
@@ -121,53 +121,60 @@ export component Hud inherits Window {
         animate opacity { duration: 160ms; }
         visible: running-layer.opacity > 0.01;
 
-        HorizontalLayout {
-            padding-left: 13px;
-            padding-right: 12px;
-            spacing: 13px;
-            alignment: start;
+        // hero timer
+        Text {
+            x: 13px;
+            y: 0;
+            height: 100%;
+            text: root.time-str;
+            color: Palette.text-primary;
+            font-size: 30px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
 
-            // hero timer
+        // secondary cluster (cost frame + lap). The slash anchor stays fixed:
+        // `frame-str` is right-aligned into the slot before it, and `/total`
+        // starts at the same x on every update.
+        Rectangle {
+            x: 136px;
+            y: 12px;
+            width: 66px;
+            height: 30px;
             Text {
-                text: root.time-str;
+                x: 0;
+                y: 0;
+                width: 36px;
+                height: 22px;
+                text: root.frame-str;
                 color: Palette.text-primary;
-                font-size: 30px;
+                font-size: 18px;
                 font-weight: 700;
+                horizontal-alignment: right;
                 vertical-alignment: center;
             }
-
-            // secondary cluster (cost frame + lap) — dims out while the
-            // external hover toolbar is shown below the panel, so the readout
-            // remains stable and never gives up internal HUD space.
-            VerticalLayout {
-                alignment: center;
-                spacing: 0px;
-                HorizontalLayout {
-                    alignment: start;
-                    spacing: 0px;
-                    Text {
-                        text: root.frame-str;
-                        color: Palette.text-primary;
-                        font-size: 18px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: root.total-str;
-                        color: root.cost-negative ? Palette.amber : Palette.text-secondary;
-                        font-size: 12px;
-                        font-weight: 500;
-                        vertical-alignment: bottom;
-                    }
-                }
-                Text {
-                    visible: root.lap-str != "";
-                    text: "+" + root.lap-str;
-                    color: Palette.amber;
-                    font-size: 11px;
-                    font-weight: 600;
-                    horizontal-alignment: left;
-                }
+            Text {
+                x: 36px;
+                y: 0;
+                width: 30px;
+                height: 22px;
+                text: root.total-str;
+                color: root.cost-negative ? Palette.amber : Palette.text-secondary;
+                font-size: 12px;
+                font-weight: 500;
+                vertical-alignment: bottom;
+            }
+            Text {
+                visible: root.lap-str != "";
+                x: 36px;
+                y: 19px;
+                width: 30px;
+                height: 13px;
+                text: "+" + root.lap-str;
+                color: Palette.amber;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: left;
             }
         }
     }
@@ -233,7 +240,7 @@ export component Hud inherits Window {
     }
 
     // ===== RESET COVER: cyan bar wipes down over the panel, then wipes off =====
-    // No TouchArea → clicks pass through to whatever is below (the panel / drag
+    // No TouchArea ??clicks pass through to whatever is below (the panel / drag
     // surface), so the 0.7s animation never blocks interaction.
     Rectangle {
         visible: root.reset-active;

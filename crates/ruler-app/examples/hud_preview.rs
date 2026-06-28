@@ -117,8 +117,8 @@ fn main() {
 
     hud.set_mode(HudMode::Running);
     hud.set_time_str("01:23:45".into());
-    hud.set_frame_str("12".into());
-    hud.set_total_str("/30".into());
+    hud.set_frame_str("120".into());
+    hud.set_total_str("/120".into());
     hud.set_lap_str("48".into());
     hud.set_cost_negative(false);
     hud.set_update_available(true);

@@ -11,6 +11,9 @@ use std::{
 use ruler_core::{pipeline::PipelineInfo, RulerConfig};
 use serde::{Deserialize, Serialize};
 
+mod identity;
+pub use identity::ensure_config_uuid;
+
 const TELEMETRY_HOST: &str = "arkruler-telemetry.z060606060606.online";
 const TELEMETRY_PATH: &str = "/";
 const TELEMETRY_STATS_FILE: &str = "telemetry_stats.json";
@@ -56,21 +59,6 @@ struct StartupTelemetryPayload {
     restarts: u64,
 }
 
-pub fn new_uuid() -> String {
-    uuid::Uuid::new_v4().hyphenated().to_string()
-}
-
-pub fn ensure_config_uuid(config: &mut RulerConfig) {
-    let has_uuid = config
-        .uuid
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
-    if !has_uuid {
-        config.uuid = Some(new_uuid());
-    }
-}
-
 pub fn write_session_stats(session_dir: &Path, stats: &RunTelemetryStats) -> Result<(), String> {
     fs::create_dir_all(session_dir).map_err(|error| {
         format!(
@@ -98,13 +86,7 @@ pub fn send_startup_telemetry(
         return;
     }
 
-    let Some(uuid) = config
-        .uuid
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-    else {
+    let Some(uuid) = identity::config_or_stable_uuid(config) else {
         log::warn!("telemetry enabled but config uuid is missing; skipping startup telemetry");
         return;
     };

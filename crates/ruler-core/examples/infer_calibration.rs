@@ -5,8 +5,12 @@
 //!
 //! 默认读取工作区根目录下的 cost_data/*_raw.csv 及对应 *_meta.json,并只使用前 2 个完整循环验证。
 
-use ruler_core::analysis::calibration::{infer_calibration_from_samples, CalibrationData};
-use ruler_core::analysis::roi::find_cost_bar_roi;
+use ruler_core::analysis::calibration::{
+    infer_calibration_from_samples, synthesize_profiles_for_frame_counts, CalibrationData,
+};
+use ruler_core::analysis::roi::{
+    cost_bar_width_frac_with_ui_scaler, find_cost_bar_roi, DEFAULT_UI_SCALER,
+};
 use ruler_core::analysis::synthesis::{BASE_FRAMES_PER_COST, MIN_DETECTABLE_WIDTH};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,10 +132,11 @@ fn validate_dataset(raw_path: &Path) -> Result<ValidationSummary, String> {
         ));
     }
 
-    let detection_mode = calibration
-        .detection_mode
-        .clone()
-        .unwrap_or_else(|| "single".to_string());
+    let detection_mode = if calibration.profiles.len() > 1 {
+        "alternating".to_string()
+    } else {
+        "single".to_string()
+    };
     let should_alternate = meta.label.contains("80%");
     if should_alternate && detection_mode != "alternating" {
         return Err(format!("期望 alternating，但得到 {detection_mode}"));
@@ -145,7 +150,16 @@ fn validate_dataset(raw_path: &Path) -> Result<ValidationSummary, String> {
         return Err("没有可靠宽度可验证".to_string());
     }
     let reliable_width_count = reliable_cycles.iter().map(BTreeSet::len).sum();
-    assert_profile_reproduces_cycles(&calibration, &reliable_cycles)?;
+    assert_profile_reproduces_cycles(
+        &calibration,
+        meta.total_bar_width,
+        cost_bar_width_frac_with_ui_scaler(
+            meta.screen_width as i32,
+            meta.screen_height as i32,
+            DEFAULT_UI_SCALER,
+        ),
+        &reliable_cycles,
+    )?;
 
     Ok(ValidationSummary {
         label: meta.label,
@@ -291,10 +305,16 @@ fn collect_reliable_cycles(cycles: &[Vec<i32>], total_bar_width: i32) -> Vec<BTr
 
 fn assert_profile_reproduces_cycles(
     calibration: &CalibrationData,
+    total_bar_width: i32,
+    bar_width_frac: f64,
     reliable_cycles: &[BTreeSet<i32>],
 ) -> Result<(), String> {
-    let profile_sets = calibration
-        .profiles
+    let generated = synthesize_profiles_for_frame_counts(
+        &calibration.frame_counts(),
+        total_bar_width,
+        bar_width_frac,
+    )?;
+    let profile_sets = generated
         .iter()
         .map(|profile| {
             profile

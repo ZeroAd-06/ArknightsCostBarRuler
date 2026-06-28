@@ -560,13 +560,13 @@ fn main() {
             .ui_scaler
             .unwrap_or_else(|| ruler_config.effective_ui_scaler()),
     );
+    engine.set_roi(width as i32, height as i32);
     engine
         .load_calibration(&calibration_path)
         .unwrap_or_else(|e| {
             eprintln!("FATAL: failed to load calibration: {e}");
             std::process::exit(1);
         });
-    engine.set_roi(width as i32, height as i32);
 
     let mut csv = CsvWriter::new(&options.output_path).unwrap_or_else(|e| {
         eprintln!(

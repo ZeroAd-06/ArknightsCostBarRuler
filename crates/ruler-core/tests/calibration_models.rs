@@ -1,7 +1,9 @@
 use ruler_core::analysis::calibration::{infer_calibration_from_samples, CalibrationData};
-use ruler_core::analysis::roi::find_cost_bar_roi;
+use ruler_core::analysis::roi::{
+    cost_bar_width_frac_with_ui_scaler, find_cost_bar_roi, DEFAULT_UI_SCALER,
+};
 use ruler_core::analysis::synthesis::{
-    synthesize_profiles, BASE_FRAMES_PER_COST, MIN_DETECTABLE_WIDTH,
+    synthesize_profiles, SynthesizedProfile, BASE_FRAMES_PER_COST, MIN_DETECTABLE_WIDTH,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,7 +70,17 @@ fn tracked_cost_data_infers_expected_models_without_missing_widths() {
         );
 
         let reliable_cycles = reliable_cycles(&cycles, meta.total_bar_width);
-        assert_sequences_fit_profiles(&meta.label, &[reliable_cycles], &calibration.profiles);
+        let generated = ruler_core::analysis::calibration::synthesize_profiles_for_frame_counts(
+            &calibration.frame_counts(),
+            meta.total_bar_width,
+            cost_bar_width_frac_with_ui_scaler(
+                meta.screen_width as i32,
+                meta.screen_height as i32,
+                DEFAULT_UI_SCALER,
+            ),
+        )
+        .unwrap_or_else(|error| panic!("{} failed synthesis: {error}", raw_path.display()));
+        assert_sequences_fit_profiles(&meta.label, &[reliable_cycles], &generated);
     }
 }
 
@@ -234,7 +246,7 @@ fn parse_width_set(widths: &str) -> BTreeSet<i32> {
 fn assert_sequences_fit_profiles(
     label: &str,
     sequences: &[Vec<BTreeSet<i32>>],
-    profiles: &[ruler_core::analysis::calibration::ProfileData],
+    profiles: &[SynthesizedProfile],
 ) {
     let profile_sets = profiles
         .iter()

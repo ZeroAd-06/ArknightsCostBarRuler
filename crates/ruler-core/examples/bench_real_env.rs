@@ -87,9 +87,10 @@ fn run() -> Result<(), String> {
     println!("cost_bar_roi: ({}, {}, {})", roi.0, roi.1, roi.2);
 
     let mut engine = Analyzer::new();
+    engine.set_ui_scaler(config.resolved_ui_scaler());
+    engine.set_roi(first.width as i32, first.height as i32);
     if let Some(path) = &calibration_path {
         engine.load_calibration(path)?;
-        engine.set_roi(first.width as i32, first.height as i32);
     }
 
     for _ in 0..options.warmup_frames {

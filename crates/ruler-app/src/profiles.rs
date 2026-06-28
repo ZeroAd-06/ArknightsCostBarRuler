@@ -3,8 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ruler_core::analysis::calibration::{CalibrationData, LoadedCalibration};
-use serde_json::Value;
+use ruler_core::analysis::calibration::CalibrationData;
 
 use crate::{resources::ResourceLocator, ui_state::ProfileMenuItem};
 
@@ -39,9 +38,7 @@ impl ProfileStore {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            // Skip files that fail to load (unversioned / unsupported format) so
-            // they never appear in the UI profile list.
-            if LoadedCalibration::from_file(&path).is_err() {
+            if CalibrationData::from_file(&path).is_err() {
                 continue;
             }
             let Some(filename) = path
@@ -100,9 +97,7 @@ impl ProfileStore {
                     .join("-")
             )
         };
-        let screen_width = data.screen_width.unwrap_or(0);
-        let screen_height = data.screen_height.unwrap_or(0);
-        let filename = format!("{sanitized}_{frame_counts}_{screen_width}x{screen_height}.json");
+        let filename = format!("{sanitized}_{frame_counts}.json");
         let contents = serde_json::to_string_pretty(data).map_err(io::Error::other)?;
         fs::write(self.calibration_path(&filename), contents)?;
         Ok(filename)
@@ -122,50 +117,16 @@ pub fn calibration_basename(filename: &str) -> String {
 }
 
 fn profile_details(path: &Path) -> (String, String) {
-    let Ok(contents) = fs::read_to_string(path) else {
+    let Ok(data) = CalibrationData::from_file(path) else {
         return ("损坏".to_string(), "未知".to_string());
     };
-    let Ok(json) = serde_json::from_str::<Value>(&contents) else {
-        return ("损坏".to_string(), "未知".to_string());
-    };
-
-    let total_frames_str = json
-        .get("profiles")
-        .and_then(Value::as_array)
-        .filter(|profiles| !profiles.is_empty())
-        .map(|profiles| {
-            let frames = profiles
-                .iter()
-                .map(|profile| {
-                    profile
-                        .get("total_frames")
-                        .and_then(Value::as_i64)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "N/A".to_string())
-                })
-                .collect::<Vec<_>>()
-                .join("-");
-            format!("{frames}f")
-        })
-        .or_else(|| {
-            json.get("total_frames")
-                .and_then(Value::as_i64)
-                .map(|value| format!("{value}f"))
-        })
-        .unwrap_or_else(|| "N/Af".to_string());
-
-    let screen_width = json
-        .get("screen_width")
-        .and_then(Value::as_i64)
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "?".to_string());
-    let screen_height = json
-        .get("screen_height")
-        .and_then(Value::as_i64)
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "?".to_string());
-
-    (total_frames_str, format!("{screen_width}x{screen_height}"))
+    let frames = data
+        .profiles
+        .iter()
+        .map(|profile| profile.total_frames.to_string())
+        .collect::<Vec<_>>()
+        .join("-");
+    (format!("{frames}f"), "自适应".to_string())
 }
 
 fn sanitize_profile_base(value: &str) -> String {

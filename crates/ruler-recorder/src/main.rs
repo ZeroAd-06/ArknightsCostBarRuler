@@ -161,6 +161,7 @@ fn main() {
     eprintln!("  connected  : {width}x{height}");
 
     let mut analyzer = Analyzer::new();
+    analyzer.set_ui_scaler(ruler_config.resolved_ui_scaler());
     analyzer.set_roi(width as i32, height as i32);
 
     if let Some(ref p) = cal_path {

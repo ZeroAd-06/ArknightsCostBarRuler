@@ -24,6 +24,7 @@ pub struct FrameResult {
 pub struct Analyzer {
     calibration: Option<LoadedCalibration>,
     roi: Option<Roi>,
+    bar_width_frac: Option<f64>,
     ui_scaler: f64,
     current_profile_index: usize,
     cycle_counter: usize,
@@ -100,6 +101,7 @@ impl Analyzer {
         Self {
             calibration: None,
             roi: None,
+            bar_width_frac: None,
             ui_scaler: roi::DEFAULT_UI_SCALER,
             current_profile_index: 0,
             cycle_counter: 0,
@@ -117,13 +119,15 @@ impl Analyzer {
 
     pub fn load_calibration<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
         log::info!("loading calibration from '{}'", path.as_ref().display());
-        let loaded = LoadedCalibration::from_file(path.as_ref())?;
+        let (total_bar_width, bar_width_frac) = self.calibration_geometry()?;
+        let loaded = LoadedCalibration::from_file(path.as_ref(), total_bar_width, bar_width_frac)?;
         self.set_loaded_calibration(loaded);
         Ok(())
     }
 
     pub fn load_calibration_json(&mut self, json: &str) -> Result<(), String> {
-        let loaded = LoadedCalibration::from_json(json)?;
+        let (total_bar_width, bar_width_frac) = self.calibration_geometry()?;
+        let loaded = LoadedCalibration::from_json(json, total_bar_width, bar_width_frac)?;
         self.set_loaded_calibration(loaded);
         Ok(())
     }
@@ -167,9 +171,15 @@ impl Analyzer {
             screen_height,
             self.ui_scaler,
         ));
+        self.bar_width_frac = Some(roi::cost_bar_width_frac_with_ui_scaler(
+            screen_width,
+            screen_height,
+            self.ui_scaler,
+        ));
     }
 
     pub fn set_roi_value(&mut self, roi: Roi) {
+        self.bar_width_frac = Some((roi.1 - roi.0) as f64);
         self.roi = Some(roi);
     }
 
@@ -223,6 +233,20 @@ impl Analyzer {
         self.battle_begin_reset_armed = true;
         self.pending_battle_start_phase = false;
         self.last_reported_battle_state = None;
+    }
+
+    fn calibration_geometry(&self) -> Result<(i32, f64), String> {
+        let roi = self
+            .roi
+            .ok_or_else(|| "No ROI set - call set_roi() before loading calibration".to_string())?;
+        let total_bar_width = roi.1 - roi.0;
+        if total_bar_width <= 0 {
+            return Err("No valid ROI width set before loading calibration".to_string());
+        }
+        Ok((
+            total_bar_width,
+            self.bar_width_frac.unwrap_or(total_bar_width as f64),
+        ))
     }
 
     fn analyze_frame(
@@ -424,6 +448,9 @@ impl Analyzer {
 mod tests {
     use super::timing::*;
     use super::*;
+    use crate::analysis::calibration::{CalibrationData, CalibrationTimingModel, ProfileData};
+    use crate::analysis::mapping::CalibrationTable;
+    use std::collections::HashMap;
 
     const TEST_SCREEN_WIDTH: u32 = 1280;
     const TEST_SCREEN_HEIGHT: u32 = 720;
@@ -432,20 +459,15 @@ mod tests {
     #[test]
     fn analyze_raw_buffer_tracks_frames() {
         let mut engine = Analyzer::new();
+        engine.set_roi_value((0, 20, 0));
         engine
             .load_calibration_json(
                 r#"{
-                    "format_version": 2,
-                    "timing_model": "open_interior_v1",
-                    "total_bar_width": 20,
-                    "profiles": [{
-                        "total_frames": 30,
-                        "pixel_map": {"0": 0, "5": 1, "10": 2}
-                    }]
+                    "format_version": 3,
+                    "profiles": [{"total_frames": 30}]
                 }"#,
             )
             .unwrap();
-        engine.set_roi_value((0, 20, 0));
 
         let mut buffer = vec![30u8; 20 * 3];
         buffer[0] = 252;
@@ -466,8 +488,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.raw_pixel_width, Some(2));
-        // Open-interior left-closed cycle maps width 2 -> internal 0 -> frame 1.
-        assert_eq!(result.logical_frame, Some(1));
+        assert_eq!(result.logical_frame, Some(2));
         // First observed in-battle frame only sets the phase anchor (elapsed 0).
         assert_eq!(result.elapsed_frames, 0);
         assert!(!result.cost_is_negative);
@@ -544,20 +565,12 @@ mod tests {
     #[test]
     fn negative_cost_interpolates_widths_missing_from_positive_profile() {
         let mut engine = Analyzer::new();
-        engine
-            .load_calibration_json(
-                r#"{
-                    "format_version": 2,
-                    "timing_model": "open_interior_v1",
-                    "total_bar_width": 100,
-                    "profiles": [{
-                        "total_frames": 8,
-                        "pixel_map": {"0": 0, "3": 2, "5": 4, "7": 7}
-                    }]
-                }"#,
-            )
-            .unwrap();
         engine.set_roi_value(TEST_ROI);
+        engine.set_loaded_calibration(loaded_calibration_from_maps(
+            100,
+            315,
+            &[(8, &[(0, 0), (3, 2), (5, 4), (7, 7)] as &[(i32, i32)])],
+        ));
 
         let result = analyze_width(&mut engine, 0, true);
         assert_eq!(result.logical_frame, Some(0));
@@ -950,15 +963,10 @@ mod tests {
 
     #[test]
     fn open_interior_boundary_cycle_index_comes_from_base_profile_frames() {
-        let calibration_30 =
-            LoadedCalibration::from_json(&open_interior_calibration_json(&[30], 100, 315)).unwrap();
-        let calibration_60 =
-            LoadedCalibration::from_json(&open_interior_calibration_json(&[60], 100, 315)).unwrap();
-        let calibration_90 =
-            LoadedCalibration::from_json(&open_interior_calibration_json(&[90], 100, 315)).unwrap();
-        let calibration_38_37 =
-            LoadedCalibration::from_json(&open_interior_calibration_json(&[38, 37], 100, 315))
-                .unwrap();
+        let calibration_30 = loaded_open_interior_calibration(&[30], 100, 315);
+        let calibration_60 = loaded_open_interior_calibration(&[60], 100, 315);
+        let calibration_90 = loaded_open_interior_calibration(&[90], 100, 315);
+        let calibration_38_37 = loaded_open_interior_calibration(&[38, 37], 100, 315);
 
         assert_eq!(boundary_cycle_index(&calibration_30, 0, 315), 10);
         assert_eq!(boundary_cycle_index(&calibration_60, 0, 315), 5);
@@ -968,19 +976,13 @@ mod tests {
 
     fn engine_with_profiles(total_frames: &[i32]) -> Analyzer {
         let mut engine = Analyzer::new();
-        engine
-            .load_calibration_json(&calibration_json(total_frames))
-            .unwrap();
         engine.set_roi_value(TEST_ROI);
+        engine.set_loaded_calibration(loaded_open_interior_calibration(
+            total_frames,
+            10_000,
+            10_000,
+        ));
         engine
-    }
-
-    /// Calibration whose cycles stay before the boundary (`LeftClosedRightOpen`)
-    /// and never reach the bar endpoints, so the open-interior `+1` offset cancels
-    /// the `width -> width-1` map and the logical frame equals the pixel width.
-    /// This reproduces the former direct-lookup identity used by these tests.
-    fn calibration_json(total_frames: &[i32]) -> String {
-        open_interior_calibration_json(total_frames, 10_000, 10_000)
     }
 
     fn open_interior_engine_with_profiles(
@@ -989,42 +991,69 @@ mod tests {
         boundary_switch_frame: i32,
     ) -> Analyzer {
         let mut engine = Analyzer::new();
-        engine
-            .load_calibration_json(&open_interior_calibration_json(
-                total_frames,
-                total_bar_width,
-                boundary_switch_frame,
-            ))
-            .unwrap();
         engine.set_roi_value(TEST_ROI);
+        engine.set_loaded_calibration(loaded_open_interior_calibration(
+            total_frames,
+            total_bar_width,
+            boundary_switch_frame,
+        ));
         engine
     }
 
-    fn open_interior_calibration_json(
+    fn loaded_open_interior_calibration(
         total_frames: &[i32],
         total_bar_width: i32,
         boundary_switch_frame: i32,
-    ) -> String {
-        let profiles = total_frames
+    ) -> LoadedCalibration {
+        let profile_maps = total_frames
             .iter()
             .map(|total_frames| {
-                let pixel_map = (1..*total_frames)
-                    .map(|width| format!(r#""{width}": {}"#, width - 1))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(r#"{{"total_frames": {total_frames}, "pixel_map": {{{pixel_map}}}}}"#)
+                let pairs = (1..*total_frames)
+                    .map(|width| (width, width - 1))
+                    .collect::<Vec<_>>();
+                (*total_frames, pairs)
             })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            r#"{{
-                "format_version": 2,
-                "timing_model": "open_interior_v1",
-                "total_bar_width": {total_bar_width},
-                "boundary_switch_frame": {boundary_switch_frame},
-                "profiles": [{profiles}]
-            }}"#
-        )
+            .collect::<Vec<_>>();
+        let borrowed_maps = profile_maps
+            .iter()
+            .map(|(frames, pairs)| (*frames, pairs.as_slice()))
+            .collect::<Vec<_>>();
+        loaded_calibration_from_maps(total_bar_width, boundary_switch_frame, &borrowed_maps)
+    }
+
+    fn loaded_calibration_from_maps(
+        total_bar_width: i32,
+        boundary_switch_frame: i32,
+        profile_maps: &[(i32, &[(i32, i32)])],
+    ) -> LoadedCalibration {
+        let profiles = profile_maps
+            .iter()
+            .map(|(total_frames, _)| ProfileData {
+                total_frames: *total_frames,
+            })
+            .collect::<Vec<_>>();
+        let tables = profile_maps
+            .iter()
+            .map(|(total_frames, pairs)| {
+                let pixel_map = pairs
+                    .iter()
+                    .map(|(width, frame)| (width.to_string(), *frame))
+                    .collect::<HashMap<_, _>>();
+                CalibrationTable::from_pixel_map(&pixel_map, *total_frames)
+            })
+            .collect::<Vec<_>>();
+
+        LoadedCalibration {
+            data: CalibrationData {
+                format_version: crate::analysis::calibration::CALIBRATION_FORMAT_VERSION,
+                profiles,
+            },
+            tables,
+            timing_model: CalibrationTimingModel::OpenInteriorV1 {
+                total_bar_width,
+                boundary_switch_frame,
+            },
+        }
     }
 
     fn advance_to_open_boundary_cycle(engine: &mut Analyzer) -> FrameResult {

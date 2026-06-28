@@ -1,5 +1,4 @@
 /// Closed-form synthesis for Arknights cost-bar calibration profiles.
-use super::calibration::ProfileData;
 use std::collections::{BTreeSet, HashMap};
 
 pub const BAR_LENGTH_RATIO: f64 = 1.03892;
@@ -8,6 +7,12 @@ pub const MIN_DETECTABLE_WIDTH: i32 = 2;
 
 const EPSILON: f64 = 1e-6;
 const MAX_PROFILE_PERIOD: i32 = 60;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SynthesizedProfile {
+    pub total_frames: i32,
+    pub pixel_map: HashMap<String, i32>,
+}
 
 pub fn synthesized_width(
     total_bar_width: i32,
@@ -59,7 +64,7 @@ pub fn synthesize_profiles(
     total_bar_width: i32,
     bar_width_frac: f64,
     n_eff: f64,
-) -> Vec<ProfileData> {
+) -> Vec<SynthesizedProfile> {
     if total_bar_width <= 0 || n_eff <= 0.0 || !n_eff.is_finite() {
         return Vec::new();
     }
@@ -102,7 +107,7 @@ fn synthesize_cycle_profile(
     bar_width_frac: f64,
     n_eff: f64,
     cycle_index: i32,
-) -> ProfileData {
+) -> SynthesizedProfile {
     let start_frame = ceil_frame(cycle_index as f64 * n_eff);
     let end_frame = ceil_frame((cycle_index + 1) as f64 * n_eff);
     let total_frames = (end_frame - start_frame).max(1);
@@ -114,7 +119,7 @@ fn synthesize_cycle_profile(
         pixel_map.entry(width.to_string()).or_insert(local_frame);
     }
 
-    ProfileData {
+    SynthesizedProfile {
         total_frames,
         pixel_map,
     }

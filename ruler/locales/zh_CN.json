@@ -45,6 +45,7 @@
     "overlay.menu.calibrating": "校准中",
     "overlay.menu.display": "帧数显示",
     "overlay.menu.timer": "调节计时器",
+    "overlay.timer.edit_placeholder": "分:秒:帧 或 帧数",
     "overlay.menu.scale": "缩放",
     "overlay.menu.about": "{version} Z_06 作品",
     "update.badge.short": "更新",

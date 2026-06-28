@@ -45,6 +45,7 @@
     "overlay.menu.calibrating": "Calibrating",
     "overlay.menu.display": "Frame Display",
     "overlay.menu.timer": "Adjust Timer",
+    "overlay.timer.edit_placeholder": "MM:SS:FF or frames",
     "overlay.menu.scale": "Scale",
     "overlay.menu.about": "{version} by Z_06",
     "update.badge.short": "Update",

@@ -1,7 +1,10 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{commands::UiCommand, ui_state::FrameDisplayMode};
+use crate::{
+    commands::UiCommand,
+    ui_state::{parse_timer_input_frames, FrameDisplayMode},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientRequest {
@@ -37,6 +40,7 @@ struct RawClientRequest {
     old: Option<String>,
     new_base: Option<String>,
     display_mode: Option<String>,
+    time: Option<String>,
     scale: Option<f32>,
     x: Option<i32>,
     y: Option<i32>,
@@ -91,6 +95,9 @@ impl RawClientRequest {
             "adjustTimer" => ClientAction::SendCommand(UiCommand::AdjustTimer {
                 frames: self.required_i32("frames", self.frames)?,
             }),
+            "setTimer" => ClientAction::SendCommand(UiCommand::SetTimer {
+                frames: self.timer_target_frames()?,
+            }),
             "resetTimer" => ClientAction::SendCommand(UiCommand::ResetTimer),
             "undoResetTimer" => ClientAction::SendCommand(UiCommand::UndoResetTimer),
             "toggleLapTimer" => ClientAction::SendCommand(UiCommand::ToggleLapTimer),
@@ -131,6 +138,26 @@ impl RawClientRequest {
 
     fn required_i32(&self, field: &'static str, value: Option<i32>) -> Result<i32, RequestError> {
         value.ok_or_else(|| self.missing_field(field))
+    }
+
+    fn timer_target_frames(&self) -> Result<i32, RequestError> {
+        if let Some(frames) = self.frames {
+            if frames < 0 {
+                return Err(self.error(
+                    "invalid_request",
+                    format!("field 'frames' must be non-negative; got {frames}"),
+                ));
+            }
+            return Ok(frames);
+        }
+
+        let time = self.required_text("time", self.time.clone())?;
+        parse_timer_input_frames(time.as_str()).ok_or_else(|| {
+            self.error(
+                "invalid_request",
+                "field 'time' must be XX:XX:XX or XX frames".to_string(),
+            )
+        })
     }
 
     fn required_u64(&self, field: &'static str, value: Option<u64>) -> Result<u64, RequestError> {
@@ -219,6 +246,14 @@ mod tests {
                 ClientAction::SendCommand(UiCommand::AdjustTimer { frames: -30 }),
             ),
             (
+                r#"{"type":"setTimer","frames":75}"#,
+                ClientAction::SendCommand(UiCommand::SetTimer { frames: 75 }),
+            ),
+            (
+                r#"{"type":"setTimer","time":"01:02:03"}"#,
+                ClientAction::SendCommand(UiCommand::SetTimer { frames: 1_863 }),
+            ),
+            (
                 r#"{"type":"resetTimer"}"#,
                 ClientAction::SendCommand(UiCommand::ResetTimer),
             ),
@@ -305,6 +340,25 @@ mod tests {
         assert_eq!(
             error.message,
             "displayMode must be one of 0_to_n-1, 0_to_n, 1_to_n; got zero"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_set_timer_payloads() {
+        let negative = parse_client_request(r#"{"type":"setTimer","frames":-1}"#)
+            .expect_err("negative absolute timer should fail");
+        assert_eq!(negative.code, "invalid_request");
+        assert_eq!(
+            negative.message,
+            "field 'frames' must be non-negative; got -1"
+        );
+
+        let invalid_time = parse_client_request(r#"{"type":"setTimer","time":"1:60:0"}"#)
+            .expect_err("invalid timer text should fail");
+        assert_eq!(invalid_time.code, "invalid_request");
+        assert_eq!(
+            invalid_time.message,
+            "field 'time' must be XX:XX:XX or XX frames"
         );
     }
 }

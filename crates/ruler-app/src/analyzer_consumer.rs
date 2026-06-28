@@ -43,6 +43,8 @@ pub enum AnalyzerCommand {
     UndoResetTimer,
     /// Adjust the timer by a delta (positive or negative).
     AdjustTimer { frames: i32 },
+    /// Set the timer to an absolute elapsed frame count.
+    SetTimer { frames: i32 },
     /// Set the active profile index within the calibration table.
     ///
     /// Part of the consumer command protocol but not currently wired to a UI
@@ -190,6 +192,10 @@ impl AnalyzerConsumer {
                             AnalyzerCommand::AdjustTimer { frames } => {
                                 ctx.analyzer.adjust_timer(frames);
                                 ctx.last_elapsed_frames += frames;
+                            }
+                            AnalyzerCommand::SetTimer { frames } => {
+                                ctx.analyzer.adjust_timer(frames - ctx.last_elapsed_frames);
+                                ctx.last_elapsed_frames = frames;
                             }
                             AnalyzerCommand::SetProfileIndex { index } => {
                                 ctx.analyzer.set_profile_index(index);

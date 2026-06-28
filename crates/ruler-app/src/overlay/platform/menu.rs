@@ -1,6 +1,6 @@
 //! The right-click context-menu popup: a second layered window that
 //! software-renders `menu.slint` in its own nested message loop, driven from
-//! the HUD's [`super::hud`] window. Also hosts the inline-rename keyboard
+//! the HUD's [`super::hud`] window. Also hosts the inline-edit keyboard
 //! plumbing (WM_CHAR / WM_KEYDOWN → Slint key events).
 
 use std::{
@@ -27,7 +27,7 @@ use crate::{
         PreBgra,
     },
     ui::{ProfileRow, RulerMenu},
-    ui_state::{FrameDisplayMode, OverlayMode},
+    ui_state::{parse_timer_input_frames, FrameDisplayMode, OverlayMode},
     worker::SharedAppState,
 };
 use windows::{
@@ -79,7 +79,7 @@ struct MenuState {
     buf_h: usize,
     scale: f32,
     closing: Rc<Cell<bool>>,
-    // high half of a pending UTF-16 surrogate pair (inline-rename IME input)
+    // high half of a pending UTF-16 surrogate pair (inline-edit IME input)
     pending_high: Cell<u16>,
     // last-seen profile list, so the model is refreshed / popup resized on change
     profiles_sig: String,
@@ -298,6 +298,8 @@ unsafe fn populate_menu(menu: &RulerMenu, ui: &crate::ui_state::UiSnapshot, i18n
     }
     menu.set_editing_index(-1);
     menu.set_deleting_index(-1);
+    menu.set_timer_editing(false);
+    menu.set_timer_edit_invalid(false);
     menu.set_display_mode(display_mode_index(ui.display_mode));
     menu.set_scale_index(scale_pct_to_index(ui.overlay_scale_pct));
     menu.set_timer_enabled(ui.active_profile.is_some());
@@ -307,6 +309,7 @@ unsafe fn populate_menu(menu: &RulerMenu, ui: &crate::ui_state::UiSnapshot, i18n
     menu.set_cap_display(i18n.tr("overlay.menu.display").into());
     menu.set_cap_scale(i18n.tr("overlay.menu.scale").into());
     menu.set_cap_timer(i18n.tr("overlay.menu.timer").into());
+    menu.set_cap_timer_edit_placeholder(i18n.tr("overlay.timer.edit_placeholder").into());
     menu.set_cap_cancel(i18n.tr("overlay.dialog.cancel").into());
     menu.set_cap_delete(i18n.tr("overlay.dialog.delete.confirm").into());
     menu.set_label_new(i18n.tr("overlay.menu.new_short").into());
@@ -446,6 +449,13 @@ fn wire_menu_callbacks(
             let _ = tx.send(command);
         }
     });
+    menu.on_commit_timer_edit({
+        let tx = command_tx.clone();
+        move |input| match parse_timer_input_frames(input.as_str()) {
+            Some(frames) => tx.send(UiCommand::SetTimer { frames }).is_ok(),
+            None => false,
+        }
+    });
     menu.on_about({
         let state = Arc::clone(state);
         let closing = Rc::clone(closing);
@@ -559,10 +569,10 @@ unsafe extern "system" fn menu_window_proc(
             LRESULT(0)
         }
         WM_CHAR => {
-            // Inline-rename text entry: forward printable units to the focused
+            // Inline text entry: forward printable units to the focused
             // field. Control codes (Enter/Esc/Backspace) come via WM_KEYDOWN.
             if let Some(state) = menu_state(hwnd) {
-                if state.menu.get_editing_index() >= 0 {
+                if state.menu.get_editing_index() >= 0 || state.menu.get_timer_editing() {
                     if let Some(text) = decode_wm_char(&state.pending_high, wparam.0 as u16) {
                         dispatch_key(&state.window, text);
                     }
@@ -573,19 +583,22 @@ unsafe extern "system" fn menu_window_proc(
         WM_KEYDOWN => {
             if let Some(state) = menu_state(hwnd) {
                 let editing = state.menu.get_editing_index() >= 0;
+                let timer_editing = state.menu.get_timer_editing();
                 let deleting = state.menu.get_deleting_index() >= 0;
                 let vk = wparam.0 as u16;
                 if vk == VK_ESCAPE.0 {
-                    if editing || deleting {
+                    if editing || timer_editing || deleting {
                         // Esc backs out of an inline edit / confirm first.
                         state.menu.set_editing_index(-1);
                         state.menu.set_deleting_index(-1);
+                        state.menu.set_timer_editing(false);
+                        state.menu.set_timer_edit_invalid(false);
                     } else {
                         state.closing.set(true);
                     }
-                } else if editing {
+                } else if editing || timer_editing {
                     if vk == VK_RETURN.0 {
-                        // Let the focused field's `accepted` commit the rename.
+                        // Let the focused field's `accepted` commit the edit.
                         dispatch_key(&state.window, Key::Return.into());
                     } else {
                         let key = match vk {

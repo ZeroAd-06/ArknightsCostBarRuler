@@ -31,6 +31,7 @@ export component RulerMenu inherits Window {
     in property <string> cap-display;
     in property <string> cap-scale;
     in property <string> cap-timer;
+    in property <string> cap-timer-edit-placeholder;
     in property <string> cap-cancel;
     in property <string> cap-delete;
     in property <string> label-new;
@@ -42,6 +43,8 @@ export component RulerMenu inherits Window {
     // Driven from Slint clicks; overlay.rs reads/clears them while routing keys.
     in-out property <int> editing-index: -1;
     in-out property <int> deleting-index: -1;
+    in-out property <bool> timer-editing: false;
+    in-out property <bool> timer-edit-invalid: false;
 
     // ---- outputs ----
     callback new-profile();
@@ -51,6 +54,7 @@ export component RulerMenu inherits Window {
     callback set-display(int);
     callback set-scale(int);
     callback timer-action(int);   // 0 back-cycle, 1 back-1s, 2 reset, 3 fwd-1s, 4 fwd-cycle, 5 undo-reset
+    callback commit-timer-edit(string) -> bool;
     callback cancel-calibration();
     callback about();
     callback exit();
@@ -487,7 +491,7 @@ export component RulerMenu inherits Window {
                     vertical-alignment: center;
                     width: root.cap-w;
                 }
-                HorizontalLayout {
+                if (!root.timer-editing): HorizontalLayout {
                     spacing: 2px;
                     alignment: start;
                     IconBtn {
@@ -519,6 +523,18 @@ export component RulerMenu inherits Window {
                         clicked => { root.timer-action(2); }
                     }
                     IconBtn {
+                        icon: Icons.pencil;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        enabled: root.timer-enabled;
+                        clicked => {
+                            root.editing-index = -1;
+                            root.deleting-index = -1;
+                            root.timer-edit-invalid = false;
+                            root.timer-editing = true;
+                        }
+                    }
+                    IconBtn {
                         icon: Icons.chev-right;
                         height: root.control-h;
                         glyph: root.icon-glyph;
@@ -533,6 +549,74 @@ export component RulerMenu inherits Window {
                         clicked => { root.timer-action(4); }
                     }
                     Rectangle { }   // trailing spacer
+                }
+                if (root.timer-editing): HorizontalLayout {
+                    spacing: 3px;
+                    horizontal-stretch: 1;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: root.control-h;
+                        border-width: 1px;
+                        border-color: root.timer-edit-invalid ? Palette.danger : Palette.accent;
+                        background: #ffffff10;
+                        timer_edit := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: 100%;
+                            color: Palette.text-primary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            selection-background-color: Palette.accent-dim;
+                            selection-foreground-color: Palette.text-primary;
+                            init => { self.focus(); }
+                            edited => { root.timer-edit-invalid = false; }
+                            accepted => {
+                                if (root.commit-timer-edit(self.text)) {
+                                    root.timer-edit-invalid = false;
+                                    root.timer-editing = false;
+                                } else {
+                                    root.timer-edit-invalid = true;
+                                    self.select-all();
+                                    self.focus();
+                                }
+                            }
+                        }
+                        Text {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: 100%;
+                            text: root.cap-timer-edit-placeholder;
+                            color: Palette.text-faint;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            visible: timer_edit.text == "";
+                        }
+                    }
+                    IconBtn {
+                        icon: Icons.cross;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        clicked => {
+                            root.timer-edit-invalid = false;
+                            root.timer-editing = false;
+                        }
+                    }
+                    IconBtn {
+                        icon: Icons.check;
+                        height: root.control-h;
+                        glyph: root.icon-glyph;
+                        clicked => {
+                            if (root.commit-timer-edit(timer_edit.text)) {
+                                root.timer-edit-invalid = false;
+                                root.timer-editing = false;
+                            } else {
+                                root.timer-edit-invalid = true;
+                                timer_edit.select-all();
+                                timer_edit.focus();
+                            }
+                        }
+                    }
                 }
             }
         }

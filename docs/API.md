@@ -92,7 +92,7 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 客户端可以继续只读服务器推送；也可以向同一个 WebSocket 连接发送 JSON 请求。响应统一使用 typed envelope，并回显可选 `requestId`：
 
 ```json
-{"type":"ack","requestId":"r1","action":"adjustTimer"}
+{"type":"ack","requestId":"r1","action":"command"}
 {"type":"snapshot","requestId":"r2","payload":{ "...": "快照字段" }}
 {"type":"frame","requestId":"r3","requestedFrameId":4241,"actualFrameId":4240,"fellBack":true,"fallbackReason":"frame_skipped","frame":{ "...": "历史帧字段" }}
 {"type":"error","requestId":"r4","code":"invalid_request","message":"..."}
@@ -112,6 +112,7 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 | `deleteProfile` | `filename` | 删除校准配置；删除活动配置会回到空闲。 |
 | `setDisplayMode` | `displayMode` | 设置显示模式，值为 `0_to_n-1`、`0_to_n` 或 `1_to_n`。 |
 | `adjustTimer` | `frames` | 按帧调整计时器，可为负数。 |
+| `setTimer` | `frames` 或 `time` | 将计时器设为绝对帧数；`frames` 为非负整数，`time` 可写 `XX:XX:XX`（分/秒/帧）或 `XX`（帧）。 |
 | `resetTimer` | 无 | 重置计时器，并清空当前战斗历史帧。 |
 | `undoResetTimer` | 无 | 撤销上一次重置；不清空历史。 |
 | `toggleLapTimer` | 无 | 开关 lap 计时；不清空历史。 |
@@ -125,6 +126,8 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 {"type":"getSnapshot","requestId":"snap-1"}
 {"type":"getFrame","requestId":"frame-4241","frameId":4241}
 {"type":"adjustTimer","requestId":"minus-30","frames":-30}
+{"type":"setTimer","requestId":"timer-75","frames":75}
+{"type":"setTimer","requestId":"timer-text","time":"01:02:03"}
 {"type":"setDisplayMode","requestId":"mode","displayMode":"1_to_n"}
 ```
 
@@ -179,7 +182,7 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 }
 ```
 
-历史会在当前战斗边界清空：手动 `resetTimer`、自动识别到 `BattleBegin` 重置、新建 / 切换 / 删除活动校准、进入校准，以及校准失败回到待校准时都会清空。`adjustTimer`、`undoResetTimer`、`toggleLapTimer` 不会清空。
+历史会在当前战斗边界清空：手动 `resetTimer`、自动识别到 `BattleBegin` 重置、新建 / 切换 / 删除活动校准、进入校准，以及校准失败回到待校准时都会清空。`adjustTimer`、`setTimer`、`undoResetTimer`、`toggleLapTimer` 不会清空。
 
 ## HTTP 快照
 

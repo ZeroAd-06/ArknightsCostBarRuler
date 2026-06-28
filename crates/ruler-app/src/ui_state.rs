@@ -259,3 +259,68 @@ pub fn format_time_from_frames(total_frames: i32) -> String {
     let seconds = total_seconds % 60;
     format!("{minutes:02}:{seconds:02}:{frames:02}")
 }
+
+#[must_use]
+pub fn parse_timer_input_frames(input: &str) -> Option<i32> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if !trimmed.contains(':') {
+        return parse_timer_number(trimmed);
+    }
+
+    let mut parts = trimmed.split(':');
+    let (Some(minutes), Some(seconds), Some(frames), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+
+    let minutes = parse_timer_number(minutes)?;
+    let seconds = parse_timer_number(seconds)?;
+    let frames = parse_timer_number(frames)?;
+    if seconds >= 60 || frames >= FRAMES_PER_SECOND {
+        return None;
+    }
+
+    minutes
+        .checked_mul(60)?
+        .checked_add(seconds)?
+        .checked_mul(FRAMES_PER_SECOND)?
+        .checked_add(frames)
+}
+
+fn parse_timer_number(segment: &str) -> Option<i32> {
+    if segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    segment.parse::<i32>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_timer_input_frames;
+
+    #[test]
+    fn parse_timer_input_frames_accepts_timecode_when_minutes_seconds_and_frames() {
+        assert_eq!(parse_timer_input_frames("01:02:03"), Some(1_863));
+        assert_eq!(parse_timer_input_frames("1:2:3"), Some(1_863));
+    }
+
+    #[test]
+    fn parse_timer_input_frames_accepts_bare_frames_when_single_number() {
+        assert_eq!(parse_timer_input_frames("42"), Some(42));
+        assert_eq!(parse_timer_input_frames(" 0007 "), Some(7));
+    }
+
+    #[test]
+    fn parse_timer_input_frames_rejects_invalid_or_out_of_range_timecodes() {
+        assert_eq!(parse_timer_input_frames(""), None);
+        assert_eq!(parse_timer_input_frames("1:2"), None);
+        assert_eq!(parse_timer_input_frames("1:60:0"), None);
+        assert_eq!(parse_timer_input_frames("1:0:30"), None);
+        assert_eq!(parse_timer_input_frames("-1"), None);
+    }
+}

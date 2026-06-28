@@ -19,6 +19,9 @@ pub enum UiCommand {
     AdjustTimer {
         frames: i32,
     },
+    SetTimer {
+        frames: i32,
+    },
     ResetTimer,
     UndoResetTimer,
     ToggleLapTimer,

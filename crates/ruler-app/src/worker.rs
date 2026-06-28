@@ -715,6 +715,10 @@ fn handle_command(
             log::info!("worker command: adjust timer by {frames} frames");
             send_analyzer(context, AnalyzerCommand::AdjustTimer { frames });
         }
+        UiCommand::SetTimer { frames } => {
+            log::info!("worker command: set timer to {frames} frames");
+            send_analyzer(context, AnalyzerCommand::SetTimer { frames });
+        }
         UiCommand::ResetTimer => {
             log::info!("worker command: reset timer");
             state.clear_api_frame_history();

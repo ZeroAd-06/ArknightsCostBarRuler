@@ -132,6 +132,24 @@ fn websocket_command_request_sends_ui_command_and_echoes_request_id() {
 }
 
 #[test]
+fn websocket_set_timer_request_accepts_timer_text() {
+    let state = SharedAppState::default();
+    let (tx, rx) = mpsc::channel();
+    let response = response::handle_client_text(
+        &state,
+        &tx,
+        r#"{"type":"setTimer","requestId":"timer","time":"01:02:03"}"#,
+    );
+
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(50)).unwrap(),
+        UiCommand::SetTimer { frames: 1_863 }
+    );
+    assert_eq!(response["type"], "ack");
+    assert_eq!(response["requestId"], "timer");
+}
+
+#[test]
 fn websocket_get_frame_returns_typed_error_when_history_misses() {
     let state = SharedAppState::default();
     let (tx, _rx) = mpsc::channel();
@@ -213,5 +231,20 @@ fn websocket_runtime_handles_snapshot_frame_and_command_requests() {
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(1)).unwrap(),
         UiCommand::AdjustTimer { frames: -30 }
+    );
+
+    socket
+        .send(Message::Text(
+            json!({"type":"setTimer","requestId":"set","frames":75})
+                .to_string()
+                .into(),
+        ))
+        .unwrap();
+    let ack = read_json_message(&mut socket);
+    assert_eq!(ack["type"], "ack");
+    assert_eq!(ack["requestId"], "set");
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        UiCommand::SetTimer { frames: 75 }
     );
 }

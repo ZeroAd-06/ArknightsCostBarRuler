@@ -4,6 +4,7 @@ use crate::analysis::roi::{
     cost_bar_width_frac_with_ui_scaler, find_cost_bar_roi_with_ui_scaler, DEFAULT_UI_SCALER,
 };
 use crate::analysis::synthesis::{synthesize_profiles, SynthesizedProfile, MIN_DETECTABLE_WIDTH};
+use crate::fp24::Fp24;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -12,17 +13,18 @@ const MIN_INFERRED_FRAMES_PER_COST: i32 = 15;
 const MAX_INFERRED_FRAMES_PER_COST: i32 = 150;
 const MIN_RELIABLE_WIDTHS_FOR_INFERENCE: usize = 4;
 const INFERENCE_DENOMINATORS: &[i32] = &[1, 2, 11];
-pub const TIMING_MODEL_OPEN_INTERIOR_V1: &str = "open_interior_v1";
-pub const DEFAULT_BOUNDARY_SWITCH_FRAME: i32 = 315;
+pub const TIMING_MODEL_FP24_ACCUMULATOR_V1: &str = "fp24_accumulator_v1";
 /// Current on-disk calibration schema version. Files without a matching
 /// `format_version` are rejected (and silently dropped from the UI list).
-pub const CALIBRATION_FORMAT_VERSION: u32 = 3;
+pub const CALIBRATION_FORMAT_VERSION: u32 = 4;
 
 /// Versioned multi-profile calibration format.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CalibrationData {
     #[serde(default)]
     pub format_version: u32,
+    pub timing_model: String,
+    pub required_fp: i64,
     pub profiles: Vec<ProfileData>,
 }
 
@@ -36,14 +38,13 @@ pub struct LoadedCalibration {
     /// Pre-compiled calibration tables for fast binary search
     pub tables: Vec<CalibrationTable>,
     pub timing_model: CalibrationTimingModel,
+    pub total_bar_width: i32,
+    pub bar_width_frac: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalibrationTimingModel {
-    OpenInteriorV1 {
-        total_bar_width: i32,
-        boundary_switch_frame: i32,
-    },
+    Fp24AccumulatorV1 { required: Fp24 },
 }
 
 impl CalibrationData {
@@ -73,6 +74,15 @@ impl CalibrationData {
                 "Unsupported calibration format_version {} (expected {CALIBRATION_FORMAT_VERSION})",
                 self.format_version
             ));
+        }
+        if self.timing_model != TIMING_MODEL_FP24_ACCUMULATOR_V1 {
+            return Err(format!(
+                "Unsupported calibration timing_model '{}' (expected {TIMING_MODEL_FP24_ACCUMULATOR_V1})",
+                self.timing_model
+            ));
+        }
+        if self.required_fp <= 0 {
+            return Err("Calibration required_fp must be positive".to_string());
         }
         if self.profiles.is_empty() {
             return Err("Calibration has empty profiles array".to_string());
@@ -120,7 +130,7 @@ impl LoadedCalibration {
             total_bar_width,
             bar_width_frac,
         )?;
-        let timing_model = compile_timing_model(total_bar_width)?;
+        let timing_model = compile_timing_model(&data)?;
         let tables: Vec<CalibrationTable> = generated_profiles
             .iter()
             .map(|p| CalibrationTable::from_pixel_map(&p.pixel_map, p.total_frames))
@@ -130,18 +140,18 @@ impl LoadedCalibration {
             data,
             tables,
             timing_model,
+            total_bar_width,
+            bar_width_frac,
         })
     }
 }
 
-fn compile_timing_model(total_bar_width: i32) -> Result<CalibrationTimingModel, String> {
-    if total_bar_width <= 0 {
-        return Err("open_interior_v1 calibration has invalid runtime total_bar_width".to_string());
+fn compile_timing_model(data: &CalibrationData) -> Result<CalibrationTimingModel, String> {
+    let required = Fp24::from_raw(data.required_fp);
+    if !required.is_positive() {
+        return Err("Calibration required_fp must be positive".to_string());
     }
-    Ok(CalibrationTimingModel::OpenInteriorV1 {
-        total_bar_width,
-        boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME,
-    })
+    Ok(CalibrationTimingModel::Fp24AccumulatorV1 { required })
 }
 
 pub fn synthesize_profiles_for_frame_counts(
@@ -156,7 +166,7 @@ pub fn synthesize_profiles_for_frame_counts(
         return Err("Calibration profiles must have positive total_frames".to_string());
     }
     if total_bar_width <= 0 {
-        return Err("open_interior_v1 calibration has invalid runtime total_bar_width".to_string());
+        return Err("Calibration has invalid runtime total_bar_width".to_string());
     }
 
     let total_frames = frame_counts.iter().copied().sum::<i32>();
@@ -285,6 +295,15 @@ pub fn infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
 
     Ok(CalibrationData {
         format_version: CALIBRATION_FORMAT_VERSION,
+        timing_model: TIMING_MODEL_FP24_ACCUMULATOR_V1.to_string(),
+        required_fp: Fp24::required_from_frame_ratio(
+            profiles
+                .iter()
+                .map(|profile| profile.total_frames)
+                .sum::<i32>(),
+            profiles.len(),
+        )
+        .raw(),
         profiles: profiles
             .into_iter()
             .map(|profile| ProfileData {
@@ -473,9 +492,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_3_minimal_format_compiles_tables_from_runtime_geometry() {
+    fn version_4_minimal_format_compiles_tables_from_runtime_geometry() {
         let json = r#"{
-            "format_version": 3,
+            "format_version": 4,
+            "timing_model": "fp24_accumulator_v1",
+            "required_fp": 16777216,
             "profiles": [{"total_frames": 30}]
         }"#;
 
@@ -486,15 +507,16 @@ mod tests {
         assert_eq!(loaded.tables[0].lookup(117), Some(28));
         assert_eq!(
             loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 {
-                total_bar_width: 120,
-                boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME
+            CalibrationTimingModel::Fp24AccumulatorV1 {
+                required: Fp24::REQUIRED_ONE
             }
         );
         assert_eq!(
             serde_json::to_value(&loaded.data).unwrap(),
             serde_json::json!({
-                "format_version": 3,
+                "format_version": 4,
+                "timing_model": "fp24_accumulator_v1",
+                "required_fp": 16777216,
                 "profiles": [{"total_frames": 30}]
             })
         );
@@ -503,7 +525,9 @@ mod tests {
     #[test]
     fn test_versioned_format_loads() {
         let json = r#"{
-            "format_version": 3,
+            "format_version": 4,
+            "timing_model": "fp24_accumulator_v1",
+            "required_fp": 16777216,
             "profiles": [{"total_frames": 30}]
         }"#;
         let loaded = LoadedCalibration::from_json(json, 20, 20.0).unwrap();
@@ -511,7 +535,7 @@ mod tests {
         assert_eq!(loaded.tables[0].total_frames, 30);
         assert!(matches!(
             loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 { .. }
+            CalibrationTimingModel::Fp24AccumulatorV1 { .. }
         ));
     }
 
@@ -545,26 +569,20 @@ mod tests {
     }
 
     #[test]
-    fn test_open_interior_format() {
+    fn v3_profile_format_is_rejected() {
         let json = r#"{
             "format_version": 3,
             "profiles": [{"total_frames": 30}]
         }"#;
-        let loaded = LoadedCalibration::from_json(json, 180, 180.0).unwrap();
-        assert_eq!(
-            loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 {
-                total_bar_width: 180,
-                boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME
-            }
-        );
-        assert_eq!(loaded.tables[0].total_frames, 30);
+        assert!(CalibrationData::from_json(json).is_err());
     }
 
     #[test]
-    fn open_interior_requires_runtime_total_bar_width() {
+    fn fp24_requires_runtime_total_bar_width() {
         let json = r#"{
-            "format_version": 3,
+            "format_version": 4,
+            "timing_model": "fp24_accumulator_v1",
+            "required_fp": 16777216,
             "profiles": [{"total_frames": 30}]
         }"#;
         assert!(LoadedCalibration::from_json(json, 0, 0.0).is_err());
@@ -573,7 +591,9 @@ mod tests {
     #[test]
     fn test_multi_profile() {
         let json = r#"{
-            "format_version": 3,
+            "format_version": 4,
+            "timing_model": "fp24_accumulator_v1",
+            "required_fp": 20971520,
             "profiles": [
                 {"total_frames": 38},
                 {"total_frames": 37}
@@ -598,10 +618,17 @@ mod tests {
         assert_eq!(data.format_version, CALIBRATION_FORMAT_VERSION);
         assert_eq!(data.profiles.len(), 1);
         assert_eq!(data.profiles[0].total_frames, 60);
+        assert_eq!(data.timing_model, TIMING_MODEL_FP24_ACCUMULATOR_V1);
+        assert_eq!(
+            data.required_fp,
+            Fp24::required_from_frames_per_cost(60).raw()
+        );
         assert_eq!(
             serde_json::to_value(&data).unwrap(),
             serde_json::json!({
-                "format_version": 3,
+                "format_version": 4,
+                "timing_model": "fp24_accumulator_v1",
+                "required_fp": 33554432,
                 "profiles": [{"total_frames": 60}]
             })
         );
@@ -619,9 +646,8 @@ mod tests {
         let loaded = LoadedCalibration::from_data(data, 157, 157.0).unwrap();
         assert_eq!(
             loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 {
-                total_bar_width: 157,
-                boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME
+            CalibrationTimingModel::Fp24AccumulatorV1 {
+                required: Fp24::REQUIRED_ONE
             }
         );
         assert_eq!(loaded.tables[0].lookup(180), None);

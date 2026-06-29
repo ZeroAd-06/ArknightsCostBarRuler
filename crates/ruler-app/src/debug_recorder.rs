@@ -72,7 +72,9 @@ impl CsvWriter {
         inner.write_all(
             b"frame_index,timestamp_ms,raw_pixel_width,logical_frame,\
               total_frames_in_cycle,cost_is_negative,elapsed_frames,\
-              capture_duration_us,phase,battle_state\n",
+              capture_duration_us,phase,battle_state,\
+              required_fp,speed_fp,accumulator_fp,advanced_frames,\
+              frames_since_cycle_start,frames_until_next_cost,match_error_px\n",
         )?;
         Ok(Self {
             inner,
@@ -81,35 +83,38 @@ impl CsvWriter {
         })
     }
 
-    fn write_row(
-        &mut self,
-        raw_pixel_width: Option<i32>,
-        logical_frame: Option<i32>,
-        total_frames_in_cycle: i32,
-        cost_is_negative: bool,
-        elapsed_frames: i32,
-        capture_dur_us: u128,
-        battle_state: ruler_core::BattleState,
-    ) -> std::io::Result<()> {
+    fn write_row(&mut self, result: &FrameResult, capture_dur_us: u128) -> std::io::Result<()> {
         let ts_us = self.start.elapsed().as_micros();
-        let phase = match (logical_frame, total_frames_in_cycle) {
+        let phase = match (result.logical_frame, result.total_frames_in_cycle) {
             (Some(lf), tfc) if tfc > 0 => Some(lf as f64 / tfc as f64),
             _ => None,
         };
+        let debug = result.timing_debug;
 
         writeln!(
             self.inner,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.frame_count,
             ts_us / 1000,
-            raw_pixel_width.map_or(String::new(), |v| v.to_string()),
-            logical_frame.map_or(String::new(), |v| v.to_string()),
-            total_frames_in_cycle,
-            if cost_is_negative { 1 } else { 0 },
-            elapsed_frames,
+            result
+                .raw_pixel_width
+                .map_or(String::new(), |v| v.to_string()),
+            result
+                .logical_frame
+                .map_or(String::new(), |v| v.to_string()),
+            result.total_frames_in_cycle,
+            if result.cost_is_negative { 1 } else { 0 },
+            result.elapsed_frames,
             capture_dur_us,
             phase.map_or(String::new(), |p| format!("{:.6}", p)),
-            battle_state.as_str(),
+            result.battle_state.as_str(),
+            debug.map_or(String::new(), |v| v.required_fp.to_string()),
+            debug.map_or(String::new(), |v| v.speed_fp.to_string()),
+            debug.map_or(String::new(), |v| v.accumulator_fp.to_string()),
+            debug.map_or(String::new(), |v| v.advanced_frames.to_string()),
+            debug.map_or(String::new(), |v| v.frames_since_cycle_start.to_string()),
+            debug.map_or(String::new(), |v| v.frames_until_next_cost.to_string()),
+            debug.map_or(String::new(), |v| v.match_error_px.to_string()),
         )?;
         self.frame_count += 1;
         Ok(())
@@ -270,15 +275,7 @@ impl DebugRecorder {
     /// Record the analysis CSV row for one frame.
     pub fn record_analysis_row(&mut self, result: &FrameResult, capture_dur_us: u128) {
         if let Some(ref mut csv) = self.csv {
-            if let Err(e) = csv.write_row(
-                result.raw_pixel_width,
-                result.logical_frame,
-                result.total_frames_in_cycle,
-                result.cost_is_negative,
-                result.elapsed_frames,
-                capture_dur_us,
-                result.battle_state,
-            ) {
+            if let Err(e) = csv.write_row(result, capture_dur_us) {
                 log::error!("debug recording: csv write error, stopping csv: {e}");
                 self.csv = None;
             }
@@ -308,24 +305,46 @@ use ruler_core::pipeline::ConsumerPipe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DebugRecordingPlan {
+    pub analysis_csv: bool,
+    pub raw_video: bool,
+    pub raw_csv: bool,
+}
+
+impl DebugRecordingPlan {
+    #[must_use]
+    pub const fn from_flags(enabled: bool, record_video: bool, record_csv: bool) -> Self {
+        if enabled {
+            Self {
+                analysis_csv: record_csv,
+                raw_video: record_video,
+                raw_csv: false,
+            }
+        } else {
+            Self {
+                analysis_csv: false,
+                raw_video: false,
+                raw_csv: false,
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn has_output(self) -> bool {
+        self.analysis_csv || self.raw_video || self.raw_csv
+    }
+}
+
 /// Configuration for spawning a [`DebugRecorderConsumer`].
 pub struct DebugRecorderConfig {
     pub output_dir: PathBuf,
     pub record_video: bool,
-    pub record_csv: bool,
     pub width: u32,
     pub height: u32,
     pub format: PixelFormat,
 }
 
-/// A Layer 1 consumer that records every captured frame to video (and
-/// optionally CSV). Runs on its own thread; shutting down the pipeline or
-/// dropping this struct stops the thread.
-///
-/// Note: in the three-layer architecture, the analysis CSV records only the
-/// frames that the L2 analyzer actually processed (SkipToLatest may skip
-/// frames under load). The video recording, by contrast, captures every
-/// frame because this consumer uses InOrder policy.
 pub struct DebugRecorderConsumer {
     running: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -338,7 +357,7 @@ impl DebugRecorderConsumer {
         let recorder = DebugRecorder::start(
             &config.output_dir,
             config.record_video,
-            config.record_csv,
+            false,
             config.width,
             config.height,
             config.format,
@@ -352,9 +371,8 @@ impl DebugRecorderConsumer {
             .spawn(move || {
                 let mut recorder = recorder;
                 log::info!(
-                    "debug recorder consumer started: video={}, csv={}",
-                    config.record_video,
-                    config.record_csv
+                    "debug recorder consumer started: video={}",
+                    config.record_video
                 );
                 while running_clone.load(Ordering::Relaxed) {
                     match pipe.recv_frame() {
@@ -388,5 +406,61 @@ impl Drop for DebugRecorderConsumer {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ruler_core::BattleState;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn debug_recording_routes_csv_to_analyzer_and_video_to_raw_consumer() {
+        let plan = DebugRecordingPlan::from_flags(true, true, true);
+
+        assert!(plan.analysis_csv);
+        assert!(plan.raw_video);
+        assert!(!plan.raw_csv);
+    }
+
+    #[test]
+    fn debug_recording_disables_all_sinks_when_master_flag_is_off() {
+        let plan = DebugRecordingPlan::from_flags(false, true, true);
+
+        assert!(!plan.analysis_csv);
+        assert!(!plan.raw_video);
+        assert!(!plan.raw_csv);
+    }
+
+    #[test]
+    fn debug_recorder_writes_analysis_csv_rows_when_result_is_recorded() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let output_dir = std::env::temp_dir().join(format!("ruler-debug-recorder-{unique}"));
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let csv_path = output_dir.join("analysis.csv");
+        let mut recorder =
+            DebugRecorder::start(&output_dir, false, true, 1280, 720, PixelFormat::Rgba).unwrap();
+        let result = FrameResult {
+            logical_frame: Some(12),
+            total_frames_in_cycle: 30,
+            raw_pixel_width: Some(42),
+            elapsed_frames: 12,
+            cost_is_negative: false,
+            battle_state: BattleState::OneXRunning,
+            timing_debug: None,
+        };
+
+        recorder.record_analysis_row(&result, 345);
+        drop(recorder);
+
+        let csv = std::fs::read_to_string(&csv_path).unwrap();
+        let _ = std::fs::remove_dir_all(&output_dir);
+
+        assert_eq!(csv.lines().count(), 2);
+        assert!(csv.contains(",42,12,30,0,12,345,0.400000,1x_running,"));
     }
 }

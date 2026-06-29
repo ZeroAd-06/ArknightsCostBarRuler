@@ -600,23 +600,22 @@ fn main() {
                 );
 
                 let result = engine
-                    .analyze_raw_buffer(&frame_buf, width, height, PixelFormat::Bgr)
+                    .analyze_raw_buffer_with_timestamp(
+                        &frame_buf,
+                        width,
+                        height,
+                        PixelFormat::Bgr,
+                        Some(
+                            u64::try_from(timestamp_ms.saturating_mul(1_000_000))
+                                .unwrap_or(u64::MAX),
+                        ),
+                    )
                     .unwrap_or_else(|e| {
                         eprintln!("FATAL: analysis failed at frame {}: {e}", csv.frame_count());
                         std::process::exit(1);
                     });
 
-                csv.write_row(
-                    timestamp_ms,
-                    result.raw_pixel_width,
-                    result.logical_frame,
-                    result.total_frames_in_cycle,
-                    result.cost_is_negative,
-                    result.elapsed_frames,
-                    0,
-                    result.battle_state,
-                )
-                .unwrap_or_else(|e| {
+                csv.write_row(timestamp_ms, &result, 0).unwrap_or_else(|e| {
                     eprintln!("FATAL: csv write failed: {e}");
                     std::process::exit(1);
                 });

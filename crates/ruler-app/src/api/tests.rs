@@ -6,6 +6,8 @@ use std::{
 use serde_json::{json, Value};
 use tungstenite::Message;
 
+use ruler_core::TimingDebug;
+
 use super::{
     response,
     test_support::{
@@ -45,6 +47,15 @@ fn snapshot_json_keeps_legacy_fields_when_enhanced_fields_exist() {
         api.capture_format = Some("rgba".to_string());
         api.capture_timestamp_ns = Some(9_000);
         api.capture_duration_us = Some(1_500);
+        api.timing_debug = Some(TimingDebug {
+            required_fp: 16_777_216,
+            speed_fp: 559_240,
+            accumulator_fp: 8_388_600,
+            advanced_frames: 15,
+            frames_since_cycle_start: 15,
+            frames_until_next_cost: 15,
+            match_error_px: 0,
+        });
     });
     state.record_api_frame(frame_record(42, 0));
 
@@ -67,6 +78,9 @@ fn snapshot_json_keeps_legacy_fields_when_enhanced_fields_exist() {
     assert_eq!(value["captureFormat"], "rgba");
     assert_eq!(value["captureTimestampNs"], 9_000);
     assert_eq!(value["captureDurationUs"], 1_500);
+    assert_eq!(value["timingDebug"]["requiredFp"], 16_777_216);
+    assert_eq!(value["timingDebug"]["speedFp"], 559_240);
+    assert_eq!(value["timingDebug"]["advancedFrames"], 15);
     assert_eq!(value["displayMode"], "0_to_n-1");
     assert_eq!(value["displayFrame"], "15");
     assert_eq!(value["displayTotal"], "/29");

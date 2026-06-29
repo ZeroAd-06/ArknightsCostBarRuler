@@ -2,7 +2,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ruler_core::{BattleState, PixelFormat};
+use ruler_core::{FrameResult, PixelFormat};
 
 // ---------------------------------------------------------------------------
 // Timestamp helpers
@@ -132,7 +132,9 @@ impl CsvWriter {
         inner.write_all(
             b"frame_index,timestamp_ms,raw_pixel_width,logical_frame,\
               total_frames_in_cycle,cost_is_negative,elapsed_frames,\
-              capture_duration_us,phase,battle_state\n",
+              capture_duration_us,phase,battle_state,\
+              required_fp,speed_fp,accumulator_fp,advanced_frames,\
+              frames_since_cycle_start,frames_until_next_cost,match_error_px\n",
         )?;
         Ok(Self {
             inner,
@@ -140,36 +142,42 @@ impl CsvWriter {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn write_row(
         &mut self,
         timestamp_ms: u128,
-        raw_pixel_width: Option<i32>,
-        logical_frame: Option<i32>,
-        total_frames_in_cycle: i32,
-        cost_is_negative: bool,
-        elapsed_frames: i32,
+        result: &FrameResult,
         capture_dur_us: u128,
-        battle_state: BattleState,
     ) -> std::io::Result<()> {
-        let phase = match (logical_frame, total_frames_in_cycle) {
+        let phase = match (result.logical_frame, result.total_frames_in_cycle) {
             (Some(lf), tfc) if tfc > 0 => Some(lf as f64 / tfc as f64),
             _ => None,
         };
+        let debug = result.timing_debug;
 
         writeln!(
             self.inner,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.frame_count,
             timestamp_ms,
-            raw_pixel_width.map_or(String::new(), |v| v.to_string()),
-            logical_frame.map_or(String::new(), |v| v.to_string()),
-            total_frames_in_cycle,
-            if cost_is_negative { 1 } else { 0 },
-            elapsed_frames,
+            result
+                .raw_pixel_width
+                .map_or(String::new(), |v| v.to_string()),
+            result
+                .logical_frame
+                .map_or(String::new(), |v| v.to_string()),
+            result.total_frames_in_cycle,
+            if result.cost_is_negative { 1 } else { 0 },
+            result.elapsed_frames,
             capture_dur_us,
             phase.map_or(String::new(), |p| format!("{:.6}", p)),
-            battle_state.as_str(),
+            result.battle_state.as_str(),
+            debug.map_or(String::new(), |v| v.required_fp.to_string()),
+            debug.map_or(String::new(), |v| v.speed_fp.to_string()),
+            debug.map_or(String::new(), |v| v.accumulator_fp.to_string()),
+            debug.map_or(String::new(), |v| v.advanced_frames.to_string()),
+            debug.map_or(String::new(), |v| v.frames_since_cycle_start.to_string()),
+            debug.map_or(String::new(), |v| v.frames_until_next_cost.to_string()),
+            debug.map_or(String::new(), |v| v.match_error_px.to_string()),
         )?;
         self.frame_count += 1;
         Ok(())

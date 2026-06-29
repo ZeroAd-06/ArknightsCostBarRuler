@@ -4,6 +4,7 @@ use crate::{
     ui_state::{ApiFrameRecord, ApiHistoryBounds, ProfileMenuItem, VERSION},
     worker::AppStateSnapshot,
 };
+use ruler_core::TimingDebug;
 
 pub const API_VERSION: u32 = 2;
 
@@ -28,6 +29,7 @@ pub struct ApiPayload {
     pub capture_format: Option<String>,
     pub capture_timestamp_ns: Option<u64>,
     pub capture_duration_us: Option<u64>,
+    pub timing_debug: Option<ApiTimingDebugPayload>,
     pub cursor_blocked: bool,
     pub display_mode: &'static str,
     pub display_frame: String,
@@ -64,6 +66,7 @@ impl ApiPayload {
             capture_format: api.capture_format.clone(),
             capture_timestamp_ns: api.capture_timestamp_ns,
             capture_duration_us: api.capture_duration_us,
+            timing_debug: api.timing_debug.map(ApiTimingDebugPayload::from_debug),
             cursor_blocked: ui.cursor_blocked,
             display_mode: ui.display_mode.as_config(),
             display_frame: ui.display_frame.clone(),
@@ -101,6 +104,7 @@ pub struct ApiFramePayload {
     pub capture_format: String,
     pub capture_timestamp_ns: u64,
     pub capture_duration_us: u64,
+    pub timing_debug: Option<ApiTimingDebugPayload>,
 }
 
 impl ApiFramePayload {
@@ -123,6 +127,33 @@ impl ApiFramePayload {
             capture_format: record.capture_format.clone(),
             capture_timestamp_ns: record.capture_timestamp_ns,
             capture_duration_us: record.capture_duration_us,
+            timing_debug: record.timing_debug.map(ApiTimingDebugPayload::from_debug),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiTimingDebugPayload {
+    pub required_fp: i64,
+    pub speed_fp: i64,
+    pub accumulator_fp: i64,
+    pub advanced_frames: i32,
+    pub frames_since_cycle_start: i32,
+    pub frames_until_next_cost: i32,
+    pub match_error_px: i32,
+}
+
+impl ApiTimingDebugPayload {
+    fn from_debug(debug: TimingDebug) -> Self {
+        Self {
+            required_fp: debug.required_fp,
+            speed_fp: debug.speed_fp,
+            accumulator_fp: debug.accumulator_fp,
+            advanced_frames: debug.advanced_frames,
+            frames_since_cycle_start: debug.frames_since_cycle_start,
+            frames_until_next_cost: debug.frames_until_next_cost,
+            match_error_px: debug.match_error_px,
         }
     }
 }

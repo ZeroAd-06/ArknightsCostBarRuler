@@ -9,8 +9,6 @@ use std::{
     time::Duration,
 };
 
-use ruler_core::RulerConfig;
-
 use super::WizardCore;
 use crate::target_discovery::{
     discover_targets, latency_class, LatencyClass, PreviewFrame, TargetCandidate,

@@ -1,5 +1,7 @@
 use std::{sync::atomic::Ordering, thread};
 
+use ruler_core::RulerConfig;
+
 use super::*;
 
 #[test]

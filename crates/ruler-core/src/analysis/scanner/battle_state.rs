@@ -63,6 +63,14 @@ const BATTLE_BEGIN_CODE_WHITE_PERMYRIAD_MIN: u32 = 100;
 const BATTLE_BEGIN_TITLE_WHITE_PERMYRIAD_MIN: u32 = 150;
 const BATTLE_BEGIN_TEXT_SCORE_PERMYRIAD_MIN: u32 = 650;
 
+const OPERATOR_INTERACTION_SHADOW_THRESHOLD: u8 = 40;
+const OPERATOR_INTERACTION_LOW_THRESHOLD: u8 = 50;
+const DEPLOYING_SPEED_MIDDLE_LEFT_THRESHOLD: u8 = 100;
+const DEPLOYING_SPEED_MIDDLE_LEFT_MIN: f64 = 110.0;
+const ROTATING_SPEED_LOW_MIN: f64 = 250.0;
+const ROTATING_PAUSE_LOW_MIN: f64 = 400.0;
+const ROTATING_SPEED_SHADOW_MAX: f64 = 1700.0;
+
 #[derive(Clone, Copy, Debug)]
 struct Rect {
     left: i32,
@@ -74,6 +82,17 @@ struct Rect {
 impl Rect {
     fn is_empty(self) -> bool {
         self.left >= self.right || self.top >= self.bottom
+    }
+
+    fn middle_left_third(self) -> Self {
+        let width = self.right - self.left;
+        let height = self.bottom - self.top;
+        Self {
+            left: self.left,
+            right: self.left + width / 3,
+            top: self.top + height / 3,
+            bottom: self.top + height * 2 / 3,
+        }
     }
 }
 
@@ -380,6 +399,79 @@ fn has_takeover_overlay(
     takeover_bright >= TAKEOVER_OVERLAY_BRIGHT_MIN
 }
 
+fn detect_operator_interaction(
+    buffer: &[u8],
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    speed_rect: Rect,
+    pause_rect: Rect,
+    scale: f64,
+    count_step: i32,
+) -> Option<BattleState> {
+    let deploying_arrow = normalized_count(
+        estimate_bright_pixels_sampled(
+            buffer,
+            width,
+            height,
+            format,
+            speed_rect.middle_left_third(),
+            DEPLOYING_SPEED_MIDDLE_LEFT_THRESHOLD,
+            count_step,
+        ),
+        scale,
+    );
+    if deploying_arrow >= DEPLOYING_SPEED_MIDDLE_LEFT_MIN {
+        return Some(BattleState::DeployingOperator);
+    }
+
+    let speed_shadow = normalized_count(
+        estimate_bright_pixels_sampled(
+            buffer,
+            width,
+            height,
+            format,
+            speed_rect,
+            OPERATOR_INTERACTION_SHADOW_THRESHOLD,
+            count_step,
+        ),
+        scale,
+    );
+    let speed_low = normalized_count(
+        estimate_bright_pixels_sampled(
+            buffer,
+            width,
+            height,
+            format,
+            speed_rect,
+            OPERATOR_INTERACTION_LOW_THRESHOLD,
+            count_step,
+        ),
+        scale,
+    );
+    let pause_low = normalized_count(
+        estimate_bright_pixels_sampled(
+            buffer,
+            width,
+            height,
+            format,
+            pause_rect,
+            OPERATOR_INTERACTION_LOW_THRESHOLD,
+            count_step,
+        ),
+        scale,
+    );
+
+    if speed_low >= ROTATING_SPEED_LOW_MIN
+        && pause_low >= ROTATING_PAUSE_LOW_MIN
+        && speed_shadow < ROTATING_SPEED_SHADOW_MAX
+    {
+        Some(BattleState::AdjustingOperatorFacing)
+    } else {
+        None
+    }
+}
+
 #[inline(always)]
 fn is_battle_begin_text_pixel(r: u8, g: u8, b: u8) -> bool {
     r >= BATTLE_BEGIN_WHITE_MIN
@@ -548,9 +640,11 @@ fn has_battle_begin_title_screen(
 /// 1. If the pause box holds a valid glyph, we are in battle. Its area says
 ///    running (two bars) vs paused (triangle); the speed box then says
 ///    1x / 2x / 0.2x (a crisp bright glyph vs the greyed deployment button).
-/// 2. Otherwise both glyphs are dark. Greyed-but-present button outlines with no
-///    deploy overlay mean the battle is loading or settling
-///    ([`BattleState::BeforeOrAfterBattle`]); anything else is not a battle.
+/// 2. Otherwise both glyphs are dark. Dim 0.2x arrows distinguish operator
+///    deployment and facing adjustment from the visually similar init state.
+/// 3. Greyed-but-present button outlines with no deploy overlay mean the battle
+///    is loading or settling ([`BattleState::BeforeOrAfterBattle`]); anything
+///    else is not a battle.
 pub fn detect_battle_state(
     buffer: &[u8],
     width: u32,
@@ -632,6 +726,14 @@ pub fn detect_battle_state_with_ui_scaler(
 
     let glyphs_dark = speed_bright < GLYPH_PRESENT_MAX && pause_bright < GLYPH_PRESENT_MAX;
     let buttons_present = speed_dim >= INIT_DIM_MIN && pause_dim <= INIT_DIM_MAX;
+    if glyphs_dark {
+        if let Some(operator_state) = detect_operator_interaction(
+            buffer, width, height, format, speed_rect, pause_rect, scale, count_step,
+        ) {
+            return operator_state;
+        }
+    }
+
     if glyphs_dark
         && speed_dim <= BATTLE_BEGIN_TOP_RIGHT_DIM_MAX
         && pause_dim <= BATTLE_BEGIN_TOP_RIGHT_DIM_MAX

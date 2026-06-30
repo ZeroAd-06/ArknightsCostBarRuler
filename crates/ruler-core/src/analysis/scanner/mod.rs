@@ -24,6 +24,8 @@ pub enum BattleState {
     PointTwoXPaused,
     OneXPaused,
     TwoXPaused,
+    DeployingOperator,
+    AdjustingOperatorFacing,
     BattleBegin,
     BeforeOrAfterBattle,
     NotInBattle,
@@ -38,6 +40,8 @@ impl BattleState {
             Self::PointTwoXPaused => "0.2x_paused",
             Self::OneXPaused => "1x_paused",
             Self::TwoXPaused => "2x_paused",
+            Self::DeployingOperator => "deploying_operator",
+            Self::AdjustingOperatorFacing => "adjusting_operator_facing",
             Self::BattleBegin => "battle_begin",
             Self::BeforeOrAfterBattle => "before_or_after_battle",
             Self::NotInBattle => "not_in_battle",
@@ -50,6 +54,7 @@ impl BattleState {
             Self::PointTwoXRunning
                 | Self::OneXRunning
                 | Self::TwoXRunning
+                | Self::DeployingOperator
                 | Self::PointTwoXPaused
                 | Self::OneXPaused
                 | Self::TwoXPaused

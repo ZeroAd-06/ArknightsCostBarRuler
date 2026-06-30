@@ -1021,6 +1021,41 @@ mod tests {
     }
 
     #[test]
+    fn deploying_operator_state_still_analyzes_cost_bar() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result =
+            analyze_width_with_state(&mut engine, 6, false, BattleState::DeployingOperator);
+
+        assert_eq!(result.battle_state, BattleState::DeployingOperator);
+        assert_eq!(result.logical_frame, Some(6));
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 6);
+    }
+
+    #[test]
+    fn adjusting_operator_facing_pauses_analysis_like_garbage() {
+        let mut engine = engine_with_profiles(&[30]);
+
+        analyze_width(&mut engine, 0, false);
+        let result = analyze_width(&mut engine, 20, false);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result =
+            analyze_width_with_state(&mut engine, 25, false, BattleState::AdjustingOperatorFacing);
+        assert_eq!(result.battle_state, BattleState::AdjustingOperatorFacing);
+        assert_eq!(result.logical_frame, None);
+        assert_eq!(result.raw_pixel_width, None);
+        assert_eq!(result.total_frames_in_cycle, 30);
+        assert_eq!(result.elapsed_frames, 20);
+
+        let result = analyze_width(&mut engine, 25, false);
+        assert_eq!(result.logical_frame, Some(25));
+        assert_eq!(result.elapsed_frames, 25);
+    }
+
+    #[test]
     fn unreadable_bar_in_paused_battle_preserves_phase_anchor_across_settings() {
         let mut engine = engine_with_profiles(&[30]);
 

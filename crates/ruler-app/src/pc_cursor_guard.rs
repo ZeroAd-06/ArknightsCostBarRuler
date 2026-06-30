@@ -85,9 +85,10 @@ impl SelfDrawnCursorGuard {
         roi: Option<Roi>,
         battle_state: BattleState,
     ) -> bool {
-        // `NotInBattle` is the scanner's garbage / unreadable state. The cursor
-        // warning is only useful when the frame is otherwise meaningful.
-        if battle_state == BattleState::NotInBattle {
+        if matches!(
+            battle_state,
+            BattleState::NotInBattle | BattleState::AdjustingOperatorFacing
+        ) {
             return false;
         }
 

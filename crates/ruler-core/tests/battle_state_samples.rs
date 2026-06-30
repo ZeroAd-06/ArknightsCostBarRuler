@@ -179,6 +179,8 @@ fn load_fixture_paths() -> Vec<Fixture> {
         ("2x", BattleState::TwoXRunning),
         ("1xpause", BattleState::OneXPaused),
         ("2xpause", BattleState::TwoXPaused),
+        ("deploying", BattleState::DeployingOperator),
+        ("rotating", BattleState::AdjustingOperatorFacing),
         ("init", BattleState::BeforeOrAfterBattle),
         ("garbage", BattleState::NotInBattle),
     ];

@@ -1,6 +1,6 @@
 [package]
 name = "ruler-app"
-version = "2.2.3"
+version = "2.3.0"
 edition = "2021"
 
 [dependencies]

@@ -35,24 +35,11 @@ pub fn synthesized_width(
     } else {
         total_bar_width as f64
     };
-    let phase = normalized_phase(global_frame as f64 / n_eff);
-    synthesized_width_for_phase(total_bar_width, bar_width_frac, phase)
-}
-
-pub fn synthesized_width_for_phase(total_bar_width: i32, bar_width_frac: f64, phase: f64) -> i32 {
-    if total_bar_width <= 0 || !phase.is_finite() {
-        return 0;
-    }
-
-    let bar_width_frac = if bar_width_frac.is_finite() && bar_width_frac > 0.0 {
-        bar_width_frac
-    } else {
-        total_bar_width as f64
-    };
     let visible_width = total_bar_width as f64;
     let bar_length = BAR_LENGTH_RATIO * bar_width_frac;
     let hidden_width = bar_length - visible_width;
-    let raw_width = (bar_length * phase.clamp(0.0, 1.0) - hidden_width).round() as i32 + 1;
+    let phase = normalized_phase(global_frame as f64 / n_eff);
+    let raw_width = (bar_length * phase - hidden_width).round() as i32 + 1;
 
     if raw_width < MIN_DETECTABLE_WIDTH {
         0

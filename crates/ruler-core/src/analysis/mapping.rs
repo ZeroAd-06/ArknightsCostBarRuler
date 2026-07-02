@@ -100,19 +100,6 @@ impl CalibrationTable {
         Some(interpolated_frame)
     }
 
-    pub fn lookup_display_frame(&self, pixel_width: i32, total_bar_width: i32) -> Option<f64> {
-        if self.entries.is_empty() || self.total_frames <= 0 {
-            return None;
-        }
-        if pixel_width <= 0 {
-            return Some(0.0);
-        }
-        if total_bar_width > 0 && pixel_width >= total_bar_width {
-            return Some(self.total_frames as f64);
-        }
-        self.lookup_interpolated_frame(pixel_width)
-    }
-
     pub fn len(&self) -> usize {
         self.entries.len()
     }

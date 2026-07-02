@@ -23,7 +23,7 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 | --- | --- | --- |
 | `isRunning` | `boolean` | 当前是否识别到有效费用条。 |
 | `currentFrame` | `integer \| null` | 当前费用循环内的原始逻辑帧，从 `0` 开始；与界面显示模式无关。 |
-| `totalFramesInCycle` | `integer` | 当前费用回复循环总帧数，由 fixed-point 累加器模拟得到：当前循环已过帧数 + 到下一次回费还需帧数。 |
+| `totalFramesInCycle` | `integer` | 当前费用回复循环总帧数；边界周期可能是基础周期 `N+1`。 |
 | `totalElapsedFrames` | `integer` | 当前战斗内累计逻辑帧，用来驱动 `分:秒:帧` 计时器。 |
 | `activeProfile` | `string \| null` | 当前加载的校准配置基础名。 |
 
@@ -43,7 +43,6 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 | `captureFormat` | `string \| null` | 本帧像素格式，目前常见为 `rgba`、`bgr` 或 `bgra`。 |
 | `captureTimestampNs` | `integer \| null` | 截图时间戳，单位纳秒。 |
 | `captureDurationUs` | `integer \| null` | 截图耗时，单位微秒。 |
-| `timingDebug` | `object \| null` | 费用条 fixed-point 模拟的调试信息；无有效费用条或未完成匹配时为 `null`。 |
 | `cursorBlocked` | `boolean` | PC 自绘光标是否遮挡费用条；被遮挡帧不会写入历史分析记录。 |
 | `displayMode` | `string` | 界面帧数显示模式：`0_to_n-1`、`0_to_n`、`1_to_n`。 |
 | `displayFrame` / `displayTotal` | `string` | 已按界面显示模式格式化后的当前帧和总帧数。 |
@@ -75,15 +74,6 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
   "captureFormat": "rgba",
   "captureTimestampNs": 1234567890,
   "captureDurationUs": 1500,
-  "timingDebug": {
-    "requiredFp": 16777216,
-    "speedFp": 559240,
-    "accumulatorFp": 8388600,
-    "advancedFrames": 15,
-    "framesSinceCycleStart": 15,
-    "framesUntilNextCost": 15,
-    "matchErrorPx": 0
-  },
   "cursorBlocked": false,
   "displayMode": "0_to_n-1",
   "displayFrame": "15",
@@ -171,31 +161,10 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
     "captureHeight": 720,
     "captureFormat": "rgba",
     "captureTimestampNs": 1234560000,
-    "captureDurationUs": 1500,
-    "timingDebug": {
-      "requiredFp": 16777216,
-      "speedFp": 559240,
-      "accumulatorFp": 7830000,
-      "advancedFrames": 1,
-      "framesSinceCycleStart": 14,
-      "framesUntilNextCost": 16,
-      "matchErrorPx": 0
-    }
+    "captureDurationUs": 1500
   }
 }
 ```
-
-`timingDebug` 字段说明：
-
-| 字段 | 说明 |
-| --- | --- |
-| `requiredFp` | 回 1 费所需 fixed-point 数值，单位为 `2^-24`。 |
-| `speedFp` | 当前每逻辑帧增加的 fixed-point 速度；正常为 `559240`，负费半速为 `279620`。 |
-| `accumulatorFp` | 当前已积攒计时器。 |
-| `advancedFrames` | 本次截图相对上一张截图匹配到的逻辑帧推进量。 |
-| `framesSinceCycleStart` | 当前费用循环内已经过的逻辑帧数。 |
-| `framesUntilNextCost` | 从当前状态到下一次回费还需要的逻辑帧数。 |
-| `matchErrorPx` | 模拟相位对应宽度与实际识别宽度的像素误差。 |
 
 `fallbackReason` 目前可能是：
 

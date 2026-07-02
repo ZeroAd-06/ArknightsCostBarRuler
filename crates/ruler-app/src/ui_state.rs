@@ -1,5 +1,3 @@
-use ruler_core::TimingDebug;
-
 pub const FRAMES_PER_SECOND: i32 = 30;
 pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
@@ -117,7 +115,6 @@ pub struct ApiStateSnapshot {
     pub capture_format: Option<String>,
     pub capture_timestamp_ns: Option<u64>,
     pub capture_duration_us: Option<u64>,
-    pub timing_debug: Option<TimingDebug>,
 }
 
 impl ApiStateSnapshot {
@@ -133,7 +130,6 @@ impl ApiStateSnapshot {
         self.capture_format = None;
         self.capture_timestamp_ns = None;
         self.capture_duration_us = None;
-        self.timing_debug = None;
     }
 
     pub fn update_from_frame_record(&mut self, record: &ApiFrameRecord) {
@@ -157,7 +153,6 @@ impl ApiStateSnapshot {
         self.capture_format = Some(record.capture_format.clone());
         self.capture_timestamp_ns = Some(record.capture_timestamp_ns);
         self.capture_duration_us = Some(record.capture_duration_us);
-        self.timing_debug = record.timing_debug;
     }
 }
 
@@ -185,7 +180,6 @@ pub struct ApiFrameRecord {
     pub capture_format: String,
     pub capture_timestamp_ns: u64,
     pub capture_duration_us: u64,
-    pub timing_debug: Option<TimingDebug>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

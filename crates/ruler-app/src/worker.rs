@@ -341,9 +341,7 @@ use ruler_core::{
 use crate::{
     analyzer_consumer::{AnalyzerCommand, AnalyzerConfig, AnalyzerConsumer},
     calibration,
-    debug_recorder::{
-        DebugRecorder, DebugRecorderConfig, DebugRecorderConsumer, DebugRecordingPlan,
-    },
+    debug_recorder::{DebugRecorderConfig, DebugRecorderConsumer},
     profiles::calibration_basename,
     telemetry::{self, RunTelemetryStats},
     ui_state::{FrameDisplayMode, OverlayMode},
@@ -505,37 +503,6 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         )
         .map_err(|e| format!("failed to connect analyzer consumer: {e}"))?;
     let (analyzer_tx, analyzer_rx) = std::sync::mpsc::channel::<AnalyzerCommand>();
-    let debug_plan = DebugRecordingPlan::from_flags(
-        context.config.debug_recording_enabled,
-        context.config.debug_recording_video,
-        context.config.debug_recording_csv,
-    );
-    if debug_plan.has_output() {
-        if let Err(error) = std::fs::create_dir_all(&context.log_session_dir) {
-            log::error!(
-                "failed to create debug recording directory '{}': {error}",
-                context.log_session_dir.display()
-            );
-        }
-    }
-    let analyzer_debug_recorder = if debug_plan.analysis_csv {
-        match DebugRecorder::start(
-            &context.log_session_dir,
-            false,
-            true,
-            info.width,
-            info.height,
-            ruler_core::PixelFormat::Rgba,
-        ) {
-            Ok(recorder) => Some(recorder),
-            Err(error) => {
-                log::error!("failed to start analysis CSV recorder: {error}");
-                None
-            }
-        }
-    } else {
-        None
-    };
     let initial_cal_path = context
         .active_profile
         .as_ref()
@@ -554,31 +521,39 @@ fn bootstrap(context: &mut WorkerContext, state: Arc<SharedAppState>) -> Result<
         Arc::clone(&state),
         analyzer_config,
         analyzer_rx,
-        analyzer_debug_recorder,
+        None, // debug recorder is handled separately below
     )?;
 
     // Spawn the debug recorder consumer if enabled.
-    if debug_plan.raw_video {
-        let recorder_pipe = pipeline
-            .connect_consumer(ruler_core::pipeline::cursor::ConsumerPolicy::InOrder, 0)
-            .map_err(|e| format!("failed to connect debug recorder consumer: {e}"))?;
-        let recorder_config = DebugRecorderConfig {
-            output_dir: context.log_session_dir.clone(),
-            record_video: true,
-            width: info.width,
-            height: info.height,
-            format: ruler_core::PixelFormat::Rgba, // pipeline always captures RGBA
-        };
-        match DebugRecorderConsumer::spawn(recorder_pipe, recorder_config) {
-            Ok(consumer) => {
-                log::info!("debug recorder consumer started");
-                context.debug_recorder = Some(consumer);
-                context.config.debug_recording_video = false;
-                context.config.debug_recording_enabled = context.config.debug_recording_csv;
-                persist_config(context, "consume one-shot MKV recording");
-            }
-            Err(e) => {
-                log::error!("failed to start debug recorder consumer: {e}");
+    if context.config.debug_recording_enabled {
+        let record_video = context.config.debug_recording_video;
+        let record_csv = context.config.debug_recording_csv;
+        if record_video || record_csv {
+            let _ = std::fs::create_dir_all(&context.log_session_dir);
+            let recorder_pipe = pipeline
+                .connect_consumer(ruler_core::pipeline::cursor::ConsumerPolicy::InOrder, 0)
+                .map_err(|e| format!("failed to connect debug recorder consumer: {e}"))?;
+            let recorder_config = DebugRecorderConfig {
+                output_dir: context.log_session_dir.clone(),
+                record_video,
+                record_csv,
+                width: info.width,
+                height: info.height,
+                format: ruler_core::PixelFormat::Rgba, // pipeline always captures RGBA
+            };
+            match DebugRecorderConsumer::spawn(recorder_pipe, recorder_config) {
+                Ok(consumer) => {
+                    log::info!("debug recorder consumer started");
+                    context.debug_recorder = Some(consumer);
+                    if record_video {
+                        context.config.debug_recording_video = false;
+                        context.config.debug_recording_enabled = context.config.debug_recording_csv;
+                        persist_config(context, "consume one-shot MKV recording");
+                    }
+                }
+                Err(e) => {
+                    log::error!("failed to start debug recorder consumer: {e}");
+                }
             }
         }
     }

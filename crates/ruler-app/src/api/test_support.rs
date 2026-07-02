@@ -50,7 +50,6 @@ pub(super) fn frame_record(frame_id: u64, dropped_since_previous: u64) -> ApiFra
         capture_format: "rgba".to_string(),
         capture_timestamp_ns: frame_id * 1_000,
         capture_duration_us: 1_500,
-        timing_debug: None,
     }
 }
 

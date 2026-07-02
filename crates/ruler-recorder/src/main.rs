@@ -51,12 +51,7 @@ fn empty_frame_result() -> FrameResult {
         elapsed_frames: 0,
         cost_is_negative: false,
         battle_state: BattleState::NotInBattle,
-        timing_debug: None,
     }
-}
-
-fn elapsed_ns_since(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn write_video_frame(
@@ -248,15 +243,23 @@ fn main() {
     // ---- write first frame ------------------------------------------------
     write_video_frame(&mut ffmpeg_stdin, &first_frame.data, width, height, bpp)
         .expect("ffmpeg write failed");
-    let first_timestamp_ns = elapsed_ns_since(csv_start);
     let result = analyzer
-        .analyze_captured_frame_at(&first_frame, Some(first_timestamp_ns))
+        .analyze_captured_frame(&first_frame)
         .unwrap_or_else(|e| {
             eprintln!("WARNING: first frame analysis failed: {e}");
             empty_frame_result()
         });
-    csv.write_row(u128::from(first_timestamp_ns) / 1_000_000, &result, 0)
-        .expect("csv write failed");
+    csv.write_row(
+        csv_start.elapsed().as_millis(),
+        result.raw_pixel_width,
+        result.logical_frame,
+        result.total_frames_in_cycle,
+        result.cost_is_negative,
+        result.elapsed_frames,
+        0,
+        result.battle_state,
+    )
+    .expect("csv write failed");
 
     // ---- main loop --------------------------------------------------------
     let start_time = Instant::now();
@@ -279,7 +282,6 @@ fn main() {
                 continue;
             }
         };
-        let capture_timestamp_ns = elapsed_ns_since(csv_start);
         let cap_us = t0.elapsed().as_micros();
 
         // 2. Pipe to ffmpeg as early as possible so wallclock timestamps track capture timing.
@@ -289,7 +291,7 @@ fn main() {
         }
 
         // 3. Analyse (best-effort — missing calibration still records video + partial CSV)
-        let result = match analyzer.analyze_captured_frame_at(&frame, Some(capture_timestamp_ns)) {
+        let result = match analyzer.analyze_captured_frame(&frame) {
             Ok(r) => r,
             Err(e) => {
                 if !ANALYSE_WARNED.swap(true, Ordering::Relaxed) {
@@ -301,9 +303,14 @@ fn main() {
 
         // 4. Write CSV (always — sync with video frames)
         if let Err(e) = csv.write_row(
-            u128::from(capture_timestamp_ns) / 1_000_000,
-            &result,
+            csv_start.elapsed().as_millis(),
+            result.raw_pixel_width,
+            result.logical_frame,
+            result.total_frames_in_cycle,
+            result.cost_is_negative,
+            result.elapsed_frames,
             cap_us,
+            result.battle_state,
         ) {
             eprintln!("\nFATAL: csv write error: {e}");
             break;

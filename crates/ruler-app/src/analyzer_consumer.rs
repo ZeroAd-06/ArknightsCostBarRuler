@@ -344,12 +344,11 @@ fn analyze_and_publish(state: &SharedAppState, ctx: &mut AnalyzerContext, frame:
     }
 
     ctx.telemetry_stats.record_analyzed_frame();
-    match ctx.analyzer.analyze_raw_buffer_with_timestamp(
+    match ctx.analyzer.analyze_raw_buffer(
         frame.data.as_slice(),
         frame.width,
         frame.height,
         frame.format,
-        Some(frame.capture_timestamp_ns),
     ) {
         Ok(result) => {
             // Debug CSV row.
@@ -486,7 +485,6 @@ fn publish_cursor_blocked(
         api.capture_format = Some(pixel_format_name(frame.format).to_string());
         api.capture_timestamp_ns = Some(frame.capture_timestamp_ns);
         api.capture_duration_us = Some(frame.capture_duration_us);
-        api.timing_debug = None;
     });
 }
 
@@ -513,7 +511,6 @@ fn api_frame_record(
         capture_format: pixel_format_name(frame.format).to_string(),
         capture_timestamp_ns: frame.capture_timestamp_ns,
         capture_duration_us: frame.capture_duration_us,
-        timing_debug: result.timing_debug,
     }
 }
 
@@ -540,7 +537,6 @@ fn publish_error(state: &SharedAppState, error: String) {
         ui.cursor_blocked = false;
         api.is_running = false;
         api.current_frame = None;
-        api.timing_debug = None;
     });
 }
 

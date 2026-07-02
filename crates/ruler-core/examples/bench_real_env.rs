@@ -93,17 +93,11 @@ fn run() -> Result<(), String> {
         engine.load_calibration(path)?;
     }
 
-    let analyzer_started = Instant::now();
     for _ in 0..options.warmup_frames {
         let frame = backend.capture_frame()?;
         if calibration_path.is_some() {
-            let _ = engine.analyze_raw_buffer_with_timestamp(
-                &frame.data,
-                frame.width,
-                frame.height,
-                frame.format,
-                Some(elapsed_ns_since(analyzer_started)),
-            )?;
+            let _ =
+                engine.analyze_raw_buffer(&frame.data, frame.width, frame.height, frame.format)?;
         } else {
             let _ = get_raw_filled_pixel_width(
                 &frame.data,
@@ -152,13 +146,8 @@ fn run() -> Result<(), String> {
 
         if calibration_path.is_some() {
             let analyze_started = Instant::now();
-            let result = engine.analyze_raw_buffer_with_timestamp(
-                &frame.data,
-                frame.width,
-                frame.height,
-                frame.format,
-                Some(elapsed_ns_since(analyzer_started)),
-            )?;
+            let result =
+                engine.analyze_raw_buffer(&frame.data, frame.width, frame.height, frame.format)?;
             timings
                 .engine_analyze_ns
                 .push(analyze_started.elapsed().as_nanos());
@@ -225,10 +214,6 @@ fn ms(duration: Duration) -> f64 {
 
 fn ns_to_ms(ns: f64) -> f64 {
     ns / 1_000_000.0
-}
-
-fn elapsed_ns_since(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn find_default_calibration(

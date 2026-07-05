@@ -2,7 +2,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ruler_core::{BattleState, PixelFormat};
+use ruler_core::{BattleState, PixelFormat, TimingDebug};
 
 // ---------------------------------------------------------------------------
 // Timestamp helpers
@@ -132,7 +132,9 @@ impl CsvWriter {
         inner.write_all(
             b"frame_index,timestamp_ms,raw_pixel_width,logical_frame,\
               total_frames_in_cycle,cost_is_negative,elapsed_frames,\
-              capture_duration_us,phase,battle_state\n",
+              capture_duration_us,phase,battle_state,\
+              advanced_frames,accumulator_fp,frames_until_next_cost,\
+              match_error_px,boundary_corrected\n",
         )?;
         Ok(Self {
             inner,
@@ -151,6 +153,7 @@ impl CsvWriter {
         elapsed_frames: i32,
         capture_dur_us: u128,
         battle_state: BattleState,
+        timing: Option<TimingDebug>,
     ) -> std::io::Result<()> {
         let phase = match (logical_frame, total_frames_in_cycle) {
             (Some(lf), tfc) if tfc > 0 => Some(lf as f64 / tfc as f64),
@@ -159,7 +162,7 @@ impl CsvWriter {
 
         writeln!(
             self.inner,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             self.frame_count,
             timestamp_ms,
             raw_pixel_width.map_or(String::new(), |v| v.to_string()),
@@ -170,6 +173,7 @@ impl CsvWriter {
             capture_dur_us,
             phase.map_or(String::new(), |p| format!("{:.6}", p)),
             battle_state.as_str(),
+            format_timing_debug(timing),
         )?;
         self.frame_count += 1;
         Ok(())
@@ -181,6 +185,21 @@ impl CsvWriter {
 
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+/// Render the five fp24 diagnostic columns (empty when the frame was frozen).
+fn format_timing_debug(timing: Option<TimingDebug>) -> String {
+    match timing {
+        Some(t) => format!(
+            "{},{},{},{},{}",
+            t.advanced_frames,
+            t.accumulator_fp,
+            t.frames_until_next_cost,
+            t.match_error_px,
+            if t.boundary_corrected { 1 } else { 0 },
+        ),
+        None => ",,,,".to_string(),
     }
 }
 

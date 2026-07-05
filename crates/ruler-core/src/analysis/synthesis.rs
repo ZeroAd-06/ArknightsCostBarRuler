@@ -20,16 +20,32 @@ pub fn synthesized_width(
     n_eff: f64,
     global_frame: i32,
 ) -> i32 {
-    if total_bar_width <= 0 || n_eff <= 0.0 || !n_eff.is_finite() {
+    if n_eff <= 0.0 || !n_eff.is_finite() {
+        return 0;
+    }
+    let phase = normalized_phase(global_frame as f64 / n_eff);
+    synthesized_width_for_phase(total_bar_width, bar_width_frac, phase)
+}
+
+/// Render the visible cost-bar pixel width for a raw cycle `phase` in `[0, 1]`.
+///
+/// This is the geometry shared by the fp24 runtime engine (which derives
+/// `phase = accumulator / required`) and [`synthesized_width`] (which derives it
+/// from `global_frame / n_eff`). Unlike the frame-based caller, no boundary
+/// snapping is applied here — the phase is used as given, only clamped to
+/// `[0, 1]` — so the fp24 accumulator stays the single source of truth.
+///
+/// `bar_width_frac` is the sub-pixel ROI width (`x2 - x1`) before rounding;
+/// `total_bar_width` is its rounded integer. The bar length `L` is built from
+/// the fractional width to keep sub-pixel precision (see
+/// `roi::cost_bar_width_frac_with_ui_scaler`) — rounding it first shifts a few
+/// frames across a `round()` boundary and makes calibration infer an absurd N.
+/// The hidden offset and the final clamp stay on the integer pixel grid.
+pub fn synthesized_width_for_phase(total_bar_width: i32, bar_width_frac: f64, phase: f64) -> i32 {
+    if total_bar_width <= 0 || !phase.is_finite() {
         return 0;
     }
 
-    // `bar_width_frac` is the sub-pixel ROI width (x2 - x1) before rounding;
-    // `total_bar_width` is its rounded integer. The bar length L is built from
-    // the fractional width to keep sub-pixel precision (see
-    // roi::cost_bar_width_frac_with_ui_scaler) — rounding it first shifts a few
-    // frames across a round() boundary and makes calibration infer an absurd N.
-    // The hidden offset and the final clamp stay on the integer pixel grid.
     let bar_width_frac = if bar_width_frac.is_finite() && bar_width_frac > 0.0 {
         bar_width_frac
     } else {
@@ -38,7 +54,7 @@ pub fn synthesized_width(
     let visible_width = total_bar_width as f64;
     let bar_length = BAR_LENGTH_RATIO * bar_width_frac;
     let hidden_width = bar_length - visible_width;
-    let phase = normalized_phase(global_frame as f64 / n_eff);
+    let phase = phase.clamp(0.0, 1.0);
     let raw_width = (bar_length * phase - hidden_width).round() as i32 + 1;
 
     if raw_width < MIN_DETECTABLE_WIDTH {
@@ -172,6 +188,26 @@ mod tests {
         assert_eq!(synthesized_width(180, 180.0, 30.0, 1), 0);
         assert_eq!(synthesized_width(180, 180.0, 30.0, 2), 6);
         assert_eq!(synthesized_width(180, 180.0, 30.0, 29), 175);
+    }
+
+    #[test]
+    fn phase_core_matches_frame_path_at_integer_frames() {
+        // The fp24 runtime renders via synthesized_width_for_phase; extracting it
+        // must preserve synthesized_width's behavior at every interior frame so the
+        // validated pixel geometry is reused rather than re-derived.
+        let cases: &[(i32, f64, f64)] =
+            &[(180, 180.0, 30.0), (120, 120.0, 37.5), (216, 215.832, 30.0)];
+        for &(w, frac, n_eff) in cases {
+            for frame in 0..(n_eff.ceil() as i32) {
+                let via_frame = synthesized_width(w, frac, n_eff, frame);
+                let phase = normalized_phase(frame as f64 / n_eff);
+                let via_phase = synthesized_width_for_phase(w, frac, phase);
+                assert_eq!(
+                    via_frame, via_phase,
+                    "mismatch at w={w} n_eff={n_eff} frame={frame}"
+                );
+            }
+        }
     }
 
     #[test]

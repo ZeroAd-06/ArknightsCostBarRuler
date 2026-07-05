@@ -1,9 +1,15 @@
-/// Calibration data loading from JSON files (versioned multi-profile format).
-use crate::analysis::mapping::CalibrationTable;
+/// Calibration data loading from JSON files (fp24 `required`-scalar format v4).
+///
+/// A calibration stores a single scalar — the cost-recovery target `required`
+/// (normal stage = 1.0) — and nothing else. The fp24 runtime engine derives the
+/// per-frame timing (cycle lengths, boundary "extra frame", X.5 alternation)
+/// from `required` alone, so there is no longer a per-profile frame list or a
+/// pre-computed pixel map on disk.
 use crate::analysis::roi::{
     cost_bar_width_frac_with_ui_scaler, find_cost_bar_roi_with_ui_scaler, DEFAULT_UI_SCALER,
 };
 use crate::analysis::synthesis::{synthesize_profiles, SynthesizedProfile, MIN_DETECTABLE_WIDTH};
+use crate::fp24::Fp24;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -12,38 +18,33 @@ const MIN_INFERRED_FRAMES_PER_COST: i32 = 15;
 const MAX_INFERRED_FRAMES_PER_COST: i32 = 150;
 const MIN_RELIABLE_WIDTHS_FOR_INFERENCE: usize = 4;
 const INFERENCE_DENOMINATORS: &[i32] = &[1, 2, 11];
-pub const TIMING_MODEL_OPEN_INTERIOR_V1: &str = "open_interior_v1";
-pub const DEFAULT_BOUNDARY_SWITCH_FRAME: i32 = 315;
+/// Base logical frames per cost cycle at 100% recovery (30 fps, 1 DP/s).
+pub const BASE_FRAMES_PER_COST: f64 = 30.0;
 /// Current on-disk calibration schema version. Files without a matching
 /// `format_version` are rejected (and silently dropped from the UI list).
-pub const CALIBRATION_FORMAT_VERSION: u32 = 3;
+pub const CALIBRATION_FORMAT_VERSION: u32 = 4;
 
-/// Versioned multi-profile calibration format.
+/// Versioned fp24 calibration format. Stores only the cost-recovery target.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CalibrationData {
     #[serde(default)]
     pub format_version: u32,
-    pub profiles: Vec<ProfileData>,
+    /// Cost-recovery target (fp24 `required`): normal stage = 1.0, half-speed
+    /// raid = 2.0, X.5 alternation = 1.25, a ×1.1 speed bonus = 1/1.1, etc.
+    /// Equivalent framing: `required = n_eff / 30`.
+    pub required: f64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ProfileData {
-    pub total_frames: i32,
+/// Runtime timing model compiled from [`CalibrationData`]. The fp24 accumulator
+/// needs nothing but the fixed-point `required`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalibrationTimingModel {
+    Fp24AccumulatorV1 { required: Fp24 },
 }
 
 pub struct LoadedCalibration {
     pub data: CalibrationData,
-    /// Pre-compiled calibration tables for fast binary search
-    pub tables: Vec<CalibrationTable>,
     pub timing_model: CalibrationTimingModel,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CalibrationTimingModel {
-    OpenInteriorV1 {
-        total_bar_width: i32,
-        boundary_switch_frame: i32,
-    },
 }
 
 impl CalibrationData {
@@ -60,11 +61,9 @@ impl CalibrationData {
         Ok(data)
     }
 
-    pub fn frame_counts(&self) -> Vec<i32> {
-        self.profiles
-            .iter()
-            .map(|profile| profile.total_frames)
-            .collect()
+    /// Effective frames per cost cycle implied by `required` (= `required * 30`).
+    pub fn n_eff(&self) -> f64 {
+        self.required * BASE_FRAMES_PER_COST
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -74,15 +73,8 @@ impl CalibrationData {
                 self.format_version
             ));
         }
-        if self.profiles.is_empty() {
-            return Err("Calibration has empty profiles array".to_string());
-        }
-        if self
-            .profiles
-            .iter()
-            .any(|profile| profile.total_frames <= 0)
-        {
-            return Err("Calibration profiles must have positive total_frames".to_string());
+        if !self.required.is_finite() || self.required <= 0.0 {
+            return Err("Calibration `required` must be a positive, finite number".to_string());
         }
         Ok(())
     }
@@ -90,112 +82,29 @@ impl CalibrationData {
 
 impl LoadedCalibration {
     /// Load calibration data from a JSON file.
-    pub fn from_file(
-        path: &Path,
-        total_bar_width: i32,
-        bar_width_frac: f64,
-    ) -> Result<Self, String> {
-        let data = CalibrationData::from_file(path)?;
-        Self::from_data(data, total_bar_width, bar_width_frac)
+    pub fn from_file(path: &Path) -> Result<Self, String> {
+        Self::from_data(CalibrationData::from_file(path)?)
     }
 
     /// Load and compile calibration from a JSON string.
-    pub fn from_json(
-        json_str: &str,
-        total_bar_width: i32,
-        bar_width_frac: f64,
-    ) -> Result<Self, String> {
-        let data = CalibrationData::from_json(json_str)?;
-        Self::from_data(data, total_bar_width, bar_width_frac)
+    pub fn from_json(json_str: &str) -> Result<Self, String> {
+        Self::from_data(CalibrationData::from_json(json_str)?)
     }
 
-    pub fn from_data(
-        data: CalibrationData,
-        total_bar_width: i32,
-        bar_width_frac: f64,
-    ) -> Result<Self, String> {
+    pub fn from_data(data: CalibrationData) -> Result<Self, String> {
         data.validate()?;
-        let generated_profiles = synthesize_profiles_for_frame_counts(
-            &data.frame_counts(),
-            total_bar_width,
-            bar_width_frac,
-        )?;
-        let timing_model = compile_timing_model(total_bar_width)?;
-        let tables: Vec<CalibrationTable> = generated_profiles
-            .iter()
-            .map(|p| CalibrationTable::from_pixel_map(&p.pixel_map, p.total_frames))
-            .collect();
-
-        Ok(LoadedCalibration {
-            data,
-            tables,
-            timing_model,
-        })
-    }
-}
-
-fn compile_timing_model(total_bar_width: i32) -> Result<CalibrationTimingModel, String> {
-    if total_bar_width <= 0 {
-        return Err("open_interior_v1 calibration has invalid runtime total_bar_width".to_string());
-    }
-    Ok(CalibrationTimingModel::OpenInteriorV1 {
-        total_bar_width,
-        boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME,
-    })
-}
-
-pub fn synthesize_profiles_for_frame_counts(
-    frame_counts: &[i32],
-    total_bar_width: i32,
-    bar_width_frac: f64,
-) -> Result<Vec<SynthesizedProfile>, String> {
-    if frame_counts.is_empty() {
-        return Err("Calibration has empty profiles array".to_string());
-    }
-    if frame_counts.iter().any(|total_frames| *total_frames <= 0) {
-        return Err("Calibration profiles must have positive total_frames".to_string());
-    }
-    if total_bar_width <= 0 {
-        return Err("open_interior_v1 calibration has invalid runtime total_bar_width".to_string());
+        let timing_model = CalibrationTimingModel::Fp24AccumulatorV1 {
+            required: Fp24::required_from_ratio(data.required),
+        };
+        Ok(LoadedCalibration { data, timing_model })
     }
 
-    let total_frames = frame_counts.iter().copied().sum::<i32>();
-    let n_eff = total_frames as f64 / frame_counts.len() as f64;
-    let mut profiles = synthesize_profiles(
-        total_bar_width,
-        normalized_bar_width_frac(total_bar_width, bar_width_frac),
-        n_eff,
-    );
-    if profiles.is_empty() {
-        return Err("校准失败：未能构建任何有效的费用循环模型。".to_string());
+    /// The compiled fixed-point cost-recovery target.
+    pub fn required(&self) -> Fp24 {
+        match self.timing_model {
+            CalibrationTimingModel::Fp24AccumulatorV1 { required } => required,
+        }
     }
-    if profiles.len() != frame_counts.len() {
-        return Err(format!(
-            "Calibration frame-count period {} does not match synthesized period {}",
-            frame_counts.len(),
-            profiles.len()
-        ));
-    }
-
-    let offset = matching_frame_count_offset(&profiles, frame_counts).ok_or_else(|| {
-        "Calibration frame counts do not match the synthesized timing period".to_string()
-    })?;
-    profiles.rotate_left(offset);
-    Ok(profiles)
-}
-
-fn matching_frame_count_offset(
-    profiles: &[SynthesizedProfile],
-    frame_counts: &[i32],
-) -> Option<usize> {
-    (0..profiles.len()).find(|offset| {
-        frame_counts
-            .iter()
-            .enumerate()
-            .all(|(index, total_frames)| {
-                profiles[(index + *offset) % profiles.len()].total_frames == *total_frames
-            })
-    })
 }
 
 fn normalized_bar_width_frac(total_bar_width: i32, bar_width_frac: f64) -> f64 {
@@ -266,7 +175,7 @@ pub fn infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
     let observed_max_width = observed_max_raw_width(cycle_samples).ok_or_else(|| {
         "校准失败：未能从样本中确定费用条宽度，请保持费用条可见并重试。".to_string()
     })?;
-    let (n_eff, profile_offset) = find_matching_model(
+    let (n_eff, _profile_offset) = find_matching_model(
         cycle_samples,
         total_bar_width,
         bar_width_frac,
@@ -276,21 +185,11 @@ pub fn infer_calibration_from_samples_with_ui_scaler_and_total_bar_width(
         "校准失败：样本与理论费用条序列不匹配，请重新进入关卡后在正常速度下重试。".to_string()
     })?;
 
-    let mut profiles = synthesize_profiles(total_bar_width, bar_width_frac, n_eff);
-    if profiles.is_empty() {
-        return Err("校准失败：未能构建任何有效的费用循环模型。".to_string());
-    }
-    let profile_count = profiles.len();
-    profiles.rotate_left(profile_offset % profile_count);
-
+    // fp24 tracks the phase by resyncing to pixels every frame, so no stored
+    // profile-phase offset is needed — the accumulator re-anchors on its own.
     Ok(CalibrationData {
         format_version: CALIBRATION_FORMAT_VERSION,
-        profiles: profiles
-            .into_iter()
-            .map(|profile| ProfileData {
-                total_frames: profile.total_frames,
-            })
-            .collect(),
+        required: n_eff / BASE_FRAMES_PER_COST,
     })
 }
 
@@ -472,123 +371,69 @@ fn synthesized_edge_error(
 mod tests {
     use super::*;
 
-    #[test]
-    fn version_3_minimal_format_compiles_tables_from_runtime_geometry() {
-        let json = r#"{
-            "format_version": 3,
-            "profiles": [{"total_frames": 30}]
-        }"#;
-
-        let loaded = LoadedCalibration::from_json(json, 120, 120.0).unwrap();
-
-        assert_eq!(loaded.tables.len(), 1);
-        assert_eq!(loaded.tables[0].total_frames, 30);
-        assert_eq!(loaded.tables[0].lookup(117), Some(28));
-        assert_eq!(
-            loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 {
-                total_bar_width: 120,
-                boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME
-            }
-        );
-        assert_eq!(
-            serde_json::to_value(&loaded.data).unwrap(),
-            serde_json::json!({
-                "format_version": 3,
-                "profiles": [{"total_frames": 30}]
-            })
+    fn assert_required(data: &CalibrationData, expected: f64) {
+        assert!(
+            (data.required - expected).abs() < 1e-9,
+            "required {} != expected {expected}",
+            data.required
         );
     }
 
     #[test]
-    fn test_versioned_format_loads() {
-        let json = r#"{
-            "format_version": 3,
-            "profiles": [{"total_frames": 30}]
-        }"#;
-        let loaded = LoadedCalibration::from_json(json, 20, 20.0).unwrap();
-        assert_eq!(loaded.tables.len(), 1);
-        assert_eq!(loaded.tables[0].total_frames, 30);
-        assert!(matches!(
+    fn version_4_required_scalar_compiles_fp24_timing_model() {
+        let json = r#"{ "format_version": 4, "required": 1.0 }"#;
+        let loaded = LoadedCalibration::from_json(json).unwrap();
+
+        assert_eq!(
             loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 { .. }
-        ));
+            CalibrationTimingModel::Fp24AccumulatorV1 {
+                required: Fp24::required_from_ratio(1.0)
+            }
+        );
+        assert!((loaded.data.n_eff() - 30.0).abs() < 1e-9);
+        assert_eq!(
+            serde_json::to_value(&loaded.data).unwrap(),
+            serde_json::json!({ "format_version": 4, "required": 1.0 })
+        );
+    }
+
+    #[test]
+    fn half_speed_required_is_two() {
+        let json = r#"{ "format_version": 4, "required": 2.0 }"#;
+        let loaded = LoadedCalibration::from_json(json).unwrap();
+        assert!((loaded.data.n_eff() - 60.0).abs() < 1e-9);
+        assert_eq!(loaded.required(), Fp24::required_from_ratio(2.0));
+    }
+
+    #[test]
+    fn old_v3_profile_list_format_is_rejected() {
+        let json = r#"{ "format_version": 3, "profiles": [{"total_frames": 30}] }"#;
+        assert!(CalibrationData::from_json(json).is_err());
     }
 
     #[test]
     fn old_flat_format_is_rejected() {
-        // Pre-v2 single-profile flat format no longer loads.
-        let json = r#"{
-            "total_frames": 30,
-            "pixel_map": {"0": 0, "5": 1, "10": 2}
-        }"#;
+        let json = r#"{ "total_frames": 30, "pixel_map": {"0": 0, "5": 1} }"#;
         assert!(CalibrationData::from_json(json).is_err());
     }
 
     #[test]
     fn missing_format_version_is_rejected() {
-        let json = r#"{
-            "profiles": [{"total_frames": 30}]
-        }"#;
+        let json = r#"{ "required": 1.0 }"#;
         assert!(CalibrationData::from_json(json).is_err());
     }
 
     #[test]
-    fn v2_full_format_is_rejected() {
-        let json = r#"{
-            "format_version": 2,
-            "timing_model": "open_interior_v1",
-            "total_bar_width": 180,
-            "profiles": [{"total_frames": 30, "pixel_map": {"0": 0, "6": 1}}]
-        }"#;
-        assert!(CalibrationData::from_json(json).is_err());
-    }
-
-    #[test]
-    fn test_open_interior_format() {
-        let json = r#"{
-            "format_version": 3,
-            "profiles": [{"total_frames": 30}]
-        }"#;
-        let loaded = LoadedCalibration::from_json(json, 180, 180.0).unwrap();
-        assert_eq!(
-            loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 {
-                total_bar_width: 180,
-                boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME
-            }
+    fn non_positive_required_is_rejected() {
+        assert!(CalibrationData::from_json(r#"{ "format_version": 4, "required": 0.0 }"#).is_err());
+        assert!(
+            CalibrationData::from_json(r#"{ "format_version": 4, "required": -1.0 }"#).is_err()
         );
-        assert_eq!(loaded.tables[0].total_frames, 30);
     }
 
     #[test]
-    fn open_interior_requires_runtime_total_bar_width() {
-        let json = r#"{
-            "format_version": 3,
-            "profiles": [{"total_frames": 30}]
-        }"#;
-        assert!(LoadedCalibration::from_json(json, 0, 0.0).is_err());
-    }
-
-    #[test]
-    fn test_multi_profile() {
-        let json = r#"{
-            "format_version": 3,
-            "profiles": [
-                {"total_frames": 38},
-                {"total_frames": 37}
-            ]
-        }"#;
-        let loaded = LoadedCalibration::from_json(json, 20, 20.0).unwrap();
-        assert_eq!(loaded.tables.len(), 2);
-        assert_eq!(loaded.tables[0].total_frames, 38);
-        assert_eq!(loaded.tables[1].total_frames, 37);
-    }
-
-    #[test]
-    fn test_invalid_json() {
-        let json = "not json";
-        assert!(CalibrationData::from_json(json).is_err());
+    fn invalid_json_is_rejected() {
+        assert!(CalibrationData::from_json("not json").is_err());
     }
 
     #[test]
@@ -596,14 +441,10 @@ mod tests {
         let samples = sample_cycles_for_n(180, 60.0);
         let data = infer_calibration_from_samples(&samples, 1920, 1080, 123.0).unwrap();
         assert_eq!(data.format_version, CALIBRATION_FORMAT_VERSION);
-        assert_eq!(data.profiles.len(), 1);
-        assert_eq!(data.profiles[0].total_frames, 60);
+        assert_required(&data, 2.0);
         assert_eq!(
             serde_json::to_value(&data).unwrap(),
-            serde_json::json!({
-                "format_version": 3,
-                "profiles": [{"total_frames": 60}]
-            })
+            serde_json::json!({ "format_version": 4, "required": 2.0 })
         );
     }
 
@@ -615,16 +456,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(data.profiles[0].total_frames, 30);
-        let loaded = LoadedCalibration::from_data(data, 157, 157.0).unwrap();
+        assert_required(&data, 1.0);
+        let loaded = LoadedCalibration::from_data(data).unwrap();
         assert_eq!(
             loaded.timing_model,
-            CalibrationTimingModel::OpenInteriorV1 {
-                total_bar_width: 157,
-                boundary_switch_frame: DEFAULT_BOUNDARY_SWITCH_FRAME
+            CalibrationTimingModel::Fp24AccumulatorV1 {
+                required: Fp24::required_from_ratio(1.0)
             }
         );
-        assert_eq!(loaded.tables[0].lookup(180), None);
     }
 
     #[test]
@@ -635,51 +474,22 @@ mod tests {
         }
 
         let data = infer_calibration_from_samples(&samples, 1920, 1080, 123.0).unwrap();
-
-        assert_eq!(data.profiles[0].total_frames, 30);
-        let generated =
-            synthesize_profiles_for_frame_counts(&data.frame_counts(), 180, 180.0).unwrap();
-        assert!(!generated[0].pixel_map.contains_key("180"));
+        assert_required(&data, 1.0);
     }
 
     #[test]
     fn infer_calibration_detects_half_frame_profile() {
         let samples = sample_cycles_for_n(180, 37.5);
         let data = infer_calibration_from_samples(&samples, 1920, 1080, 123.0).unwrap();
-        assert_eq!(data.profiles.len(), 2);
-        assert_eq!(data.profiles[0].total_frames, 38);
-        assert_eq!(data.profiles[1].total_frames, 37);
+        // 37.5 frames per cost → required 1.25; fp24 reproduces 38/37 alternation.
+        assert_required(&data, 1.25);
     }
 
     #[test]
     fn infer_calibration_detects_tenth_speed_bonus_profile() {
         let samples = sample_cycles_for_n(120, 30.0 / 1.1);
         let data = infer_calibration_from_samples(&samples, 1280, 720, 123.0).unwrap();
-
-        assert_eq!(data.profiles.len(), 11);
-        assert_eq!(
-            data.profiles
-                .iter()
-                .map(|profile| profile.total_frames)
-                .sum::<i32>(),
-            300
-        );
-    }
-
-    #[test]
-    fn infer_calibration_rotates_profiles_to_observed_offset() {
-        let expected = synthesize_profiles(180, 180.0, 37.5);
-        let mut samples = sample_cycles_for_n(180, 37.5);
-        samples.rotate_left(1);
-
-        let data = infer_calibration_from_samples(&samples, 1920, 1080, 123.0).unwrap();
-
-        assert_eq!(data.profiles[0].total_frames, expected[1].total_frames);
-        assert_eq!(data.profiles[1].total_frames, expected[0].total_frames);
-        let generated =
-            synthesize_profiles_for_frame_counts(&data.frame_counts(), 180, 180.0).unwrap();
-        assert_eq!(generated[0].pixel_map, expected[1].pixel_map);
-        assert_eq!(generated[1].pixel_map, expected[0].pixel_map);
+        assert_required(&data, 1.0 / 1.1);
     }
 
     #[test]
@@ -693,9 +503,7 @@ mod tests {
         ]];
 
         let data = infer_calibration_from_samples(&samples, 1280, 720, 123.0).unwrap();
-
-        assert_eq!(data.profiles.len(), 1);
-        assert_eq!(data.profiles[0].total_frames, 90);
+        assert_required(&data, 90.0 / 30.0);
     }
 
     #[test]

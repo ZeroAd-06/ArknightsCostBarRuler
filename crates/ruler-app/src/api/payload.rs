@@ -38,6 +38,7 @@ pub struct ApiPayload {
     pub profiles: Vec<ApiProfilePayload>,
     pub history_oldest_frame_id: Option<u64>,
     pub history_latest_frame_id: Option<u64>,
+    pub timing_debug: Option<TimingDebugPayload>,
 }
 
 impl ApiPayload {
@@ -78,6 +79,7 @@ impl ApiPayload {
                 .collect(),
             history_oldest_frame_id: bounds.oldest_frame_id,
             history_latest_frame_id: bounds.latest_frame_id,
+            timing_debug: api.timing_debug.map(TimingDebugPayload::from_debug),
         }
     }
 }
@@ -101,6 +103,7 @@ pub struct ApiFramePayload {
     pub capture_format: String,
     pub capture_timestamp_ns: u64,
     pub capture_duration_us: u64,
+    pub timing_debug: Option<TimingDebugPayload>,
 }
 
 impl ApiFramePayload {
@@ -123,6 +126,36 @@ impl ApiFramePayload {
             capture_format: record.capture_format.clone(),
             capture_timestamp_ns: record.capture_timestamp_ns,
             capture_duration_us: record.capture_duration_us,
+            timing_debug: record.timing_debug.map(TimingDebugPayload::from_debug),
+        }
+    }
+}
+
+/// Fixed-point fp24 timing diagnostics for one frame, mirroring the debug CSV.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingDebugPayload {
+    pub required_fp: i64,
+    pub speed_fp: i64,
+    pub accumulator_fp: i64,
+    pub advanced_frames: i32,
+    pub frames_since_cycle_start: i32,
+    pub frames_until_next_cost: i32,
+    pub match_error_px: i32,
+    pub boundary_corrected: bool,
+}
+
+impl TimingDebugPayload {
+    fn from_debug(debug: ruler_core::TimingDebug) -> Self {
+        Self {
+            required_fp: debug.required_fp,
+            speed_fp: debug.speed_fp,
+            accumulator_fp: debug.accumulator_fp,
+            advanced_frames: debug.advanced_frames,
+            frames_since_cycle_start: debug.frames_since_cycle_start,
+            frames_until_next_cost: debug.frames_until_next_cost,
+            match_error_px: debug.match_error_px,
+            boundary_corrected: debug.boundary_corrected,
         }
     }
 }

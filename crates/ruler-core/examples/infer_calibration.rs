@@ -5,13 +5,13 @@
 //!
 //! 默认读取工作区根目录下的 cost_data/*_raw.csv 及对应 *_meta.json,并只使用前 2 个完整循环验证。
 
-use ruler_core::analysis::calibration::{
-    infer_calibration_from_samples, synthesize_profiles_for_frame_counts, CalibrationData,
-};
+use ruler_core::analysis::calibration::{infer_calibration_from_samples, CalibrationData};
 use ruler_core::analysis::roi::{
     cost_bar_width_frac_with_ui_scaler, find_cost_bar_roi, DEFAULT_UI_SCALER,
 };
-use ruler_core::analysis::synthesis::{BASE_FRAMES_PER_COST, MIN_DETECTABLE_WIDTH};
+use ruler_core::analysis::synthesis::{
+    profile_period_for_n_eff, synthesize_profiles, BASE_FRAMES_PER_COST, MIN_DETECTABLE_WIDTH,
+};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -125,14 +125,14 @@ fn validate_dataset(raw_path: &Path) -> Result<ValidationSummary, String> {
         infer_calibration_from_samples(&cycles, meta.screen_width, meta.screen_height, 0.0)?;
 
     let expected_n = expected_n_from_label(&meta.label)?;
-    let inferred_n = inferred_n(&calibration)?;
+    let inferred_n = calibration.n_eff();
     if (expected_n - inferred_n).abs() > 0.001 {
         return Err(format!(
             "N 不匹配：期望 {expected_n:.3}，推断 {inferred_n:.3}"
         ));
     }
 
-    let detection_mode = if calibration.profiles.len() > 1 {
+    let detection_mode = if profile_period_for_n_eff(inferred_n) > 1 {
         "alternating".to_string()
     } else {
         "single".to_string()
@@ -277,18 +277,6 @@ fn percent_from_label(label: &str) -> Result<f64, String> {
         .map_err(|e| format!("label 百分比解析失败 {label}: {e}"))
 }
 
-fn inferred_n(calibration: &CalibrationData) -> Result<f64, String> {
-    if calibration.profiles.is_empty() {
-        return Err("校准结果没有 profile".to_string());
-    }
-    let total_frames: i32 = calibration
-        .profiles
-        .iter()
-        .map(|profile| profile.total_frames)
-        .sum();
-    Ok(total_frames as f64 / calibration.profiles.len() as f64)
-}
-
 fn collect_reliable_cycles(cycles: &[Vec<i32>], total_bar_width: i32) -> Vec<BTreeSet<i32>> {
     cycles
         .iter()
@@ -309,11 +297,7 @@ fn assert_profile_reproduces_cycles(
     bar_width_frac: f64,
     reliable_cycles: &[BTreeSet<i32>],
 ) -> Result<(), String> {
-    let generated = synthesize_profiles_for_frame_counts(
-        &calibration.frame_counts(),
-        total_bar_width,
-        bar_width_frac,
-    )?;
+    let generated = synthesize_profiles(total_bar_width, bar_width_frac, calibration.n_eff());
     let profile_sets = generated
         .iter()
         .map(|profile| {

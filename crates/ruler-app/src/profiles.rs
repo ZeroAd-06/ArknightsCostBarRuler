@@ -85,18 +85,7 @@ impl ProfileStore {
     ) -> std::io::Result<String> {
         fs::create_dir_all(&self.calibration_dir)?;
         let sanitized = sanitize_profile_base(basename);
-        let frame_counts = if data.profiles.is_empty() {
-            "0f".to_string()
-        } else {
-            format!(
-                "{}f",
-                data.profiles
-                    .iter()
-                    .map(|profile| profile.total_frames.to_string())
-                    .collect::<Vec<_>>()
-                    .join("-")
-            )
-        };
+        let frame_counts = format!("{}f", frames_label(data.n_eff()));
         let filename = format!("{sanitized}_{frame_counts}.json");
         let contents = serde_json::to_string_pretty(data).map_err(io::Error::other)?;
         fs::write(self.calibration_path(&filename), contents)?;
@@ -120,13 +109,24 @@ fn profile_details(path: &Path) -> (String, String) {
     let Ok(data) = CalibrationData::from_file(path) else {
         return ("损坏".to_string(), "未知".to_string());
     };
-    let frames = data
-        .profiles
-        .iter()
-        .map(|profile| profile.total_frames.to_string())
-        .collect::<Vec<_>>()
-        .join("-");
-    (format!("{frames}f"), "自适应".to_string())
+    (
+        format!("{}f", frames_label(data.n_eff())),
+        "自适应".to_string(),
+    )
+}
+
+/// Human-readable frames-per-cost label (e.g. `30`, `37.5`, `27.27`) for
+/// calibration filenames and the profile menu. Trims trailing zeros.
+fn frames_label(n_eff: f64) -> String {
+    if !n_eff.is_finite() || n_eff <= 0.0 {
+        return "0".to_string();
+    }
+    if (n_eff - n_eff.round()).abs() < 1e-6 {
+        format!("{}", n_eff.round() as i64)
+    } else {
+        let s = format!("{n_eff:.4}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
 }
 
 fn sanitize_profile_base(value: &str) -> String {

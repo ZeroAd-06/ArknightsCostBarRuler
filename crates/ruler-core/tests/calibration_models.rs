@@ -70,16 +70,15 @@ fn tracked_cost_data_infers_expected_models_without_missing_widths() {
         );
 
         let reliable_cycles = reliable_cycles(&cycles, meta.total_bar_width);
-        let generated = ruler_core::analysis::calibration::synthesize_profiles_for_frame_counts(
-            &calibration.frame_counts(),
+        let generated = synthesize_profiles(
             meta.total_bar_width,
             cost_bar_width_frac_with_ui_scaler(
                 meta.screen_width as i32,
                 meta.screen_height as i32,
                 DEFAULT_UI_SCALER,
             ),
-        )
-        .unwrap_or_else(|error| panic!("{} failed synthesis: {error}", raw_path.display()));
+            calibration.n_eff(),
+        );
         assert_sequences_fit_profiles(&meta.label, &[reliable_cycles], &generated);
     }
 }
@@ -214,12 +213,7 @@ fn percent_from_label(label: &str) -> f64 {
 }
 
 fn inferred_n(calibration: &CalibrationData) -> f64 {
-    let total_frames = calibration
-        .profiles
-        .iter()
-        .map(|profile| profile.total_frames)
-        .sum::<i32>();
-    total_frames as f64 / calibration.profiles.len() as f64
+    calibration.n_eff()
 }
 
 fn reliable_cycles(cycles: &[Vec<i32>], total_bar_width: i32) -> Vec<BTreeSet<i32>> {

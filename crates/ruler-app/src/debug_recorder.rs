@@ -72,7 +72,9 @@ impl CsvWriter {
         inner.write_all(
             b"frame_index,timestamp_ms,raw_pixel_width,logical_frame,\
               total_frames_in_cycle,cost_is_negative,elapsed_frames,\
-              capture_duration_us,phase,battle_state\n",
+              capture_duration_us,phase,battle_state,\
+              advanced_frames,accumulator_fp,frames_until_next_cost,\
+              match_error_px,boundary_corrected\n",
         )?;
         Ok(Self {
             inner,
@@ -90,16 +92,28 @@ impl CsvWriter {
         elapsed_frames: i32,
         capture_dur_us: u128,
         battle_state: ruler_core::BattleState,
+        timing: Option<ruler_core::TimingDebug>,
     ) -> std::io::Result<()> {
         let ts_us = self.start.elapsed().as_micros();
         let phase = match (logical_frame, total_frames_in_cycle) {
             (Some(lf), tfc) if tfc > 0 => Some(lf as f64 / tfc as f64),
             _ => None,
         };
+        let timing_cols = match timing {
+            Some(t) => format!(
+                "{},{},{},{},{}",
+                t.advanced_frames,
+                t.accumulator_fp,
+                t.frames_until_next_cost,
+                t.match_error_px,
+                if t.boundary_corrected { 1 } else { 0 },
+            ),
+            None => ",,,,".to_string(),
+        };
 
         writeln!(
             self.inner,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             self.frame_count,
             ts_us / 1000,
             raw_pixel_width.map_or(String::new(), |v| v.to_string()),
@@ -110,6 +124,7 @@ impl CsvWriter {
             capture_dur_us,
             phase.map_or(String::new(), |p| format!("{:.6}", p)),
             battle_state.as_str(),
+            timing_cols,
         )?;
         self.frame_count += 1;
         Ok(())
@@ -278,6 +293,7 @@ impl DebugRecorder {
                 result.elapsed_frames,
                 capture_dur_us,
                 result.battle_state,
+                result.timing_debug,
             ) {
                 log::error!("debug recording: csv write error, stopping csv: {e}");
                 self.csv = None;

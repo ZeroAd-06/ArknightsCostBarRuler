@@ -485,6 +485,7 @@ fn publish_cursor_blocked(
         api.capture_format = Some(pixel_format_name(frame.format).to_string());
         api.capture_timestamp_ns = Some(frame.capture_timestamp_ns);
         api.capture_duration_us = Some(frame.capture_duration_us);
+        api.timing_debug = None;
     });
 }
 
@@ -511,6 +512,7 @@ fn api_frame_record(
         capture_format: pixel_format_name(frame.format).to_string(),
         capture_timestamp_ns: frame.capture_timestamp_ns,
         capture_duration_us: frame.capture_duration_us,
+        timing_debug: result.timing_debug,
     }
 }
 

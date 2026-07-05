@@ -615,6 +615,7 @@ fn main() {
                     result.elapsed_frames,
                     0,
                     result.battle_state,
+                    result.timing_debug,
                 )
                 .unwrap_or_else(|e| {
                     eprintln!("FATAL: csv write failed: {e}");

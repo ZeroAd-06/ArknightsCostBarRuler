@@ -51,6 +51,7 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
 | `canUndoReset` | `boolean` | 是否可以撤销上一次计时器重置。 |
 | `profiles` | `array` | 校准配置列表，每项包含 `filename`、`basename`、`totalFrames`、`resolution`、`isActive`。 |
 | `historyOldestFrameId` / `historyLatestFrameId` | `integer \| null` | 当前战斗保留的最早 / 最新已分析历史帧。 |
+| `timingDebug` | `object \| null` | fp24 定点计时诊断（本帧不可读/冻结时为 `null`）：`requiredFp`、`speedFp`、`accumulatorFp`（定点原始值 2^-24）、`advancedFrames`（本帧前向推进的逻辑帧数）、`framesSinceCycleStart`、`framesUntilNextCost`、`matchErrorPx`（渲染宽度与观测宽度之差）、`boundaryCorrected`（是否触发负费边界亚帧校正）。 |
 
 示例：
 
@@ -83,7 +84,17 @@ HTTP `GET /` 和 WebSocket 主动推送都返回同一种快照对象。旧字�
   "canUndoReset": true,
   "profiles": [],
   "historyOldestFrameId": 4200,
-  "historyLatestFrameId": 4242
+  "historyLatestFrameId": 4242,
+  "timingDebug": {
+    "requiredFp": 16777216,
+    "speedFp": 559240,
+    "accumulatorFp": 8388608,
+    "advancedFrames": 1,
+    "framesSinceCycleStart": 15,
+    "framesUntilNextCost": 15,
+    "matchErrorPx": 0,
+    "boundaryCorrected": false
+  }
 }
 ```
 

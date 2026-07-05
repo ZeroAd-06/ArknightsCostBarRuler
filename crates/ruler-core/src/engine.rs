@@ -3,10 +3,9 @@ use std::path::Path;
 use crate::analysis::calibration::LoadedCalibration;
 use crate::analysis::roi::{self, Roi};
 use crate::analysis::scanner::{self, BattleState, PixelFormat};
+use crate::analysis::synthesis::synthesized_width_for_phase;
 use crate::capture::CapturedFrame;
-
-mod timing;
-use timing::*;
+use crate::fp24::{Fp24, Fp24CostTiming};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrameResult {
@@ -16,23 +15,49 @@ pub struct FrameResult {
     pub elapsed_frames: i32,
     pub cost_is_negative: bool,
     pub battle_state: BattleState,
+    /// Fixed-point timing diagnostics for the committed frame (None when the
+    /// bar is unreadable / frozen this frame).
+    pub timing_debug: Option<TimingDebug>,
 }
 
-/// Layer 2 analyzer — holds calibration, ROI, and timing state. Does NOT
+/// Per-frame fp24 timing diagnostics, exported to the API and debug CSV so a
+/// recording can be replayed and the accumulator behavior verified offline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimingDebug {
+    pub required_fp: i64,
+    pub speed_fp: i64,
+    pub accumulator_fp: i64,
+    /// Frames the accumulator advanced this capture (the committed resync step).
+    pub advanced_frames: i32,
+    pub frames_since_cycle_start: i32,
+    pub frames_until_next_cost: i32,
+    pub match_error_px: i32,
+    /// Whether the negative-cost boundary sub-frame correction fired this frame.
+    pub boundary_corrected: bool,
+}
+
+/// Layer 2 analyzer — holds calibration, ROI, and fp24 timing state. Does NOT
 /// own a capture backend; that responsibility belongs to Layer 1
 /// ([`crate::pipeline::CapturePipeline`]).
+///
+/// The timing core is a forward-simulating fp24 accumulator: each captured frame
+/// steps it forward by the fewest logical frames whose *rendered* bar width best
+/// matches the *observed* width, then advances the elapsed-frame counter by that
+/// same step. The boundary "extra frame" and X.5 alternation fall out of the
+/// fixed-point arithmetic; there is no pixel-map lookup or endpoint bookkeeping.
 pub struct Analyzer {
     calibration: Option<LoadedCalibration>,
     roi: Option<Roi>,
     bar_width_frac: Option<f64>,
     ui_scaler: f64,
-    current_profile_index: usize,
-    cycle_counter: usize,
-    elapsed_frames: f64,
-    previous_phase: Option<PhaseSample>,
-    last_known_total_frames: i32,
+    fp24: Option<Fp24CostTiming>,
+    /// Phase of the last *committed* (accepted) frame. Gates the anti-spurious
+    /// wrap guard: a resync may cross a cost-recovery boundary only when the bar
+    /// was already late in its cycle, so a momentary false width drop cannot be
+    /// read as "advanced most of a cycle".
+    last_accepted_phase: Option<f64>,
+    last_cost_is_negative: bool,
     last_known_cycle_total_frames: i32,
-    last_known_cost_is_negative: bool,
     /// Consecutive analysed frames spent out of an active battle. A genuine
     /// pre-battle banner only appears after a sustained out-of-battle stretch
     /// (loading / settlement), so this counter separates it from the brief
@@ -43,45 +68,8 @@ pub struct Analyzer {
     /// an active battle so the title screen resets the timer once, while still
     /// letting the user undo that reset before the next battle begins.
     battle_begin_reset_armed: bool,
-    /// After an automatic `BattleBegin` reset, the first readable in-battle cost
-    /// bar may already be a few frames into the cycle. Count that first phase
-    /// once so entering battle does not lose the frames before the first sample.
-    pending_battle_start_phase: bool,
+    elapsed_frames: i32,
     last_reported_battle_state: Option<BattleState>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PhaseSample {
-    phase: f64,
-    total_frames: i32,
-    cost_is_negative: bool,
-}
-
-impl PhaseSample {
-    fn effective_total_frames(self) -> i32 {
-        effective_total_frames(self.total_frames, self.cost_is_negative)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct FrameLookup {
-    logical_frame: i32,
-    phase: f64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CycleEndpointMode {
-    LeftClosedRightOpen,
-    LeftClosedRightClosed,
-    LeftOpenRightClosed,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CycleTiming {
-    profile_index: usize,
-    total_frames: i32,
-    total_bar_width: i32,
-    endpoint_mode: CycleEndpointMode,
 }
 
 /// Minimum consecutive out-of-battle frames before a `BeforeOrAfterBattle` frame
@@ -89,6 +77,15 @@ struct CycleTiming {
 /// overlay). Observed overlay flickers last only a handful of frames, while real
 /// loading/settlement stretches run into the dozens-to-hundreds.
 const PRE_BATTLE_BANNER_MIN_OUT_FRAMES: u32 = 30;
+
+/// Maximum pixel error between the rendered and observed bar width before a
+/// readable frame is treated as unreadable (occlusion / HUD contamination) and
+/// frozen. Mirrors the old table-lookup `WIDTH_MATCH_TOLERANCE`.
+const MATCH_TOLERANCE_PX: i32 = 5;
+
+/// A resync may cross a cost-recovery boundary (wrap into the next cycle) only
+/// when the previously accepted phase was at least this far into the cycle.
+const WRAP_MIN_PREV_PHASE: f64 = 0.75;
 
 impl Default for Analyzer {
     fn default() -> Self {
@@ -103,31 +100,26 @@ impl Analyzer {
             roi: None,
             bar_width_frac: None,
             ui_scaler: roi::DEFAULT_UI_SCALER,
-            current_profile_index: 0,
-            cycle_counter: 0,
-            elapsed_frames: 0.0,
-            previous_phase: None,
-            last_known_total_frames: 0,
+            fp24: None,
+            last_accepted_phase: None,
+            last_cost_is_negative: false,
             last_known_cycle_total_frames: 0,
-            last_known_cost_is_negative: false,
             out_of_battle_frames: 0,
             battle_begin_reset_armed: true,
-            pending_battle_start_phase: false,
+            elapsed_frames: 0,
             last_reported_battle_state: None,
         }
     }
 
     pub fn load_calibration<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
         log::info!("loading calibration from '{}'", path.as_ref().display());
-        let (total_bar_width, bar_width_frac) = self.calibration_geometry()?;
-        let loaded = LoadedCalibration::from_file(path.as_ref(), total_bar_width, bar_width_frac)?;
+        let loaded = LoadedCalibration::from_file(path.as_ref())?;
         self.set_loaded_calibration(loaded);
         Ok(())
     }
 
     pub fn load_calibration_json(&mut self, json: &str) -> Result<(), String> {
-        let (total_bar_width, bar_width_frac) = self.calibration_geometry()?;
-        let loaded = LoadedCalibration::from_json(json, total_bar_width, bar_width_frac)?;
+        let loaded = LoadedCalibration::from_json(json)?;
         self.set_loaded_calibration(loaded);
         Ok(())
     }
@@ -136,6 +128,7 @@ impl Analyzer {
     /// returns `Err("No calibration loaded")` until a new profile is loaded.
     pub fn clear_calibration(&mut self) {
         self.calibration = None;
+        self.fp24 = None;
     }
 
     /// Whether a calibration profile is currently loaded.
@@ -197,56 +190,40 @@ impl Analyzer {
 
     pub fn reset_timer(&mut self) {
         log::debug!("resetting engine timer");
-        self.elapsed_frames = 0.0;
-        self.cycle_counter = 0;
-        self.last_known_total_frames = 0;
+        self.elapsed_frames = 0;
         self.last_known_cycle_total_frames = 0;
-        self.last_known_cost_is_negative = false;
-        self.previous_phase = None;
-        self.pending_battle_start_phase = false;
+        self.last_cost_is_negative = false;
+        self.last_accepted_phase = None;
+        if let Some(required) = self.required() {
+            self.fp24 = Some(Fp24CostTiming::new(required));
+        }
     }
 
     pub fn adjust_timer(&mut self, frames: i32) {
-        self.elapsed_frames += frames as f64;
-        self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
+        // The user is correcting the displayed timer, not the bar phase; leave
+        // the fp24 accumulator alone so pixel tracking continues uninterrupted.
+        self.elapsed_frames = self.elapsed_frames.saturating_add(frames);
     }
 
-    pub fn set_profile_index(&mut self, index: usize) {
-        if let Some(cal) = &self.calibration {
-            if index < cal.tables.len() {
-                self.cycle_counter = 0;
-                self.previous_phase = None;
-                self.current_profile_index = index;
-            }
-        }
+    /// No-op retained for command-protocol compatibility. The fp24 model has a
+    /// single `required` value (X.5 alternation and the boundary cycle are
+    /// intrinsic), so there is no multi-profile index to select.
+    pub fn set_profile_index(&mut self, _index: usize) {}
+
+    fn required(&self) -> Option<Fp24> {
+        self.calibration.as_ref().map(|cal| cal.required())
     }
 
     fn set_loaded_calibration(&mut self, loaded: LoadedCalibration) {
+        let required = loaded.required();
         self.calibration = Some(loaded);
-        self.current_profile_index = 0;
-        self.cycle_counter = 0;
-        self.previous_phase = None;
+        self.fp24 = Some(Fp24CostTiming::new(required));
+        self.last_accepted_phase = None;
+        self.last_cost_is_negative = false;
         self.last_known_cycle_total_frames = 0;
-        self.last_known_cost_is_negative = false;
-        self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
         self.out_of_battle_frames = 0;
         self.battle_begin_reset_armed = true;
-        self.pending_battle_start_phase = false;
         self.last_reported_battle_state = None;
-    }
-
-    fn calibration_geometry(&self) -> Result<(i32, f64), String> {
-        let roi = self
-            .roi
-            .ok_or_else(|| "No ROI set - call set_roi() before loading calibration".to_string())?;
-        let total_bar_width = roi.1 - roi.0;
-        if total_bar_width <= 0 {
-            return Err("No valid ROI width set before loading calibration".to_string());
-        }
-        Ok((
-            total_bar_width,
-            self.bar_width_frac.unwrap_or(total_bar_width as f64),
-        ))
     }
 
     fn analyze_frame(
@@ -285,7 +262,6 @@ impl Analyzer {
         } else if battle_state == BattleState::BattleBegin && self.battle_begin_reset_armed {
             self.reset_timer();
             self.battle_begin_reset_armed = false;
-            self.pending_battle_start_phase = true;
         }
 
         if self.calibration.is_none() {
@@ -295,131 +271,116 @@ impl Analyzer {
             "No ROI set - call connect() first or use set_roi()/set_roi_value()".to_string()
         })?;
 
+        // Out-of-battle (loading / settlement / suppressed overlay): freeze the
+        // timer and hide the frame, preserving all last-known values.
         if !battle_state.is_in_battle() {
-            let result = FrameResult {
-                logical_frame: None,
-                total_frames_in_cycle: self.last_known_cycle_total_frames,
-                raw_pixel_width: None,
-                elapsed_frames: self.last_known_total_frames,
-                cost_is_negative: self.last_known_cost_is_negative,
-                battle_state,
-            };
-            log::trace!(
-                "frame summary: battle_state={}, logical_frame={:?}, total={}, raw_width={:?}, elapsed={}, negative={}",
-                result.battle_state.as_str(),
-                result.logical_frame,
-                result.total_frames_in_cycle,
-                result.raw_pixel_width,
-                result.elapsed_frames,
-                result.cost_is_negative
-            );
-            return Ok(result);
+            return Ok(self.frozen_result(battle_state, None, self.last_cost_is_negative));
         }
 
-        let calibration = self
-            .calibration
-            .as_ref()
-            .ok_or_else(|| "No calibration loaded".to_string())?;
+        let total_bar_width = roi.1 - roi.0;
+        let bar_width_frac = self.bar_width_frac.unwrap_or(total_bar_width as f64);
+        let required = self.required().expect("calibration present");
+        let base = self
+            .fp24
+            .get_or_insert_with(|| Fp24CostTiming::new(required));
+        let base = *base;
 
-        let pixel_width = scanner::get_raw_filled_pixel_width(buffer, width, height, format, roi);
-        let cost_is_negative =
+        let observed = scanner::get_raw_filled_pixel_width(buffer, width, height, format, roi);
+        let neg =
             scanner::is_cost_negative_with_ui_scaler(buffer, width, height, format, self.ui_scaler);
+        let speed = speed_for_cost_state(neg);
 
-        let num_profiles = calibration.tables.len();
-        let base_profile = if num_profiles == 0 {
-            0
-        } else {
-            self.current_profile_index.min(num_profiles - 1)
+        let Some(observed) = observed else {
+            // Bar momentarily unreadable while still in battle (deployment
+            // slow-mo, menu fade). Freeze; the accumulator stays put and
+            // re-locks when a clean reading returns.
+            return Ok(self.frozen_result(battle_state, None, neg));
         };
 
-        let (logical_frame, total_frames_in_cycle) = if num_profiles > 0 {
-            let mut cycle_timing =
-                current_cycle_timing(calibration, base_profile, self.cycle_counter);
-            let mut profile_idx = cycle_timing.profile_index;
-            let mut table = &calibration.tables[profile_idx];
-            let mut frame_lookup = pixel_width
-                .and_then(|pw| lookup_bar_frame(table, cycle_timing, pw, cost_is_negative));
+        let allow_wrap = self
+            .last_accepted_phase
+            .is_some_and(|phase| phase > WRAP_MIN_PREV_PHASE);
+        let is_transition = self.last_accepted_phase.is_some() && neg != self.last_cost_is_negative;
 
-            if let (Some(previous), Some(current), Some(pixel_width)) =
-                (self.previous_phase, frame_lookup, pixel_width)
-            {
-                if is_natural_cycle_wrap(previous, current.phase) {
-                    self.cycle_counter += 1;
-                    cycle_timing =
-                        current_cycle_timing(calibration, base_profile, self.cycle_counter);
-                    profile_idx = cycle_timing.profile_index;
-                    table = &calibration.tables[profile_idx];
-                    frame_lookup =
-                        lookup_bar_frame(table, cycle_timing, pixel_width, cost_is_negative)
-                            .or(frame_lookup);
-                }
-            }
+        let outcome = resync(
+            base,
+            speed,
+            observed,
+            total_bar_width,
+            bar_width_frac,
+            allow_wrap,
+            is_transition,
+        );
 
-            let total_frames = cycle_timing.total_frames;
-            let effective_total_frames = effective_total_frames(total_frames, cost_is_negative);
-            let current_phase = frame_lookup.map(|lookup| PhaseSample {
-                phase: lookup.phase,
-                total_frames,
-                cost_is_negative,
-            });
+        // D5 reject gate: a readable but poorly matching frame is contaminated
+        // (occlusion / HUD). Do not commit; freeze so it cannot skew the timer.
+        if outcome.match_error_px > MATCH_TOLERANCE_PX {
+            return Ok(self.frozen_result(battle_state, Some(observed), neg));
+        }
 
-            if let Some(current_phase) = current_phase {
-                if self.pending_battle_start_phase && self.previous_phase.is_none() {
-                    self.elapsed_frames +=
-                        current_phase.phase * current_phase.effective_total_frames() as f64;
-                    self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
-                    self.pending_battle_start_phase = false;
-                    self.previous_phase = Some(current_phase);
-                } else if let Some(previous_phase) = self.previous_phase {
-                    if let Some(phase_delta) = phase_delta(previous_phase, current_phase) {
-                        self.elapsed_frames +=
-                            phase_delta * previous_phase.effective_total_frames() as f64;
-                        self.last_known_total_frames = rounded_frame_count(self.elapsed_frames);
-                        self.previous_phase = Some(current_phase);
-                    }
-                } else {
-                    self.previous_phase = Some(current_phase);
-                }
-            } else {
-                // The cost bar is momentarily unreadable while still in a battle
-                // state (deployment slow-mo, or the fade in/out of the
-                // pause/settings menu). Preserve the existing phase anchor here,
-                // mirroring the `NotInBattle` path above. Clearing it would let
-                // the first false `phase == 0` frame on resume become a fresh
-                // anchor, so the real phase reappearing afterwards is miscounted
-                // as forward progress and inflates the elapsed time.
-            }
+        // Commit the resync.
+        self.fp24 = Some(outcome.timing);
+        self.elapsed_frames = self.elapsed_frames.saturating_add(outcome.advanced_frames);
+        self.last_accepted_phase = Some(outcome.phase);
+        self.last_cost_is_negative = neg;
 
-            (
-                frame_lookup.map(|lookup| lookup.logical_frame),
-                effective_total_frames,
-            )
-        } else {
-            self.previous_phase = None;
-            (None, 0)
-        };
-
+        let frames_since_cycle_start = outcome.timing.frames_since_cycle_start();
+        let frames_until_next_cost = outcome.timing.frames_until_next_cost(speed);
+        let total_frames_in_cycle = frames_since_cycle_start.saturating_add(frames_until_next_cost);
         self.last_known_cycle_total_frames = total_frames_in_cycle;
-        self.last_known_cost_is_negative = cost_is_negative;
+
+        let timing_debug = TimingDebug {
+            required_fp: required.raw(),
+            speed_fp: speed.raw(),
+            accumulator_fp: outcome.timing.accumulator().raw(),
+            advanced_frames: outcome.advanced_frames,
+            frames_since_cycle_start,
+            frames_until_next_cost,
+            match_error_px: outcome.match_error_px,
+            boundary_corrected: outcome.boundary_corrected,
+        };
 
         let result = FrameResult {
-            logical_frame,
+            logical_frame: Some(frames_since_cycle_start),
             total_frames_in_cycle,
-            raw_pixel_width: pixel_width,
-            elapsed_frames: self.last_known_total_frames,
-            cost_is_negative,
+            raw_pixel_width: Some(observed),
+            elapsed_frames: self.elapsed_frames,
+            cost_is_negative: neg,
             battle_state,
+            timing_debug: Some(timing_debug),
         };
         log::trace!(
-            "frame summary: battle_state={}, logical_frame={:?}, total={}, raw_width={:?}, elapsed={}, negative={}",
+            "frame summary: battle_state={}, logical_frame={:?}, total={}, raw_width={:?}, elapsed={}, negative={}, advanced={}, err={}",
             result.battle_state.as_str(),
             result.logical_frame,
             result.total_frames_in_cycle,
             result.raw_pixel_width,
             result.elapsed_frames,
-            result.cost_is_negative
+            result.cost_is_negative,
+            outcome.advanced_frames,
+            outcome.match_error_px,
         );
         Ok(result)
+    }
+
+    /// Build a frozen result: the timer and cycle length hold their last-known
+    /// values and no logical frame is reported. `raw_pixel_width` carries the
+    /// observed width when the bar was readable-but-rejected, `None` otherwise.
+    fn frozen_result(
+        &self,
+        battle_state: BattleState,
+        raw_pixel_width: Option<i32>,
+        cost_is_negative: bool,
+    ) -> FrameResult {
+        FrameResult {
+            logical_frame: None,
+            total_frames_in_cycle: self.last_known_cycle_total_frames,
+            raw_pixel_width,
+            elapsed_frames: self.elapsed_frames,
+            cost_is_negative,
+            battle_state,
+            timing_debug: None,
+        }
     }
 
     fn apply_battle_state_context(&mut self, battle_state: BattleState) -> BattleState {
@@ -444,687 +405,384 @@ impl Analyzer {
     }
 }
 
+fn speed_for_cost_state(cost_is_negative: bool) -> Fp24 {
+    if cost_is_negative {
+        Fp24::NEGATIVE_SPEED
+    } else {
+        Fp24::NORMAL_SPEED
+    }
+}
+
+fn normalized_ui_scaler(ui_scaler: f64) -> f64 {
+    if ui_scaler.is_finite() {
+        ui_scaler.clamp(0.0, 1.0)
+    } else {
+        roi::DEFAULT_UI_SCALER
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResyncOutcome {
+    timing: Fp24CostTiming,
+    advanced_frames: i32,
+    phase: f64,
+    match_error_px: i32,
+    boundary_corrected: bool,
+}
+
+/// Render the bar width for `timing`'s current phase and return `|width - observed|`.
+fn phase_pixel_error(
+    timing: Fp24CostTiming,
+    observed: i32,
+    total_bar_width: i32,
+    bar_width_frac: f64,
+) -> (f64, i32) {
+    let phase = timing.phase();
+    let width = synthesized_width_for_phase(total_bar_width, bar_width_frac, phase);
+    (phase, (width - observed).abs())
+}
+
+/// Find the fewest forward logical frames that make the rendered width best match
+/// `observed`, honoring the anti-spurious wrap guard, then optionally apply the
+/// negative-cost boundary sub-frame correction.
+fn resync(
+    base: Fp24CostTiming,
+    speed: Fp24,
+    observed: i32,
+    total_bar_width: i32,
+    bar_width_frac: f64,
+    allow_wrap: bool,
+    is_transition: bool,
+) -> ResyncOutcome {
+    // One full cycle at the current speed bounds the search ("at most one cycle").
+    let period = Fp24CostTiming::new(base.required())
+        .frames_until_next_cost(speed)
+        .max(1);
+    let max_advance = period + 1;
+
+    // K = 0 is always a legal candidate (no boundary crossing).
+    let (phase0, err0) = phase_pixel_error(base, observed, total_bar_width, bar_width_frac);
+    let mut best = ResyncOutcome {
+        timing: base,
+        advanced_frames: 0,
+        phase: phase0,
+        match_error_px: err0,
+        boundary_corrected: false,
+    };
+
+    let mut timing = base;
+    for k in 1..=max_advance {
+        timing.advance_one_frame(speed);
+        let crossed_boundary = timing.cycle_index() > base.cycle_index();
+        if crossed_boundary && !allow_wrap {
+            // Not permitted to cross a recovery boundary from an early phase;
+            // every larger K also crosses, so stop searching.
+            break;
+        }
+        let (phase, err) = phase_pixel_error(timing, observed, total_bar_width, bar_width_frac);
+        if err < best.match_error_px {
+            best = ResyncOutcome {
+                timing,
+                advanced_frames: k,
+                phase,
+                match_error_px: err,
+                boundary_corrected: false,
+            };
+        }
+    }
+
+    if is_transition {
+        best = apply_boundary_subframe_correction(best, observed, total_bar_width, bar_width_frac);
+    }
+
+    best
+}
+
+/// Negative-cost boundary sub-frame correction. On the frame where the cost
+/// state flips, the transition frame's speed may have been mis-assigned by one
+/// frame, leaving the accumulator off by ~one half-speed increment (half a
+/// normal frame). Nudge the accumulator ±that increment if it reduces the pixel
+/// error — a pure phase re-alignment that does not change the elapsed count.
+fn apply_boundary_subframe_correction(
+    best: ResyncOutcome,
+    observed: i32,
+    total_bar_width: i32,
+    bar_width_frac: f64,
+) -> ResyncOutcome {
+    let half_increment = Fp24::NEGATIVE_SPEED.raw();
+    let mut corrected = best;
+    for delta in [half_increment, -half_increment] {
+        let mut nudged = best.timing;
+        nudged.nudge_accumulator_raw(delta);
+        let (phase, err) = phase_pixel_error(nudged, observed, total_bar_width, bar_width_frac);
+        if err < corrected.match_error_px {
+            corrected = ResyncOutcome {
+                timing: nudged,
+                advanced_frames: best.advanced_frames,
+                phase,
+                match_error_px: err,
+                boundary_corrected: true,
+            };
+        }
+    }
+    corrected
+}
+
 #[cfg(test)]
 mod tests {
-    use super::timing::*;
     use super::*;
-    use crate::analysis::calibration::{CalibrationData, CalibrationTimingModel, ProfileData};
-    use crate::analysis::mapping::CalibrationTable;
-    use std::collections::HashMap;
 
     const TEST_SCREEN_WIDTH: u32 = 1280;
     const TEST_SCREEN_HEIGHT: u32 = 720;
-    const TEST_ROI: Roi = (100, 140, 100);
+    // A 180px-wide ROI gives a real (non-synthetic) geometry with ~6px/frame at
+    // N=30, matching the validated closed-form used by the runtime renderer.
+    const TEST_ROI: Roi = (200, 380, 400);
+    const TEST_BAR_WIDTH: i32 = 180;
 
-    #[test]
-    fn analyze_raw_buffer_tracks_frames() {
+    fn engine_with_required(required: f64) -> Analyzer {
         let mut engine = Analyzer::new();
-        engine.set_roi_value((0, 20, 0));
+        engine.set_roi_value(TEST_ROI);
         engine
-            .load_calibration_json(
-                r#"{
-                    "format_version": 3,
-                    "profiles": [{"total_frames": 30}]
-                }"#,
-            )
+            .load_calibration_json(&format!(
+                r#"{{ "format_version": 4, "required": {required} }}"#
+            ))
             .unwrap();
-
-        let mut buffer = vec![30u8; 20 * 3];
-        buffer[0] = 252;
-        buffer[1] = 252;
-        buffer[2] = 252;
-        buffer[3] = 252;
-        buffer[4] = 252;
-        buffer[5] = 252;
-
-        let result = engine
-            .analyze_frame_with_battle_state(
-                &buffer,
-                20,
-                1,
-                PixelFormat::Bgr,
-                BattleState::OneXRunning,
-            )
-            .unwrap();
-
-        assert_eq!(result.raw_pixel_width, Some(2));
-        assert_eq!(result.logical_frame, Some(2));
-        // First observed in-battle frame only sets the phase anchor (elapsed 0).
-        assert_eq!(result.elapsed_frames, 0);
-        assert!(!result.cost_is_negative);
-    }
-
-    #[test]
-    fn normal_cycle_elapsed_frames_match_existing_behavior() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        let result = analyze_width(&mut engine, 0, false);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 0);
-
-        let result = analyze_width(&mut engine, 15, false);
-        assert_eq!(result.logical_frame, Some(15));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 15);
-
-        let result = analyze_width(&mut engine, 29, false);
-        assert_eq!(result.logical_frame, Some(29));
-        assert_eq!(result.elapsed_frames, 29);
-
-        let result = analyze_width(&mut engine, 0, false);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 30);
-    }
-
-    #[test]
-    fn entering_negative_cost_at_same_phase_does_not_jump_elapsed_time() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        analyze_width(&mut engine, 15, false);
-        let result = analyze_width(&mut engine, 15, true);
-
-        assert_eq!(result.logical_frame, Some(30));
-        assert_eq!(result.total_frames_in_cycle, 60);
-        assert_eq!(result.elapsed_frames, 15);
-        assert!(result.cost_is_negative);
-    }
-
-    #[test]
-    fn full_negative_cost_cycle_counts_double_frames() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, true);
-        for width in 1..30 {
-            analyze_width(&mut engine, width, true);
-        }
-        let result = analyze_width(&mut engine, 0, false);
-
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 60);
-        assert!(!result.cost_is_negative);
-    }
-
-    #[test]
-    fn non_natural_negative_cost_exit_at_same_phase_does_not_jump_elapsed_time() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        analyze_width(&mut engine, 15, true);
-        let result = analyze_width(&mut engine, 15, false);
-
-        assert_eq!(result.logical_frame, Some(15));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 15);
-        assert!(!result.cost_is_negative);
-    }
-
-    #[test]
-    fn negative_cost_interpolates_widths_missing_from_positive_profile() {
-        let mut engine = Analyzer::new();
-        engine.set_roi_value(TEST_ROI);
-        engine.set_loaded_calibration(loaded_calibration_from_maps(
-            100,
-            315,
-            &[(8, &[(0, 0), (3, 2), (5, 4), (7, 7)] as &[(i32, i32)])],
-        ));
-
-        let result = analyze_width(&mut engine, 0, true);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 16);
-        assert_eq!(result.elapsed_frames, 0);
-
-        let result = analyze_width(&mut engine, 1, true);
-        assert_eq!(result.logical_frame, Some(3));
-        assert_eq!(result.total_frames_in_cycle, 16);
-        assert_eq!(result.elapsed_frames, 3);
-
-        let result = analyze_width(&mut engine, 4, true);
-        assert_eq!(result.logical_frame, Some(8));
-        assert_eq!(result.elapsed_frames, 8);
-
-        let result = analyze_width(&mut engine, 6, true);
-        assert_eq!(result.logical_frame, Some(13));
-        assert_eq!(result.elapsed_frames, 13);
-    }
-
-    #[test]
-    fn alternating_profiles_continue_and_negative_cost_doubles_current_effective_cycle() {
-        let mut engine = engine_with_profiles(&[38, 37]);
-
-        analyze_width(&mut engine, 0, false);
-        analyze_width(&mut engine, 37, false);
-        let result = analyze_width(&mut engine, 0, false);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 37);
-        assert_eq!(result.elapsed_frames, 38);
-
-        let result = analyze_width(&mut engine, 10, true);
-        assert_eq!(result.logical_frame, Some(20));
-        assert_eq!(result.total_frames_in_cycle, 74);
-        assert_eq!(result.elapsed_frames, 48);
-
-        let result = analyze_width(&mut engine, 11, true);
-        assert_eq!(result.logical_frame, Some(22));
-        assert_eq!(result.total_frames_in_cycle, 74);
-        assert_eq!(result.elapsed_frames, 50);
-    }
-
-    #[test]
-    fn not_in_battle_hides_frame_and_preserves_phase_anchor() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 8, false);
-        assert_eq!(result.logical_frame, Some(8));
-        assert_eq!(result.elapsed_frames, 8);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.raw_pixel_width, None);
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 8);
-
-        let result = analyze_width(&mut engine, 8, false);
-        assert_eq!(result.logical_frame, Some(8));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 8);
-    }
-
-    #[test]
-    fn pre_battle_banner_keeps_elapsed_time_until_battle_begin() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        // A battle runs, ends into settlement/menu, then the next battle's
-        // pre-battle banner appears only after a sustained out-of-battle span.
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 20, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        for _ in 0..PRE_BATTLE_BANNER_MIN_OUT_FRAMES {
-            let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-            assert_eq!(result.elapsed_frames, 20);
-        }
-
-        let result =
-            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.battle_state, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width(&mut engine, 5, false);
-        assert_eq!(result.logical_frame, Some(5));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 20);
-    }
-
-    #[test]
-    fn battle_begin_resets_elapsed_time_for_next_battle() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 20, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
-        assert_eq!(result.battle_state, BattleState::BattleBegin);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.raw_pixel_width, None);
-        assert_eq!(result.total_frames_in_cycle, 0);
-        assert_eq!(result.elapsed_frames, 0);
-
-        let result = analyze_width(&mut engine, 0, false);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 0);
-
-        let result = analyze_width(&mut engine, 5, false);
-        assert_eq!(result.logical_frame, Some(5));
-        assert_eq!(result.elapsed_frames, 5);
-    }
-
-    #[test]
-    fn first_detected_phase_after_battle_begin_counts_entering_frames() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
-        assert_eq!(result.elapsed_frames, 0);
-
-        let result = analyze_width_with_state(&mut engine, 3, false, BattleState::OneXRunning);
-        assert_eq!(result.logical_frame, Some(3));
-        assert_eq!(result.elapsed_frames, 3);
-
-        let result = analyze_width_with_state(&mut engine, 6, false, BattleState::OneXRunning);
-        assert_eq!(result.logical_frame, Some(6));
-        assert_eq!(result.elapsed_frames, 6);
-    }
-
-    #[test]
-    fn battle_begin_reset_happens_once_so_undo_can_survive_title_screen() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 20, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
-        assert_eq!(result.elapsed_frames, 0);
-
-        engine.adjust_timer(20);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::BattleBegin);
-        assert_eq!(result.battle_state, BattleState::BattleBegin);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width(&mut engine, 0, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width(&mut engine, 5, false);
-        assert_eq!(result.elapsed_frames, 25);
-    }
-
-    #[test]
-    fn settings_return_does_not_reanchor_on_non_natural_phase_rewind() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 6, false);
-        assert_eq!(result.elapsed_frames, 6);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-        assert_eq!(result.elapsed_frames, 6);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::OneXRunning);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.elapsed_frames, 6);
-
-        let result = analyze_width_with_state(&mut engine, 14, false, BattleState::OneXRunning);
-        assert_eq!(result.logical_frame, Some(14));
-        assert_eq!(result.elapsed_frames, 14);
-    }
-
-    #[test]
-    fn pause_or_settings_overlay_mid_battle_keeps_elapsed_time() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 20, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        // Opening settings mid-battle flickers a `BeforeOrAfterBattle` frame before
-        // settling into the menu. Coming straight from battle, it is a transient
-        // overlay: suppressed to NotInBattle and must not change elapsed time.
-        let result =
-            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.battle_state, BattleState::NotInBattle);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-        assert_eq!(result.elapsed_frames, 20);
-
-        // The same battle resumes; the timer carries on.
-        let result = analyze_width(&mut engine, 25, false);
-        assert_eq!(result.logical_frame, Some(25));
-        assert_eq!(result.elapsed_frames, 25);
-    }
-
-    #[test]
-    fn short_mid_battle_banner_does_not_poison_later_real_prebattle_banner() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 20, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        // A brief false `BeforeOrAfterBattle` flicker while leaving the battle is
-        // suppressed and must not affect the next *real* pre-battle banner after
-        // a long settlement/menu stretch.
-        let result =
-            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.battle_state, BattleState::NotInBattle);
-        assert_eq!(result.elapsed_frames, 20);
-
-        for _ in 0..PRE_BATTLE_BANNER_MIN_OUT_FRAMES {
-            analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-        }
-
-        let result =
-            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.battle_state, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width(&mut engine, 5, false);
-        assert_eq!(result.elapsed_frames, 20);
-    }
-
-    #[test]
-    fn exiting_battle_keeps_elapsed_time_until_next_battle() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        analyze_width(&mut engine, 20, false);
-
-        let result =
-            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.battle_state, BattleState::NotInBattle);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 20);
-    }
-
-    #[test]
-    fn point_two_x_deployment_keeps_elapsed_time_until_battle_resumes() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 20, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width_with_state(&mut engine, 20, false, BattleState::PointTwoXPaused);
-        assert_eq!(result.battle_state, BattleState::PointTwoXPaused);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-        assert_eq!(result.battle_state, BattleState::NotInBattle);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result =
-            analyze_width_with_state(&mut engine, 0, false, BattleState::BeforeOrAfterBattle);
-        assert_eq!(result.battle_state, BattleState::NotInBattle);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width_with_state(&mut engine, 20, false, BattleState::OneXPaused);
-        assert_eq!(result.battle_state, BattleState::OneXPaused);
-        assert_eq!(result.elapsed_frames, 20);
-    }
-
-    #[test]
-    fn paused_battle_states_still_analyze_cost_bar() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width_with_state(&mut engine, 6, false, BattleState::OneXPaused);
-
-        assert_eq!(result.logical_frame, Some(6));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 6);
-    }
-
-    #[test]
-    fn deploying_operator_state_still_analyzes_cost_bar() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result =
-            analyze_width_with_state(&mut engine, 6, false, BattleState::DeployingOperator);
-
-        assert_eq!(result.battle_state, BattleState::DeployingOperator);
-        assert_eq!(result.logical_frame, Some(6));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 6);
-    }
-
-    #[test]
-    fn adjusting_operator_facing_pauses_analysis_like_garbage() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 20, false);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result =
-            analyze_width_with_state(&mut engine, 25, false, BattleState::AdjustingOperatorFacing);
-        assert_eq!(result.battle_state, BattleState::AdjustingOperatorFacing);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.raw_pixel_width, None);
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 20);
-
-        let result = analyze_width(&mut engine, 25, false);
-        assert_eq!(result.logical_frame, Some(25));
-        assert_eq!(result.elapsed_frames, 25);
-    }
-
-    #[test]
-    fn unreadable_bar_in_paused_battle_preserves_phase_anchor_across_settings() {
-        let mut engine = engine_with_profiles(&[30]);
-
-        // Battle runs and the bar advances to phase 0.233 (frame 7), i.e. the
-        // user opens settings *before* the bar reaches half.
-        analyze_width(&mut engine, 0, false);
-        let result = analyze_width(&mut engine, 7, false);
-        assert_eq!(result.logical_frame, Some(7));
-        assert_eq!(result.elapsed_frames, 7);
-
-        // The settings menu is up and the game is paused. For a couple of frames
-        // the cost bar is still classified as an in-battle (paused) state but is
-        // momentarily unreadable (the menu fade obscures it). The phase anchor
-        // must survive this; clearing it is what used to corrupt the timer.
-        let result = analyze_width_with_state(&mut engine, 40, false, BattleState::OneXPaused);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.elapsed_frames, 7);
-
-        // Then the menu settles into a NotInBattle stretch.
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::NotInBattle);
-        assert_eq!(result.elapsed_frames, 7);
-
-        // On exit, the resume fade briefly reports a false `phase == 0` frame.
-        // With the anchor preserved at 0.233 this rewind is rejected, so the
-        // timer does not re-anchor to zero.
-        let result = analyze_width_with_state(&mut engine, 0, false, BattleState::OneXRunning);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.elapsed_frames, 7);
-
-        // The real phase reappears (0.467). Only the genuine 0.233 -> 0.467
-        // advance is counted (+7); the false zero must not inflate it to +14.
-        let result = analyze_width_with_state(&mut engine, 14, false, BattleState::OneXRunning);
-        assert_eq!(result.logical_frame, Some(14));
-        assert_eq!(result.elapsed_frames, 14);
-    }
-
-    #[test]
-    fn open_interior_boundary_cycle_reports_extra_frame() {
-        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
-
-        let result = advance_to_open_boundary_cycle(&mut engine);
-
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 31);
-        assert_eq!(result.elapsed_frames, 300);
-    }
-
-    #[test]
-    fn open_interior_before_boundary_is_left_closed_right_open() {
-        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
-
-        let result = analyze_width(&mut engine, 0, false);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 30);
-
-        let result = analyze_width(&mut engine, 1, false);
-        assert_eq!(result.logical_frame, Some(1));
-
-        let result = analyze_width(&mut engine, 29, false);
-        assert_eq!(result.logical_frame, Some(29));
-
-        let result = analyze_width(&mut engine, 30, false);
-        assert_eq!(result.logical_frame, None);
-        assert_eq!(result.total_frames_in_cycle, 30);
-    }
-
-    #[test]
-    fn open_interior_after_boundary_is_left_open_right_closed() {
-        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
-        advance_to_open_boundary_cycle(&mut engine);
-
-        let result = analyze_width(&mut engine, 30, false);
-        assert_eq!(result.logical_frame, Some(30));
-        assert_eq!(result.total_frames_in_cycle, 31);
-        assert_eq!(result.elapsed_frames, 330);
-
-        let result = analyze_width(&mut engine, 1, false);
-        assert_eq!(result.logical_frame, Some(0));
-        assert_eq!(result.total_frames_in_cycle, 30);
-        assert_eq!(result.elapsed_frames, 331);
-
-        let result = analyze_width(&mut engine, 2, false);
-        assert_eq!(result.logical_frame, Some(1));
-
-        let result = analyze_width(&mut engine, 29, false);
-        assert_eq!(result.logical_frame, Some(28));
-
-        let result = analyze_width(&mut engine, 30, false);
-        assert_eq!(result.logical_frame, Some(29));
-    }
-
-    #[test]
-    fn open_interior_boundary_cycle_uses_current_base_length_before_negative_multiplier() {
-        let mut engine = open_interior_engine_with_profiles(&[30], 30, 315);
-        advance_to_open_boundary_cycle(&mut engine);
-
-        let result = analyze_width(&mut engine, 15, true);
-
-        assert_eq!(result.total_frames_in_cycle, 62);
-        assert_eq!(result.logical_frame, Some(30));
-    }
-
-    #[test]
-    fn open_interior_boundary_cycle_index_comes_from_base_profile_frames() {
-        let calibration_30 = loaded_open_interior_calibration(&[30], 100, 315);
-        let calibration_60 = loaded_open_interior_calibration(&[60], 100, 315);
-        let calibration_90 = loaded_open_interior_calibration(&[90], 100, 315);
-        let calibration_38_37 = loaded_open_interior_calibration(&[38, 37], 100, 315);
-
-        assert_eq!(boundary_cycle_index(&calibration_30, 0, 315), 10);
-        assert_eq!(boundary_cycle_index(&calibration_60, 0, 315), 5);
-        assert_eq!(boundary_cycle_index(&calibration_90, 0, 315), 3);
-        assert_eq!(boundary_cycle_index(&calibration_38_37, 0, 315), 8);
-    }
-
-    fn engine_with_profiles(total_frames: &[i32]) -> Analyzer {
-        let mut engine = Analyzer::new();
-        engine.set_roi_value(TEST_ROI);
-        engine.set_loaded_calibration(loaded_open_interior_calibration(
-            total_frames,
-            10_000,
-            10_000,
-        ));
         engine
     }
 
-    fn open_interior_engine_with_profiles(
-        total_frames: &[i32],
-        total_bar_width: i32,
-        boundary_switch_frame: i32,
-    ) -> Analyzer {
-        let mut engine = Analyzer::new();
-        engine.set_roi_value(TEST_ROI);
-        engine.set_loaded_calibration(loaded_open_interior_calibration(
-            total_frames,
-            total_bar_width,
-            boundary_switch_frame,
-        ));
-        engine
+    /// The width the game renders at cycle-frame `frame` for `n_eff` frames/cost.
+    fn width_at_frame(n_eff: f64, frame: i32) -> i32 {
+        crate::analysis::synthesis::synthesized_width(
+            TEST_BAR_WIDTH,
+            TEST_BAR_WIDTH as f64,
+            n_eff,
+            frame,
+        )
     }
 
-    fn loaded_open_interior_calibration(
-        total_frames: &[i32],
-        total_bar_width: i32,
-        boundary_switch_frame: i32,
-    ) -> LoadedCalibration {
-        let profile_maps = total_frames
-            .iter()
-            .map(|total_frames| {
-                let pairs = (1..*total_frames)
-                    .map(|width| (width, width - 1))
-                    .collect::<Vec<_>>();
-                (*total_frames, pairs)
-            })
-            .collect::<Vec<_>>();
-        let borrowed_maps = profile_maps
-            .iter()
-            .map(|(frames, pairs)| (*frames, pairs.as_slice()))
-            .collect::<Vec<_>>();
-        loaded_calibration_from_maps(total_bar_width, boundary_switch_frame, &borrowed_maps)
-    }
-
-    fn loaded_calibration_from_maps(
-        total_bar_width: i32,
-        boundary_switch_frame: i32,
-        profile_maps: &[(i32, &[(i32, i32)])],
-    ) -> LoadedCalibration {
-        let profiles = profile_maps
-            .iter()
-            .map(|(total_frames, _)| ProfileData {
-                total_frames: *total_frames,
-            })
-            .collect::<Vec<_>>();
-        let tables = profile_maps
-            .iter()
-            .map(|(total_frames, pairs)| {
-                let pixel_map = pairs
-                    .iter()
-                    .map(|(width, frame)| (width.to_string(), *frame))
-                    .collect::<HashMap<_, _>>();
-                CalibrationTable::from_pixel_map(&pixel_map, *total_frames)
-            })
-            .collect::<Vec<_>>();
-
-        LoadedCalibration {
-            data: CalibrationData {
-                format_version: crate::analysis::calibration::CALIBRATION_FORMAT_VERSION,
-                profiles,
-            },
-            tables,
-            timing_model: CalibrationTimingModel::OpenInteriorV1 {
-                total_bar_width,
-                boundary_switch_frame,
-            },
-        }
-    }
-
-    fn advance_to_open_boundary_cycle(engine: &mut Analyzer) -> FrameResult {
-        let mut result = analyze_width(engine, 0, false);
-        for _ in 0..10 {
-            analyze_width(engine, 29, false);
-            result = analyze_width(engine, 0, false);
-        }
-        result
-    }
-
-    fn analyze_width(engine: &mut Analyzer, raw_width: i32, cost_is_negative: bool) -> FrameResult {
-        analyze_width_with_state(
+    fn analyze_frame_at(engine: &mut Analyzer, n_eff: f64, frame: i32, neg: bool) -> FrameResult {
+        analyze_observed(
             engine,
-            raw_width,
-            cost_is_negative,
+            width_at_frame(n_eff, frame),
+            neg,
             BattleState::OneXRunning,
         )
     }
 
-    fn analyze_width_with_state(
+    fn analyze_observed(
         engine: &mut Analyzer,
-        raw_width: i32,
-        cost_is_negative: bool,
-        battle_state: BattleState,
+        observed: i32,
+        neg: bool,
+        state: BattleState,
     ) -> FrameResult {
-        let buffer = make_bgr_frame(raw_width, cost_is_negative);
+        let buffer = make_bgr_frame(observed, neg);
         engine
             .analyze_frame_with_battle_state(
                 &buffer,
                 TEST_SCREEN_WIDTH,
                 TEST_SCREEN_HEIGHT,
                 PixelFormat::Bgr,
-                battle_state,
+                state,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn normal_cycle_tracks_frames_and_elapsed() {
+        let mut engine = engine_with_required(1.0);
+
+        let r = analyze_frame_at(&mut engine, 30.0, 0, false);
+        assert_eq!(r.logical_frame, Some(0));
+        assert_eq!(r.total_frames_in_cycle, 30);
+        assert_eq!(r.elapsed_frames, 0);
+
+        let r = analyze_frame_at(&mut engine, 30.0, 15, false);
+        assert_eq!(r.logical_frame, Some(15));
+        assert_eq!(r.elapsed_frames, 15);
+
+        let r = analyze_frame_at(&mut engine, 30.0, 29, false);
+        assert_eq!(r.logical_frame, Some(29));
+        assert_eq!(r.elapsed_frames, 29);
+
+        // Wrap into the next cycle from a late phase.
+        let r = analyze_frame_at(&mut engine, 30.0, 0, false);
+        assert_eq!(r.logical_frame, Some(0));
+        assert_eq!(r.total_frames_in_cycle, 30);
+        assert_eq!(r.elapsed_frames, 30);
+    }
+
+    #[test]
+    fn first_frame_counts_entering_frames() {
+        let mut engine = engine_with_required(1.0);
+        let r = analyze_frame_at(&mut engine, 30.0, 8, false);
+        assert_eq!(r.logical_frame, Some(8));
+        assert_eq!(r.elapsed_frames, 8);
+    }
+
+    #[test]
+    fn battle_begin_resets_elapsed() {
+        let mut engine = engine_with_required(1.0);
+        analyze_frame_at(&mut engine, 30.0, 0, false);
+        let r = analyze_frame_at(&mut engine, 30.0, 20, false);
+        assert_eq!(r.elapsed_frames, 20);
+
+        let r = analyze_observed(&mut engine, 0, false, BattleState::BattleBegin);
+        assert_eq!(r.logical_frame, None);
+        assert_eq!(r.elapsed_frames, 0);
+
+        let r = analyze_frame_at(&mut engine, 30.0, 5, false);
+        assert_eq!(r.logical_frame, Some(5));
+        assert_eq!(r.elapsed_frames, 5);
+    }
+
+    #[test]
+    fn not_in_battle_freezes_and_hides_frame() {
+        let mut engine = engine_with_required(1.0);
+        analyze_frame_at(&mut engine, 30.0, 0, false);
+        let r = analyze_frame_at(&mut engine, 30.0, 8, false);
+        assert_eq!(r.elapsed_frames, 8);
+
+        let r = analyze_observed(&mut engine, 0, false, BattleState::NotInBattle);
+        assert_eq!(r.logical_frame, None);
+        assert_eq!(r.raw_pixel_width, None);
+        assert_eq!(r.elapsed_frames, 8);
+
+        let r = analyze_frame_at(&mut engine, 30.0, 8, false);
+        assert_eq!(r.logical_frame, Some(8));
+        assert_eq!(r.elapsed_frames, 8);
+    }
+
+    #[test]
+    fn spurious_zero_mid_cycle_does_not_jump_elapsed() {
+        // D2 guard: at mid-cycle (phase ~0.5) a false 0px read must not be
+        // resolved as "advanced most of a cycle" (+~15). The wrap solution is
+        // forbidden from an early phase, so the frame is rejected and frozen.
+        let mut engine = engine_with_required(1.0);
+        analyze_frame_at(&mut engine, 30.0, 0, false);
+        let r = analyze_frame_at(&mut engine, 30.0, 15, false);
+        assert_eq!(r.elapsed_frames, 15);
+
+        let r = analyze_observed(&mut engine, 0, false, BattleState::OneXRunning);
+        assert_eq!(r.logical_frame, None, "spurious 0 must be rejected");
+        assert_eq!(r.elapsed_frames, 15, "elapsed must not jump");
+
+        // The real phase reappears; tracking resumes without inflation.
+        let r = analyze_frame_at(&mut engine, 30.0, 16, false);
+        assert_eq!(r.logical_frame, Some(16));
+        assert_eq!(r.elapsed_frames, 16);
+    }
+
+    #[test]
+    fn late_phase_wrap_is_allowed() {
+        let mut engine = engine_with_required(1.0);
+        analyze_frame_at(&mut engine, 30.0, 0, false);
+        let r = analyze_frame_at(&mut engine, 30.0, 28, false);
+        assert_eq!(r.elapsed_frames, 28);
+
+        // From phase 0.93 a drop to empty is a genuine recovery wrap.
+        let r = analyze_frame_at(&mut engine, 30.0, 0, false);
+        assert_eq!(r.logical_frame, Some(0));
+        assert_eq!(r.elapsed_frames, 30);
+    }
+
+    #[test]
+    fn negative_cost_runs_at_half_speed() {
+        let mut engine = engine_with_required(1.0);
+        // Enter negative cost near the start; the cycle now spans ~60 frames.
+        let r = analyze_frame_at(&mut engine, 60.0, 0, true);
+        assert!(r.cost_is_negative);
+        assert!(
+            (r.total_frames_in_cycle - 60).abs() <= 1,
+            "negative cycle ~60, got {}",
+            r.total_frames_in_cycle
+        );
+
+        let r = analyze_frame_at(&mut engine, 60.0, 20, true);
+        assert_eq!(r.logical_frame, Some(20));
+        assert!((r.total_frames_in_cycle - 60).abs() <= 1);
+    }
+
+    #[test]
+    fn readable_but_unmatchable_frame_is_frozen() {
+        let mut engine = engine_with_required(1.0);
+        analyze_frame_at(&mut engine, 30.0, 0, false);
+        let r = analyze_frame_at(&mut engine, 30.0, 10, false);
+        assert_eq!(r.elapsed_frames, 10);
+
+        // A width that no reachable phase renders within tolerance (a small
+        // early-phase reading, unreachable forward without crossing a boundary)
+        // is rejected; the observed width is still surfaced, the timer holds.
+        let r = analyze_observed(&mut engine, 3, false, BattleState::OneXRunning);
+        assert_eq!(r.logical_frame, None);
+        assert_eq!(r.raw_pixel_width, Some(3));
+        assert_eq!(r.elapsed_frames, 10);
+    }
+
+    #[test]
+    fn negative_transition_subframe_correction_realigns_phase() {
+        // On a cost-state transition, a ~half-frame residual (the accumulator
+        // sitting one half-speed increment ahead of the true phase, from a
+        // mis-timed transition frame) is nudged back to a clean match without
+        // changing the elapsed count.
+        let required = Fp24::required_from_ratio(1.0);
+        let half_increment = Fp24::NEGATIVE_SPEED.raw();
+        let total_bar_width = TEST_BAR_WIDTH;
+        let bar_width_frac = TEST_BAR_WIDTH as f64;
+
+        let true_phase = 0.5;
+        let observed = synthesized_width_for_phase(total_bar_width, bar_width_frac, true_phase);
+
+        // Accumulator sits half a normal frame ahead of the true phase.
+        let mut timing = Fp24CostTiming::new(required);
+        let ahead_raw = (true_phase * required.raw() as f64) as i64 + half_increment;
+        timing.nudge_accumulator_raw(ahead_raw);
+
+        let (phase, err) = phase_pixel_error(timing, observed, total_bar_width, bar_width_frac);
+        assert!(err >= 2, "expected a ~half-frame residual, got {err}px");
+        let best = ResyncOutcome {
+            timing,
+            advanced_frames: 4,
+            phase,
+            match_error_px: err,
+            boundary_corrected: false,
+        };
+
+        let corrected =
+            apply_boundary_subframe_correction(best, observed, total_bar_width, bar_width_frac);
+        assert!(
+            corrected.boundary_corrected,
+            "sub-frame correction should fire"
+        );
+        assert!(
+            corrected.match_error_px <= 1,
+            "phase realigned to ~0 error, got {}px",
+            corrected.match_error_px
+        );
+        // The correction is a pure phase re-alignment; the elapsed step is unchanged.
+        assert_eq!(corrected.advanced_frames, best.advanced_frames);
+    }
+
+    #[test]
+    fn paused_and_deploying_states_still_track() {
+        let mut engine = engine_with_required(1.0);
+        analyze_frame_at(&mut engine, 30.0, 0, false);
+        let r = analyze_observed(
+            &mut engine,
+            width_at_frame(30.0, 6),
+            false,
+            BattleState::OneXPaused,
+        );
+        assert_eq!(r.logical_frame, Some(6));
+        assert_eq!(r.elapsed_frames, 6);
+
+        let r = analyze_observed(
+            &mut engine,
+            width_at_frame(30.0, 9),
+            false,
+            BattleState::DeployingOperator,
+        );
+        assert_eq!(r.logical_frame, Some(9));
+        assert_eq!(r.elapsed_frames, 9);
     }
 
     fn make_bgr_frame(raw_width: i32, cost_is_negative: bool) -> Vec<u8> {

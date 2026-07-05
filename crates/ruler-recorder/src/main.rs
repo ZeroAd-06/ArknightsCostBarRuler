@@ -51,6 +51,7 @@ fn empty_frame_result() -> FrameResult {
         elapsed_frames: 0,
         cost_is_negative: false,
         battle_state: BattleState::NotInBattle,
+        timing_debug: None,
     }
 }
 
@@ -258,6 +259,7 @@ fn main() {
         result.elapsed_frames,
         0,
         result.battle_state,
+        result.timing_debug,
     )
     .expect("csv write failed");
 
@@ -311,6 +313,7 @@ fn main() {
             result.elapsed_frames,
             cap_us,
             result.battle_state,
+            result.timing_debug,
         ) {
             eprintln!("\nFATAL: csv write error: {e}");
             break;

@@ -300,7 +300,15 @@ impl Analyzer {
         let allow_wrap = self
             .last_accepted_phase
             .is_some_and(|phase| phase > WRAP_MIN_PREV_PHASE);
-        let is_transition = self.last_accepted_phase.is_some() && neg != self.last_cost_is_negative;
+        let transition = if self.last_accepted_phase.is_some() {
+            match (self.last_cost_is_negative, neg) {
+                (true, false) => Some(CostTransition::ExitNegative),
+                (false, true) => Some(CostTransition::EnterNegative),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let outcome = resync(
             base,
@@ -309,7 +317,7 @@ impl Analyzer {
             total_bar_width,
             bar_width_frac,
             allow_wrap,
-            is_transition,
+            transition,
         );
 
         // D5 reject gate: a readable but poorly matching frame is contaminated
@@ -430,6 +438,12 @@ struct ResyncOutcome {
     boundary_corrected: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CostTransition {
+    EnterNegative,
+    ExitNegative,
+}
+
 /// Render the bar width for `timing`'s current phase and return `|width - observed|`.
 fn phase_pixel_error(
     timing: Fp24CostTiming,
@@ -452,7 +466,7 @@ fn resync(
     total_bar_width: i32,
     bar_width_frac: f64,
     allow_wrap: bool,
-    is_transition: bool,
+    transition: Option<CostTransition>,
 ) -> ResyncOutcome {
     // One full cycle at the current speed bounds the search ("at most one cycle").
     let period = Fp24CostTiming::new(base.required())
@@ -491,8 +505,14 @@ fn resync(
         }
     }
 
-    if is_transition {
-        best = apply_boundary_subframe_correction(best, observed, total_bar_width, bar_width_frac);
+    if let Some(transition) = transition {
+        best = apply_boundary_subframe_correction(
+            best,
+            observed,
+            total_bar_width,
+            bar_width_frac,
+            transition,
+        );
     }
 
     best
@@ -508,14 +528,24 @@ fn apply_boundary_subframe_correction(
     observed: i32,
     total_bar_width: i32,
     bar_width_frac: f64,
+    transition: CostTransition,
 ) -> ResyncOutcome {
     let half_increment = Fp24::NEGATIVE_SPEED.raw();
+    // A negative->positive wrap can render 0px at 0/60, 1/60, and 2/60 alike.
+    // Prefer the 2/60 normal-grid phase so later visible widths stay 1 frame apart.
+    let preferred_tie_delta = match transition {
+        CostTransition::ExitNegative if observed == 0 => Some(half_increment),
+        CostTransition::EnterNegative => None,
+        CostTransition::ExitNegative => None,
+    };
     let mut corrected = best;
     for delta in [half_increment, -half_increment] {
         let mut nudged = best.timing;
         nudged.nudge_accumulator_raw(delta);
         let (phase, err) = phase_pixel_error(nudged, observed, total_bar_width, bar_width_frac);
-        if err < corrected.match_error_px {
+        let improves = err < corrected.match_error_px;
+        let preferred_tie = err == corrected.match_error_px && Some(delta) == preferred_tie_delta;
+        if improves || preferred_tie {
             corrected = ResyncOutcome {
                 timing: nudged,
                 advanced_frames: best.advanced_frames,
@@ -576,6 +606,25 @@ mod tests {
         state: BattleState,
     ) -> FrameResult {
         let buffer = make_bgr_frame(observed, neg);
+        engine
+            .analyze_frame_with_battle_state(
+                &buffer,
+                TEST_SCREEN_WIDTH,
+                TEST_SCREEN_HEIGHT,
+                PixelFormat::Bgr,
+                state,
+            )
+            .unwrap()
+    }
+
+    fn analyze_observed_with_roi(
+        engine: &mut Analyzer,
+        observed: i32,
+        neg: bool,
+        state: BattleState,
+        roi: Roi,
+    ) -> FrameResult {
+        let buffer = make_bgr_frame_with_roi(observed, neg, roi);
         engine
             .analyze_frame_with_battle_state(
                 &buffer,
@@ -747,8 +796,13 @@ mod tests {
             boundary_corrected: false,
         };
 
-        let corrected =
-            apply_boundary_subframe_correction(best, observed, total_bar_width, bar_width_frac);
+        let corrected = apply_boundary_subframe_correction(
+            best,
+            observed,
+            total_bar_width,
+            bar_width_frac,
+            CostTransition::EnterNegative,
+        );
         assert!(
             corrected.boundary_corrected,
             "sub-frame correction should fire"
@@ -760,6 +814,52 @@ mod tests {
         );
         // The correction is a pure phase re-alignment; the elapsed step is unchanged.
         assert_eq!(corrected.advanced_frames, best.advanced_frames);
+    }
+
+    #[test]
+    fn exiting_negative_cost_keeps_positive_frames_one_by_one() {
+        let log_roi: Roi = (200, 320, 400);
+        let mut engine = engine_with_required(1.0);
+        engine.set_roi_value(log_roi);
+
+        let r =
+            analyze_observed_with_roi(&mut engine, 117, true, BattleState::OneXRunning, log_roi);
+        assert_eq!(r.logical_frame, Some(58));
+
+        let r =
+            analyze_observed_with_roi(&mut engine, 119, true, BattleState::OneXRunning, log_roi);
+        assert_eq!(r.logical_frame, Some(59));
+
+        let r = analyze_observed_with_roi(&mut engine, 0, false, BattleState::OneXRunning, log_roi);
+        assert_eq!(r.logical_frame, Some(0));
+        let debug = r.timing_debug.unwrap();
+        assert_eq!(debug.advanced_frames, 1);
+        assert!(
+            debug.boundary_corrected,
+            "exit frame should resolve the zero-width half-frame tie"
+        );
+
+        let mut previous_elapsed = r.elapsed_frames;
+        for observed in [5, 9, 13, 17, 21, 25, 30, 34, 38] {
+            let r = analyze_observed_with_roi(
+                &mut engine,
+                observed,
+                false,
+                BattleState::OneXRunning,
+                log_roi,
+            );
+            let debug = r.timing_debug.unwrap();
+            assert_eq!(
+                debug.advanced_frames, 1,
+                "observed width {observed} should advance exactly one logical frame"
+            );
+            assert_eq!(
+                r.elapsed_frames,
+                previous_elapsed + 1,
+                "observed width {observed} should not skip elapsed frames"
+            );
+            previous_elapsed = r.elapsed_frames;
+        }
     }
 
     #[test]
@@ -786,15 +886,19 @@ mod tests {
     }
 
     fn make_bgr_frame(raw_width: i32, cost_is_negative: bool) -> Vec<u8> {
+        make_bgr_frame_with_roi(raw_width, cost_is_negative, TEST_ROI)
+    }
+
+    fn make_bgr_frame_with_roi(raw_width: i32, cost_is_negative: bool, roi: Roi) -> Vec<u8> {
         let mut buffer = vec![30u8; (TEST_SCREEN_WIDTH * TEST_SCREEN_HEIGHT * 3) as usize];
-        let filled_width = raw_width.clamp(0, TEST_ROI.1 - TEST_ROI.0);
-        for x in TEST_ROI.0..(TEST_ROI.0 + filled_width) {
+        let filled_width = raw_width.clamp(0, roi.1 - roi.0);
+        for x in roi.0..(roi.0 + filled_width) {
             put_bgr_screen_pixel(
                 &mut buffer,
                 TEST_SCREEN_WIDTH,
                 TEST_SCREEN_HEIGHT,
                 x,
-                TEST_ROI.2,
+                roi.2,
                 [252, 252, 252],
             );
         }

@@ -1,17 +1,16 @@
 //! Debug recorder — background capture of video + analysis data for debugging.
 //!
-//! Controlled exclusively via config.json (no UI).  When `debug_recording_enabled`
-//! is true, the worker thread pipes every captured frame through ffmpeg to a
-//! session-local lossless HEVC MKV file and/or logs analysis results to a CSV file.
+//! Controlled exclusively via config.json (no UI). When `debug_recording_enabled`
+//! is true, the worker thread writes session-local debug artifacts: raw capture
+//! video through a Layer 1 consumer and analysis rows from the Layer 2 analyzer.
 //!
 //! Both outputs are written to `{session_dir}/capture.mkv` and
 //! `{session_dir}/analysis.csv` respectively.
 //!
-//! In the three-layer architecture, [`DebugRecorderConsumer`] wraps a
-//! pipeline `ConsumerPipe` (InOrder policy) + `DebugRecorder` and runs a
-//! dedicated thread that receives every captured frame from Layer 1 and
-//! records it. This decouples recording from the analysis layer (which uses
-//! SkipToLatest and may drop intermediate frames).
+//! In the three-layer architecture, [`DebugRecorderConsumer`] wraps a pipeline
+//! `ConsumerPipe` (InOrder policy) and records raw frames only. Analysis CSV
+//! rows are written by the analyzer path, which uses SkipToLatest and may drop
+//! intermediate frames.
 
 use std::{
     fs,
@@ -230,6 +229,25 @@ impl Drop for FfmpegPipe {
 // DebugRecorder — public API
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DebugRecordingPlan {
+    pub raw_video: bool,
+    pub analysis_csv: bool,
+}
+
+impl DebugRecordingPlan {
+    pub fn from_config(enabled: bool, record_video: bool, record_csv: bool) -> Self {
+        Self {
+            raw_video: enabled && record_video,
+            analysis_csv: enabled && record_csv,
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.raw_video || self.analysis_csv
+    }
+}
+
 /// Records video + analysis data for debugging.  Controlled via config.json.
 pub struct DebugRecorder {
     ffmpeg: Option<FfmpegPipe>,
@@ -328,15 +346,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct DebugRecorderConfig {
     pub output_dir: PathBuf,
     pub record_video: bool,
-    pub record_csv: bool,
     pub width: u32,
     pub height: u32,
     pub format: PixelFormat,
 }
 
-/// A Layer 1 consumer that records every captured frame to video (and
-/// optionally CSV). Runs on its own thread; shutting down the pipeline or
-/// dropping this struct stops the thread.
+/// A Layer 1 consumer that records every captured frame to video. Runs on its
+/// own thread; shutting down the pipeline or dropping this struct stops the
+/// thread.
 ///
 /// Note: in the three-layer architecture, the analysis CSV records only the
 /// frames that the L2 analyzer actually processed (SkipToLatest may skip
@@ -354,7 +371,7 @@ impl DebugRecorderConsumer {
         let recorder = DebugRecorder::start(
             &config.output_dir,
             config.record_video,
-            config.record_csv,
+            false,
             config.width,
             config.height,
             config.format,
@@ -368,9 +385,8 @@ impl DebugRecorderConsumer {
             .spawn(move || {
                 let mut recorder = recorder;
                 log::info!(
-                    "debug recorder consumer started: video={}, csv={}",
-                    config.record_video,
-                    config.record_csv
+                    "debug recorder consumer started: video={}",
+                    config.record_video
                 );
                 while running_clone.load(Ordering::Relaxed) {
                     match pipe.recv_frame() {
@@ -404,5 +420,98 @@ impl Drop for DebugRecorderConsumer {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use ruler_core::{BattleState, TimingDebug};
+
+    use super::*;
+
+    fn temp_debug_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ruler-debug-recorder-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp debug dir");
+        dir
+    }
+
+    #[test]
+    fn debug_recording_plan_splits_csv_from_raw_video() {
+        assert_eq!(
+            DebugRecordingPlan::from_config(false, true, true),
+            DebugRecordingPlan {
+                raw_video: false,
+                analysis_csv: false,
+            }
+        );
+        assert_eq!(
+            DebugRecordingPlan::from_config(true, true, false),
+            DebugRecordingPlan {
+                raw_video: true,
+                analysis_csv: false,
+            }
+        );
+        assert_eq!(
+            DebugRecordingPlan::from_config(true, false, true),
+            DebugRecordingPlan {
+                raw_video: false,
+                analysis_csv: true,
+            }
+        );
+        assert_eq!(
+            DebugRecordingPlan::from_config(true, true, true),
+            DebugRecordingPlan {
+                raw_video: true,
+                analysis_csv: true,
+            }
+        );
+    }
+
+    #[test]
+    fn debug_recorder_writes_analysis_rows() {
+        let dir = temp_debug_dir("analysis-rows");
+        let mut recorder =
+            DebugRecorder::start(&dir, false, true, 1, 1, PixelFormat::Rgba).unwrap();
+        let result = FrameResult {
+            logical_frame: Some(3),
+            total_frames_in_cycle: 30,
+            raw_pixel_width: Some(12),
+            elapsed_frames: 123,
+            cost_is_negative: false,
+            battle_state: BattleState::OneXRunning,
+            timing_debug: Some(TimingDebug {
+                required_fp: 0,
+                speed_fp: 0,
+                accumulator_fp: 100,
+                advanced_frames: 2,
+                frames_since_cycle_start: 0,
+                frames_until_next_cost: 3,
+                match_error_px: 4,
+                boundary_corrected: true,
+            }),
+        };
+
+        recorder.record_analysis_row(&result, 456);
+        drop(recorder);
+
+        let csv = fs::read_to_string(dir.join("analysis.csv")).unwrap();
+        let lines: Vec<_> = csv.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("frame_index,timestamp_ms,raw_pixel_width"));
+        assert!(lines[1].ends_with(",12,3,30,0,123,456,0.100000,1x_running,2,100,3,4,1"));
+
+        fs::remove_dir_all(dir).ok();
     }
 }
